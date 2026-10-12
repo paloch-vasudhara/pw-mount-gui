@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Telescope Pointer Mockup</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="styles.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <h1>Telescope Pointer <span class="tag">mockup</span></h1>
+    </div>
+    <div class="meta">
+      <span>L-350 · RASA 11</span>
+      <span>Site 13°N 100°E</span>
+      <span>Source: <b>simulated</b></span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="stage">
+      <div id="viewport" aria-label="3D telescope pointing view"></div>
+      <div class="legend" aria-hidden="true">
+        <span><i class="dot scope"></i>Pointing</span>
+        <span><i class="dot ring"></i>Target</span>
+        <span><i class="dot sun"></i>Sun · 10° keep-out</span>
+        <span><i class="dot moon"></i>Moon</span>
+      </div>
+      <div class="stage-bar">
+        <div class="seg" role="group" aria-label="Camera view">
+          <button data-view="overview">Overview</button>
+          <button data-view="mount">Mount</button>
+        </div>
+        <div class="seg" role="group" aria-label="Simulated slew rate">
+          <span class="seg-label">Slew</span>
+          <button data-slew="slow" aria-pressed="false">5°/s</button>
+          <button data-slew="normal" aria-pressed="true">12°/s</button>
+          <button data-slew="fast" aria-pressed="false">30°/s</button>
+        </div>
+        <div class="frames" title="Frames rendered — should stay still when nothing changes">frames <b id="frames">0</b></div>
+      </div>
+    </section>
+
+    <aside id="controls" class="panel" aria-label="Mock inputs"></aside>
+  </main>
+
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>
