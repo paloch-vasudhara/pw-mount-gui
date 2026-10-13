@@ -13,6 +13,19 @@ export function domePoint(altDeg, azDeg, scale = 1, out = new THREE.Vector3()) {
   return out.set(x, y, z).multiplyScalar(DOME_RADIUS * scale).add(DOME_CENTER);
 }
 
+const _n = new THREE.Vector3(), _v = new THREE.Vector3();
+
+/**
+ * 1 for a dome point on the near side as seen from cameraPos, 0 on the far side, smooth
+ * across the limb. Always 1 with the camera inside the dome (no near/far there).
+ */
+export function nearSideFactor(pos, cameraPos) {
+  if (cameraPos.distanceTo(DOME_CENTER) < DOME_RADIUS) return 1;
+  _n.subVectors(pos, DOME_CENTER).normalize();
+  _v.subVectors(cameraPos, pos).normalize();
+  return THREE.MathUtils.smoothstep(_n.dot(_v), -0.12, 0.12);
+}
+
 function makeLabel(text, color) {
   const c = document.createElement('canvas');
   c.width = c.height = 128;

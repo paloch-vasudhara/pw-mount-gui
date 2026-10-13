@@ -98,7 +98,6 @@ function updateView(dt) {
   if (!settling) { disp.az = m.az; disp.alt = m.alt; }
 
   mount.setPose(disp.alt, disp.az);
-  celestial.update(data, camera.position);
   const tgt = { alt: m.targetAlt, az: m.targetAz };
   const sunDisp = angularSep(disp.alt, disp.az, data.sun.alt, data.sun.az);
   pointer.update(mount.apertureWorld(), disp, tgt, {
@@ -135,6 +134,7 @@ function frame(t) {
     if (!tweenActive) tween = null;
   }
   const ctlActive = controls.update();
+  celestial.update(store.data, camera.position);   // after the camera moves: depth cue + moon limb
 
   renderer.render(scene, camera);
   frameCounter.textContent = String(++frames);

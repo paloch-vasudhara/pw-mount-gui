@@ -1,9 +1,10 @@
 // Sun (with keep-out cap) and Moon (phase-shaded from the sun direction).
+// Bodies on the far side of the dome are dimmed so they read as behind, not in front.
 
 import * as THREE from 'three';
 import { altAzToDir } from '../coords.js';
-import { COLORS, DOME_RADIUS, SUN_KEEPOUT_DEG, ALT_AXIS_HEIGHT } from '../config.js';
-import { DOME_CENTER, domePoint } from './hemisphere.js';
+import { COLORS, DOME_RADIUS, FAR_SIDE_DIM, SUN_KEEPOUT_DEG, ALT_AXIS_HEIGHT } from '../config.js';
+import { DOME_CENTER, domePoint, nearSideFactor } from './hemisphere.js';
 
 // Clip anything below the horizon plane (y >= alt-axis height is kept).
 export const ABOVE_HORIZON = new THREE.Plane(new THREE.Vector3(0, 1, 0), -ALT_AXIS_HEIGHT);
@@ -33,8 +34,9 @@ const glowSprite = (rgb, size) => {
 
 function createSun() {
   const group = new THREE.Group();
-  group.add(new THREE.Mesh(new THREE.SphereGeometry(3.4, 32, 16), new THREE.MeshBasicMaterial({ color: COLORS.sun })));
-  group.add(glowSprite('255,205,90', 26));
+  const coreMat = new THREE.MeshBasicMaterial({ color: COLORS.sun });
+  const glow = glowSprite('255,205,90', 26);
+  group.add(new THREE.Mesh(new THREE.SphereGeometry(3.4, 32, 16), coreMat), glow);
 
   // Keep-out cap: spherical cap around +Y, re-oriented to the sun direction.
   const capAngle = SUN_KEEPOUT_DEG * Math.PI / 180;
@@ -56,7 +58,9 @@ function createSun() {
   zone.add(cap, ring);
   zone.position.copy(DOME_CENTER);
 
-  return { body: group, zone };
+  const base = new THREE.Color(COLORS.sun);
+  const setBrightness = (b, g) => { coreMat.color.copy(base).multiplyScalar(b); glow.material.opacity = g; };
+  return { body: group, zone, setBrightness };
 }
 
 function createMoon() {
@@ -65,6 +69,7 @@ function createMoon() {
       sunDir: { value: new THREE.Vector3(0, 1, 0) },
       lit: { value: new THREE.Color(COLORS.moonLit) },
       dark: { value: new THREE.Color(COLORS.moonDark) },
+      brightness: { value: 1 },
     },
     vertexShader: /* glsl */`
       varying vec3 vN;
@@ -73,18 +78,19 @@ function createMoon() {
         gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
       }`,
     fragmentShader: /* glsl */`
-      uniform vec3 sunDir; uniform vec3 lit; uniform vec3 dark;
+      uniform vec3 sunDir; uniform vec3 lit; uniform vec3 dark; uniform float brightness;
       varying vec3 vN;
       void main() {
         float k = smoothstep(-0.06, 0.06, dot(normalize(vN), sunDir));
-        gl_FragColor = vec4(mix(dark, lit, k), 1.0);
+        gl_FragColor = vec4(mix(dark, lit, k) * brightness, 1.0);
         #include <colorspace_fragment>
       }`,
   });
   const group = new THREE.Group();
-  group.add(new THREE.Mesh(new THREE.SphereGeometry(3.6, 48, 24), mat));
-  group.add(glowSprite('200,215,240', 16));
-  return { body: group, material: mat };
+  const glow = glowSprite('200,215,240', 16);
+  group.add(new THREE.Mesh(new THREE.SphereGeometry(3.6, 48, 24), mat), glow);
+  const setBrightness = (b, g) => { mat.uniforms.brightness.value = b; glow.material.opacity = g; };
+  return { body: group, material: mat, setBrightness };
 }
 
 export function createCelestial() {
@@ -94,28 +100,44 @@ export function createCelestial() {
   object.add(sun.body, sun.zone, moon.body);
 
   const up = new THREE.Vector3(0, 1, 0);
-  const dir = new THREE.Vector3();
-  const toObserver = new THREE.Vector3(), toCamera = new THREE.Vector3();
-  const q = new THREE.Quaternion();
+  const dir = new THREE.Vector3(), moonDir = new THREE.Vector3();
+  const toCamera = new THREE.Vector3(), towardSun = new THREE.Vector3();
+  const lastTowardSun = new THREE.Vector3(0, 1, 0);
+
+  const depthCue = (body, cameraPos) => {
+    const near = nearSideFactor(body.body.position, cameraPos);
+    body.setBrightness(THREE.MathUtils.lerp(FAR_SIDE_DIM.body, 1, near), THREE.MathUtils.lerp(FAR_SIDE_DIM.glow, 1, near));
+  };
 
   return {
     object,
-    /** Update from store data; cameraPos keeps the moon's phase as seen by the observer. */
+    /** Update from store data; cameraPos drives the far-side dimming and the moon's limb direction. */
     update({ sun: s, moon: m }, cameraPos) {
       sun.body.visible = s.alt > 0;
       domePoint(s.alt, s.az, 0.975, sun.body.position);
       dir.set(...altAzToDir(s.alt, s.az));
       sun.zone.quaternion.setFromUnitVectors(up, dir);
       sun.zone.visible = s.alt > -SUN_KEEPOUT_DEG;   // cap may reach above horizon before sunrise
+      depthCue(sun, cameraPos);
 
       moon.body.visible = m.alt > 0;
       domePoint(m.alt, m.az, 0.975, moon.body.position);
-      // Lit as seen from the dome centre: rotate the sun direction by the turn that maps
-      // the moon->observer ray onto the moon->camera ray, so any orbit angle shows the true phase.
-      toObserver.subVectors(DOME_CENTER, moon.body.position).normalize();
+      depthCue(moon, cameraPos);
+      // Phase amount is the observer's (phase angle = 180° - elongation); the lit limb points
+      // along the sky arc to the sun: the great-circle tangent at the moon, projected across the view ray.
+      moonDir.set(...altAzToDir(m.alt, m.az));
+      const cosPhase = THREE.MathUtils.clamp(-dir.dot(moonDir), -1, 1);
       toCamera.subVectors(cameraPos, moon.body.position).normalize();
-      q.setFromUnitVectors(toObserver, toCamera);
-      moon.material.uniforms.sunDir.value.copy(dir).applyQuaternion(q);
+      towardSun.copy(dir).addScaledVector(moonDir, -dir.dot(moonDir));
+      towardSun.addScaledVector(toCamera, -towardSun.dot(toCamera));
+      if (towardSun.lengthSq() < 1e-8) {           // sun dead behind/in front: keep last limb direction
+        towardSun.copy(lastTowardSun).addScaledVector(toCamera, -lastTowardSun.dot(toCamera));
+        if (towardSun.lengthSq() < 1e-8) towardSun.set(0, 1, 0).addScaledVector(toCamera, -toCamera.y);
+      }
+      towardSun.normalize();
+      lastTowardSun.copy(towardSun);
+      moon.material.uniforms.sunDir.value.copy(toCamera).multiplyScalar(cosPhase)
+        .addScaledVector(towardSun, Math.sqrt(1 - cosPhase * cosPhase));
     },
   };
 }

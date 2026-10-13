@@ -18,6 +18,10 @@ export const SLEW_ACCEL = 10;                                    // deg/s² per 
 // Display smoothing applied to *reported* positions (meaningful once PWI4 polls at a few Hz).
 export const DISPLAY_TAU = 0.08;  // seconds
 
+// Far-side depth cue for dome bodies (camera outside the dome): brightness of the body
+// and of its additive glow at full far side; blended smoothly across the dome limb.
+export const FAR_SIDE_DIM = { body: 0.45, glow: 0.25 };
+
 export const COLORS = {
   scope: 0x5cc8ff,
   scopeTarget: 0x9fe0ff,
