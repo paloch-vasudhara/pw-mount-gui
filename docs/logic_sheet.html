@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mount Control Logic Sheet</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=Barlow+Semi+Condensed:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #f6f7f9; --surface: #ffffff; --surface-2: #f0f2f5; --line: #dde1e7;
+  --text: #1b1f27; --muted: #5d6676; --accent: #2f8a4a; --accent-soft: #e4f3e8;
+  --warn: #b4232c; --warn-soft: #fbe9ea; --info: #1f6fb2; --info-soft: #e5f0fa;
+  --code: #eef1f5;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #1e2126; --surface: #25292f; --surface-2: #2c3138; --line: #3a4049;
+    --text: #e6e9ee; --muted: #9aa3b0; --accent: #5fbf78; --accent-soft: #24382b;
+    --warn: #ff7a7f; --warn-soft: #3d2628; --info: #6fb3ee; --info-soft: #1f3142; --code: #2f343c;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #1e2126; --surface: #25292f; --surface-2: #2c3138; --line: #3a4049;
+  --text: #e6e9ee; --muted: #9aa3b0; --accent: #5fbf78; --accent-soft: #24382b;
+  --warn: #ff7a7f; --warn-soft: #3d2628; --info: #6fb3ee; --info-soft: #1f3142; --code: #2f343c;
+}
+* { box-sizing: border-box; }
+html { scroll-padding-top: 16px; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 15.5px/1.55 "Barlow", "Bahnschrift", system-ui, sans-serif; }
+.wrap { display: grid; grid-template-columns: 240px minmax(0, 1fr); max-width: 1240px; margin: 0 auto; gap: 32px; padding: 24px 16px 64px; }
+nav { position: sticky; top: 16px; align-self: start; max-height: calc(100vh - 32px); overflow: auto; font-size: 14px; }
+nav h2 { font: 600 12px "Barlow Semi Condensed", sans-serif; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 16px 0 6px; }
+nav a { display: block; color: var(--text); text-decoration: none; padding: 3px 8px; border-left: 2px solid transparent; }
+nav a:hover { border-left-color: var(--accent); background: var(--surface-2); }
+nav a.sub { padding-left: 20px; color: var(--muted); }
+header.top { margin-bottom: 8px; }
+h1 { font: 700 30px/1.2 "Barlow Semi Condensed", sans-serif; letter-spacing: .02em; margin: 0 0 6px; }
+.meta { color: var(--muted); font-size: 14px; }
+.meta a { color: var(--info); }
+section { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 20px 24px; margin-top: 20px; }
+section > h2 { font: 700 20px "Barlow Semi Condensed", sans-serif; letter-spacing: .03em; margin: 0 0 4px; display: flex; gap: 10px; align-items: baseline; }
+h3 { font: 600 17px "Barlow Semi Condensed", sans-serif; margin: 22px 0 6px; padding-top: 14px; border-top: 1px dashed var(--line); display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+h4 { font: 600 15px "Barlow", sans-serif; margin: 14px 0 4px; }
+.id { font: 600 12px "Barlow Semi Condensed", sans-serif; color: var(--accent); background: var(--accent-soft); padding: 1px 7px; border-radius: 4px; letter-spacing: .05em; }
+.ref { font-size: 12.5px; color: var(--muted); font-weight: 500; }
+p { margin: 6px 0; }
+ul, ol { margin: 6px 0; padding-left: 22px; }
+li { margin: 2px 0; }
+code, .mono { font-family: Consolas, "Cascadia Mono", ui-monospace, monospace; font-size: 13px; background: var(--code); padding: 1px 5px; border-radius: 4px; }
+table { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 14.5px; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font: 600 12.5px "Barlow Semi Condensed", sans-serif; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); background: var(--surface-2); }
+.callout { border-left: 3px solid var(--info); background: var(--info-soft); padding: 8px 12px; border-radius: 0 6px 6px 0; margin: 10px 0; }
+.callout.warn { border-left-color: var(--warn); background: var(--warn-soft); }
+.callout.ok { border-left-color: var(--accent); background: var(--accent-soft); }
+.chip { display: inline-block; font: 600 12px "Barlow Semi Condensed", sans-serif; letter-spacing: .05em; padding: 1px 8px; border-radius: 999px; border: 1px solid currentColor; margin: 1px 2px; }
+.chip.g { color: var(--accent); } .chip.r { color: var(--warn); } .chip.b { color: var(--info); } .chip.m { color: var(--muted); }
+.card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; background: var(--surface-2); margin: 8px 0; font-size: 14.5px; }
+.card .t { font-weight: 600; }
+.card .row { display: grid; grid-template-columns: 140px 1fr; gap: 8px; }
+.btnbar { font: 600 13px "Barlow Semi Condensed", sans-serif; letter-spacing: .06em; display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; margin: 2px 0; }
+.btnbar span { padding: 3px 12px; }
+.btnbar .on { color: var(--accent); background: var(--accent-soft); outline: 1px solid var(--accent); }
+.flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 6px 0; }
+.flow span { background: var(--surface-2); border: 1px solid var(--line); border-radius: 6px; padding: 2px 10px; font-size: 14px; }
+.flow i { color: var(--muted); font-style: normal; }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+footer { color: var(--muted); font-size: 13px; margin-top: 28px; }
+@media (max-width: 880px) {
+  .wrap { grid-template-columns: 1fr; gap: 0; }
+  nav { position: static; max-height: none; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+  .two { grid-template-columns: 1fr; }
+  section { padding: 16px; }
+  .card .row { grid-template-columns: 120px 1fr; }
+  table { display: block; overflow-x: auto; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<nav aria-label="Contents">
+  <h2>Global</h2>
+  <a href="#g">G · Global rules</a>
+  <h2>Dashboard</h2>
+  <a href="#a1">A1 · Track Info</a>
+  <a class="sub" href="#a1d">Tracking workflow</a>
+  <a class="sub" href="#a1e">Card states</a>
+  <a href="#a2">A2 · Filters &amp; Tools</a>
+  <a class="sub" href="#pass">Pass Analysis</a>
+  <a class="sub" href="#iod">IOD</a>
+  <a class="sub" href="#astro">Astrometry</a>
+  <a class="sub" href="#settings">Station Settings</a>
+  <a href="#a3">A3 · Sky Viewer</a>
+  <a href="#a4">A4 · Mount Status</a>
+  <a href="#a5">A5 · Mount Control</a>
+  <a class="sub" href="#a5a">Connection</a>
+  <a class="sub" href="#a5b">Pointing mode</a>
+  <a class="sub" href="#track-target">Track Target</a>
+  <a class="sub" href="#jog">Jog</a>
+  <a class="sub" href="#goto">Go To</a>
+  <h2>Shared</h2>
+  <a href="#h">H · Helpers</a>
+  <a href="#scope">Formatting &amp; scope</a>
+</nav>
+
+<main>
+<header class="top">
+  <h1>Mount Control — Logic Sheet</h1>
+  <div class="meta">Rev 2 · 2026-10-19 · consolidates review decisions C1–C8, M1–M10, Q1–Q10, N0–N7, U1–U3.
+  Plain-text source: <a href="logic_sheet.txt">logic_sheet.txt</a> · Build plan: <a href="BUILD_PLAN.md">BUILD_PLAN.md</a> · Rev 1: <a href="archive/logic_sheet_rev1.txt">archive</a></div>
+</header>
+
+<!-- ============================ G ============================ -->
+<section id="g">
+  <h2><span class="id">G</span> Global rules</h2>
+  <p>Apply app-wide and are <b>enforced by the mount gateway</b>, regardless of UI state.</p>
+
+  <table>
+    <tr><th style="width:70px">ID</th><th>Rule</th></tr>
+    <tr><td><span class="id">G1</span></td><td><b>Limits.</b> Lim EL = station limiting elevation (Settings › Hardware), 0–90°, <b>default 15°</b>. Sun keep-out = <b>15° disc</b> (fixed; OTA FOV ≈ 3°). Sun distance is "safe" when &gt; 15°.</td></tr>
+    <tr><td><span class="id">G2</span></td><td><b>Sun check runs continuously</b> in every mode — slew, goto, jog/step, sidereal track, object track and pre-position wait. If a planned path crosses the disc, the operation is re-routed around it to the other side of the path via a generated custom path (planner design <span class="id">D-SUN</span>).</td></tr>
+    <tr><td><span class="id">G3</span></td><td><b>Limit reached</b> (Lim EL or Sun disc, any mode) → mount becomes <span class="chip m">STOPPED</span> and any operation that would push past the limit is disabled. <i>Exception:</i> starting a Track Object workflow may pre-position while the object is between 0° and Lim EL (<a href="#a1d">A1d</a>).</td></tr>
+    <tr><td><span class="id">G4</span></td><td><b>Disconnection = stop.</b> If the app loses its link to the gateway, the gateway stops the mount immediately (slews, jogs, tracks). After reconnection the mount stays STOPPED; nothing resumes automatically.</td></tr>
+    <tr><td><span class="id">G5</span></td><td>One object may be tracked at a time.</td></tr>
+    <tr><td><span class="id">G6</span></td><td>Live data only — decayed objects are excluded from every search, list and viewer.</td></tr>
+    <tr><td><span class="id">G7</span></td><td>Every disabled control or refused command reports its reason on the relevant status line (e.g. "below station limit elevation", "within 15° of the Sun", "PWI4 not running").</td></tr>
+    <tr><td><span class="id">G8</span></td><td><b>Mount states:</b>
+      <span class="chip m">STOPPED</span>
+      <span class="chip b">SLEWING</span> <span class="ref">incl. jog/step</span>
+      <span class="chip g">TRACKING</span> <span class="ref">incl. pre-position wait</span>
+      <span class="chip b">HOMING</span>
+      <span class="chip b">BUSY</span> <span class="ref">connect/disconnect sequence</span>
+      <span class="chip r">FAULT</span>
+      <span class="chip m">DISCONNECTED</span> <span class="ref">incl. PWI4 not running</span></td></tr>
+  </table>
+  <div class="callout warn"><b>Known limit (G4):</b> if the gateway process itself dies, nothing can send the stop. The app shows a warning that hands the user off to PWI4 (which stays open) to stop the operation there.</div>
+</section>
+
+<!-- ============================ A1 ============================ -->
+<section id="a1">
+  <h2><span class="id">A1</span> Track Info</h2>
+  <p>Shows the object selected in the Sky Viewer, or the object currently being tracked. <span class="ref">Ref: Track Cards.png</span></p>
+
+  <div class="two">
+    <div>
+      <h4>A1a · Satellite card</h4>
+      <div class="card">
+        <div class="t">🛰 Satellite name [flag]</div>
+        <div class="ref">Int'l designator (NORAD) · colour-coded type chip</div>
+        <hr style="border:0;border-top:1px solid var(--line)">
+        <div class="row"><span>Azimuth</span><span class="mono">.2f°</span></div>
+        <div class="row"><span>Elevation</span><span class="mono">±.2f°</span></div>
+        <div class="row"><span>Range</span><span class="mono">.0f km</span></div>
+        <div class="row"><span>Illumination</span><span>● Illuminated / ● Umbra · Below Horizon</span></div>
+        <div style="margin-top:6px"><span class="chip g">TRACK OBJECT</span></div>
+      </div>
+      <p>Values refresh at 1 Hz.</p>
+    </div>
+    <div>
+      <h4>A1b · Aircraft card <span class="chip m">DISABLED</span></h4>
+      <div class="card">
+        <div class="t">✈ Flight ID</div>
+        <hr style="border:0;border-top:1px solid var(--line)">
+        <div class="row"><span>Latitude</span><span class="mono">N/S .5f°</span></div>
+        <div class="row"><span>Longitude</span><span class="mono">E/W .5f°</span></div>
+        <div class="row"><span>Altitude</span><span class="mono">.0f ft</span></div>
+        <div class="row"><span>Range</span><span class="mono">.3f km</span></div>
+        <div style="margin-top:6px"><span class="chip m">TRACK OBJECT</span></div>
+      </div>
+      <p>Placeholder until the ADS-B format is confirmed; UI present but disabled ("No ADS-B source configured").</p>
+    </div>
+  </div>
+
+  <h4>TRACK OBJECT button is active when ALL hold</h4>
+  <ul>
+    <li>the object is above the actual horizon (0°);</li>
+    <li>its current pass rises above Lim EL (not a pass that peaks below Lim EL, not an object already setting below Lim EL);</li>
+    <li>it is not within 15° of the Sun.</li>
+  </ul>
+  <p>Otherwise disabled, with the reason shown. <b>A1c:</b> with nothing selected the section shows "No object selected".</p>
+
+  <h3 id="a1d"><span class="id">A1d</span> Object tracking workflow <span class="ref">run by the gateway</span></h3>
+  <ol>
+    <li>Check the pass: above 0°, reaches above Lim EL; Sun check (G2).</li>
+    <li>If still below Lim EL: compute the Lim EL crossing point, slew there and <b>wait</b> — status <span class="chip g">TRACKING</span>, card shows a countdown.</li>
+    <li>At the crossing time, hand the object to PWI4 (<code>follow_tle</code> for satellites; custom path for aircraft).</li>
+    <li>End of path: tracking stops at Lim EL (G3); mount becomes <span class="chip m">STOPPED</span>.</li>
+  </ol>
+  <p>Can be started from: the Track Info card · Track Target modal (satellite) · Pass Analysis <b>[Track]</b>.</p>
+
+  <h3 id="a1e"><span class="id">A1e</span> Card states and stacking</h3>
+  <table>
+    <tr><th>Situation</th><th>Behaviour</th></tr>
+    <tr><td>Object is tracked</td><td>Card pinned to Track Info; button disabled, labelled <b>TRACKING</b>; its ✕ is hidden. End the track with STOP (A5b).</td></tr>
+    <tr><td>Tracking A, user selects B</td><td>B's card shows over A's.</td></tr>
+    <tr><td>… B assigned tracking</td><td>B becomes the tracked object; A's card closes.</td></tr>
+    <tr><td>… B closed / deselected</td><td>B's card closes; A's card remains.</td></tr>
+    <tr><td>Click A's card</td><td>Re-focuses the Sky Viewer selection on A.</td></tr>
+    <tr><td>Any tracking command</td><td>Brings up the tracked object's card.</td></tr>
+    <tr><td>Track ends (STOP, limit, Goto, Home, sidereal TRACK)</td><td>Card stays but is downgraded to a normal selected-object card; dropped if another object is selected at that moment.</td></tr>
+  </table>
+</section>
+
+<!-- ============================ A2 ============================ -->
+<section id="a2">
+  <h2><span class="id">A2</span> Filters &amp; Tools</h2>
+  <h4>A2a · Visibility filters (Sky Viewer)</h4>
+  <p>Three trees: Satellites, Aircrafts, Celestial Objects. Unchecking a parent keeps the children's checks but hides all children.</p>
+  <table>
+    <tr><th>Filter</th><th>Includes</th></tr>
+    <tr><td>Low Earth Satellites</td><td>LEO, SSO</td></tr>
+    <tr><td>Medium Earth Satellites</td><td>MEO</td></tr>
+    <tr><td>Geosynchronous Satellites</td><td>GEO (database class; includes HEO)</td></tr>
+    <tr><td>Aircrafts</td><td><span class="chip m">DISABLED</span> until ADS-B is confirmed</td></tr>
+    <tr><td>Planetary Bodies</td><td>Sun, Moon — non-selectable (name kept for later bodies)</td></tr>
+    <tr><td>Stars</td><td>Background stars, no labels, non-selectable — HIP catalogue (<code>data/hip_main.txt</code>) pre-filtered to a magnitude limit (start V ≤ 6.5, adjustable)</td></tr>
+  </table>
+  <p><b>A2b · Tools</b> — each button opens its modal:</p>
+
+  <h3 id="pass"><span class="id">A2b-i</span> Satellite Pass Analysis <span class="ref">Pass Analysis.png</span></h3>
+  <ul>
+    <li>Station fixed to the Settings location; limiting elevation = Lim EL. Interval is start–end (H1).</li>
+    <li>Mode <span class="btnbar"><span class="on">OPTICAL</span><span>LINE OF SIGHT</span></span> — Optical lists <b>Visible Duration</b> (actually visible: above Lim EL, illuminated, <b>and the Sun below the horizon</b> at the observer); LOS lists <b>Duration</b>.</li>
+    <li>Search box like the ssa-toolkit main satellite search, without facilities and decayed objects.</li>
+    <li>Sortable result table with the reduced fields of the render.</li>
+    <li><b>[Track]</b> button (not in render) on the row of a pass occurring <i>now</i>, right of the duration column; same function as TRACK OBJECT; refreshes live while the modal is open. Passes that never clear Lim EL are not valid, so never trackable.</li>
+  </ul>
+
+  <h3 id="iod"><span class="id">A2b-ii</span> Initial Orbit Determination <span class="ref">IOD.png</span></h3>
+  <div class="flow"><span>3 angles-only obs</span><i>→</i><span>Gauss → r₁ r₂ r₃</span><i>→</i><span>Gibbs / Herrick-Gibbs (close spacing) → v₂</span><i>→</i><span>P₂ state vector</span><i>→</i><span>Coarse TLE (COE of P₂)</span></div>
+  <ul>
+    <li>Inputs manual or from Astrometry (astrometry.net only, no ASTAP).</li>
+    <li>Table sortable, fixed columns as in the render. All angles in <b>decimal degrees, up to 4 decimals</b>. RA/Dec in J2000.</li>
+    <li>Starts with rows 1–3 and their (…) menu; Remove Entry is inactive on an empty row.</li>
+  </ul>
+  <table>
+    <tr><th style="width:150px">Action</th><th>Behaviour</th></tr>
+    <tr><td>Add Manual</td><td>Row turns active with inputs. Epoch pre-filled with now; digits only (<code>-</code> / <code>:</code> fixed). Filling az/el clears ra/dec and vice versa. Source = "Manual". Enter / click-outside confirms → the other pair is computed with H4 <b>at the row epoch</b> and shown dimmed.</td></tr>
+    <tr><td>Add Astrometry</td><td>Opens Astrometry from Image (A2b-iv). Job runs in background (minimised work-queue pill). Row shows "Astrometry pending" → on failure "Astrometry failed" (remove or overwrite) → on success RA/Dec bright, az/el dimmed, epoch = <b>mid-exposure</b> (DATE-OBS + exposure/2).</td></tr>
+    <tr><td>Overwrite</td><td>Add/remove on an occupied <b>valid</b> row asks for confirmation; a <b>failed</b> row is overwritten silently.</td></tr>
+    <tr><td>IOD fails</td><td>Comprehensive message on the status line under the IOD button — no raw error codes.</td></tr>
+  </table>
+
+  <h3 id="astro"><span class="id">A2b-iv</span> Astrometry from Image <span class="ref">Astrometry.png · opened from IOD</span></h3>
+  <ul>
+    <li><b>Epoch</b> (DATE-OBS, exposure start) and <b>Exposure</b> fields above Data Entries (table pushed down); autofilled from image metadata when present, otherwise typed.</li>
+    <li>Entry table always shown: T = target, S1…Sn = streak start/end + brightness.</li>
+    <li>Image area starts empty with "select image" → upload prompt. Accepted types as in ssa-toolkit.</li>
+    <li>DETECT STREAKS as ssa-toolkit; click-on-image to edit streaks/target ported from ssa-toolkit.</li>
+    <li>Image controls: streak visibility, zoom levels, scroll-zoom. CLEAR removes the image.</li>
+    <li>RUN ASTROMETRY → astrometry.net; inactive until <b>≥ 10 streaks and a target</b>. Jobs keep running if the modal closes; the result fills its IOD row.</li>
+  </ul>
+
+  <h3 id="settings"><span class="id">A2b-iii</span> Station Settings <span class="ref">Settings.png · stored on the mount PC</span></h3>
+  <table>
+    <tr><th style="width:120px">Group</th><th>Fields &amp; rules</th></tr>
+    <tr><td>Location</td><td>Lat / Lon angular triads with cardinal chip + format selector; Altitude FT/M/KM; <b>Timezone</b> dropdown (all zones, defaults to the PC's zone). Vertical separator between labels and form. Observer position app-wide. <b>PWI4 mismatch warning</b> beyond ±0.01° lat/lon or ±100 m altitude — checked on Save and on Connect; the app never writes to PWI4.</td></tr>
+    <tr><td>Hardware</td><td>Mount (PW L-350) and OTA (RASA11) fixed dropdowns. <b>Lim EL [ °]</b> — numbers only, 0–90, default 15°.</td></tr>
+    <tr><td>Providers</td><td>Astrometry and Satellite DB fixed dropdowns. Astrometry.net API key: write-only, masked, never returned to the browser.</td></tr>
+    <tr><td>ADS-B</td><td>Placeholder, disabled.</td></tr>
+    <tr><td>Buttons</td><td>[Cancel] = ✕ (close, no save) · [Save Settings] = apply, save, close.</td></tr>
+  </table>
+</section>
+
+<!-- ============================ A3 ============================ -->
+<section id="a3">
+  <h2><span class="id">A3</span> Sky Viewer</h2>
+  <p>Live local hemisphere viewed upward (East on the left). Blue separated circle = current mount pointing. Clock below the chart; its <span class="chip m">Time UTC</span>/<span class="chip m">Local Time</span> tag toggles the display (local = Settings timezone).</p>
+  <h4>A3a · Sky chart</h4>
+  <ul>
+    <li>Satellites computed in <b>30-min chunks, one layer per orbit class</b> (LEO / MEO / GEO); cached; next chunk computed in the background when <b>10 min</b> remain and appended; expired data evicted.</li>
+    <li>Hidden classes are still computed (they may be toggled on at any time).</li>
+    <li>No item limit → performance work required (vectorised propagation, one canvas layer per class, per-class cadence).</li>
+    <li>Below Lim EL: objects dimmed; dashed ring marks the limit.</li>
+    <li>Sun and Moon drawn (Planetary Bodies). Stars without labels.</li>
+    <li>Select → Track Info + focused mode; current position highlighted only (no path). Deselect via ✕ on the card or clicking anywhere that is not an object.</li>
+  </ul>
+  <div class="callout">Two changes from ssa-toolkit (to be applied back there later): hovering a <b>label</b> does not show the object's data; the hovered object is the one <b>closest to the pointer</b>, not the one on top.</div>
+</section>
+
+<!-- ============================ A4 ============================ -->
+<section id="a4">
+  <h2><span class="id">A4</span> Mount Status</h2>
+  <p><b>A4x · 3D hemisphere</b> — ingests mount pointing; shows pointing, Sun, Moon, the 15° Sun keep-out disc and a <b>Lim EL ring</b>; stays interactive.</p>
+  <div class="two">
+    <div>
+      <h4>Dashboard essentials</h4>
+      <p>Azimuth · Elevation · Status · Sun distance. Status green on TRACKING; Sun distance green when &gt; 15°; white otherwise.</p>
+    </div>
+    <div>
+      <h4>Detailed modal <span class="ref">Detailed Info.png · via (…)</span></h4>
+      <p>Expanded 3D + Mount Control + MJD, LST, Az, El, RA/Dec (J2000), Hour Angle (= LST − RA), Mount Status, Axis 0/1 Status, Axis 0/1 RMS, Sun Distance.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ A5 ============================ -->
+<section id="a5">
+  <h2><span class="id">A5</span> Mount Control</h2>
+
+  <h3 id="a5a"><span class="id">A5a</span> Connection</h3>
+  <div class="flow"><b>Connect</b><span>start PWI4 if not running</span><i>→</i><span>connect mount</span><i>→</i><span>enable both axes</span><i>→</i><span>home</span></div>
+  <div class="flow"><b>Disconnect</b><span>confirm once</span><i>→</i><span>home</span><i>→</i><span>disable both axes</span><i>→</i><span>disconnect mount</span><i>→</i><span>PWI4 left open</span></div>
+  <p><span class="btnbar"><span class="on">DISCONNECTED</span><span>CONNECT</span></span> &nbsp; <span class="btnbar"><span>DISCONNECT</span><span class="on">CONNECTED</span></span></p>
+  <p>Status <span class="chip b">BUSY</span> during either sequence. A failing step stops the sequence, names the step, and leaves the mount safe (axes disabled) — no rollback.</p>
+
+  <h3 id="a5b"><span class="id">A5b</span> Pointing mode</h3>
+  <p><span class="btnbar"><span class="on">STOPPED</span><span>TRACK</span></span> &nbsp; <span class="btnbar"><span>STOP</span><span class="on">TRACKING</span></span></p>
+  <ul>
+    <li><b>STOP</b> — stops any tracking (incl. object tracks), holds the az/el of the moment.</li>
+    <li><b>TRACK</b> — tracks the sidereal coordinates of the moment; disabled below Lim EL or inside the Sun disc.</li>
+  </ul>
+
+  <h3><span class="id">A5c</span> Commands</h3>
+  <p><b>(i) HOME MOUNT</b> — stop, then home (status HOMING).</p>
+
+  <h4 id="track-target">(ii) Track Target <span class="ref">Track target Modal.png</span></h4>
+  <table>
+    <tr><th style="width:110px">Tab</th><th>Rules</th></tr>
+    <tr><td>Satellite</td><td>Search name/NORAD · Orbit (any/LEO/MEO/GEO) · Origin (default <b>any</b>). Max 500 results; with no filter the <b>500 latest NORAD IDs</b>. Decayed excluded. TRACK SELECTED TARGET follows A1d, checking current elevation <b>and</b> the pass (disabled if it never clears Lim EL), reason on the status line. Modal closes once tracking starts.</td></tr>
+    <tr><td>Aircraft</td><td><span class="chip m">DISABLED</span> until ADS-B is confirmed. Range Limit presets 20 / 50 / 100 / 200 / 350 km, default <b>100 km</b>.</td></tr>
+  </table>
+
+  <h4 id="jog">(iii) Jog <span class="ref">Job Modal.png</span></h4>
+  <table>
+    <tr><th style="width:110px">Mode</th><th>Behaviour</th></tr>
+    <tr><td>JOG</td><td>Turns at the chosen speed while a direction is held. Speeds 0.5 / 1.0 / 2.0 / 5.0 / 10.0 °/s (default 5.0) via −/+ stepper.</td></tr>
+    <tr><td>STEP</td><td>One step per press: 1′ / 5′ / 10′ / 30′ / 1° (default 10′). Further steps are blocked until the current one completes.</td></tr>
+    <tr><td>Context</td><td>Sidereal track: nudges, tracking continues on the new RA/Dec. Stopped: plain move. Object track: <b>disabled</b>. Limits G1–G3 apply.</td></tr>
+    <tr><td>Input</td><td>Az/El boxes read-only live values. Arrow keys: hold = jog, press = one step.</td></tr>
+  </table>
+
+  <h4 id="goto">(iv) Go To <span class="ref">Goto Modal.png</span></h4>
+  <ul>
+    <li>Local Az/El → ends <span class="chip m">STOPPED</span>; Celestial RA/Dec (J2000) → ends <span class="chip g">TRACKING</span>.</li>
+    <li>Both checked against Lim EL and the Sun disc; invalid → elevation box(es) red and the command disabled.</li>
+    <li>Local Elevation box capped 0–90° (scroll cannot go below 0°).</li>
+    <li>Allowed during an object track (replaces it).</li>
+  </ul>
+</section>
+
+<!-- ============================ H ============================ -->
+<section id="h">
+  <h2><span class="id">H</span> Helpers &amp; utilities</h2>
+  <table>
+    <tr><th style="width:60px">ID</th><th>Helper</th></tr>
+    <tr><td><span class="id">H1</span></td><td><b>Datetime suite</b> — as ssa-toolkit: <code>[YYYY]-[MM]-[DD] [hh]:[mm]:[ss]</code> + picker; seconds precision; picker button same height as the fields.</td></tr>
+    <tr><td><span class="id">H2</span></td><td><b>Angular triads</b> — as ssa-toolkit incl. cardinal chip, ± chips, scroller, caps and typing limits; use the LEGACY version where the Nuxt port lacks chip behaviour. Same format selector/transforms, extended to altitude FT/M/KM.</td></tr>
+    <tr><td><span class="id">H3</span></td><td><b>Aircraft predictor</b> (planned) — Kalman filter, gain tuning required. Not in the first build.</td></tr>
+    <tr><td><span class="id">H4</span></td><td><b>Local ↔ J2000 transform</b> for the Settings location at an <b>explicit time</b>: Goto passes now, IOD passes the row epoch.</td></tr>
+    <tr><td><span class="id">H5</span></td><td><b>Sun avoidance path planner</b> (<span class="id">D-SUN</span>) — detour around the 15° disc for slews and object tracks (G2).</td></tr>
+  </table>
+</section>
+
+<section id="scope">
+  <h2>Formatting &amp; scope</h2>
+  <ul>
+    <li>Font: renders use Bahnschrift; the build uses <b>Barlow</b> (web-embeddable, OFL).</li>
+    <li>Thousand separator: a single space (e.g. <code>36 540 km</code>).</li>
+    <li><b>Out of scope for now:</b> camera control (astrometry from uploads only), aircraft tracking (H3 / ADS-B), satellite paths in the Sky Viewer, tracking IOD results.</li>
+  </ul>
+</section>
+
+<footer>pw-mount-control · docs/logic_sheet.html · Rev 2</footer>
+</main>
+</div>
+</body>
+</html>

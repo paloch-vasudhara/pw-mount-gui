@@ -1,0 +1,312 @@
+Logic sheet for Mount Control app — Rev 2 (2026-10-19)
+----------------------------------------------------------------------------------------
+Rev 2 folds in the review decisions (C1–C8, M1–M10, Q1–Q10, N0–N7, U1–U3).
+Rev 1 is archived at docs/archive/logic_sheet_rev1.txt. A readable copy: docs/logic_sheet.html
+Build plan + progress: docs/BUILD_PLAN.md
+
+----------------------------------------------------------------------------------------
+(G) GLOBAL RULES — apply app-wide, enforced by the mount gateway regardless of UI state
+----------------------------------------------------------------------------------------
+
+G1 - Limits
+     Lim EL  : station limiting elevation (Settings > Hardware), 0–90°, default 15°.
+     Sun     : 15° keep-out disc around the Sun (fixed; OTA FOV ≈ 3°). "Sun distance safe" = > 15°.
+
+G2 - Sun check runs continuously in every mode (slew, goto, jog/step, sidereal track, object track,
+     pre-position wait). If any planned path crosses the 15° Sun disc, the operation is modified to
+     go around the disc to the other side of the path via a generated custom path (avoidance
+     algorithm — design task D-SUN in the build plan).
+
+G3 - Limit reached (Lim EL or Sun disc, any mode): the mount becomes STOPPED and any further
+     operation that would push the pointing past the limit is disabled.
+     Exception: starting a Track Object workflow may pre-position while the object is still
+     between the actual horizon (0°) and Lim EL (see A1d).
+
+G4 - Disconnection: if the app loses its link to the gateway, the gateway stops the mount
+     immediately (slews, jogs and tracks). After reconnection the mount stays STOPPED — nothing
+     resumes automatically.
+     Known limit: if the gateway process itself dies, nothing can send the stop. The app shows a
+     warning that hands the user off to PWI4 (which stays open) to stop the operation there.
+
+G5 - One object may be tracked at a time.
+
+G6 - Live data only: decayed objects are always excluded from every search/list/viewer.
+
+G7 - Every disabled control / refused command reports its reason on the relevant status line
+     (e.g. "below station limit elevation", "within 15° of the Sun", "PWI4 not running").
+
+G8 - Mount status states:
+     STOPPED | SLEWING (incl. JOG/STEP) | TRACKING (incl. pre-position wait) | HOMING |
+     BUSY (connect/disconnect sequence) | FAULT | DISCONNECTED (incl. PWI4 not running)
+
+----------------------------------------------------------------------------------------
+(A) MAIN DASHBOARD [Main Dashboard 1.png / Main Dashboard 2.png]
+----------------------------------------------------------------------------------------
+
+This is the home and the only page for the app, every tool and function opens as a modal
+on top of this dashboard page. The dashboard consists of 5 main sections as follows:
+
+A1 - TRACK INFO | Displays the selected object info from the Sky Viewer (A3) window, or the
+                  currently tracked object. Sample track info cards are shown in [Track Cards.png]
+
+    A1a. Satellite Track cards -> very similar to ssa-toolkit OV-Hemisphere cards
+         Satellite icon - Satellite name [Flag],
+                          Int'l designator (NORAD ID) [Colorcoded type chip*]
+         ---------------------------------**separator**---------------------------------
+                          Azimuth                   value (.2f°)
+                          Elevation          (sign) value (.2f°)
+                          Range                     value (.0f km)
+                          Illumination              [Yellow U+2B24 Illuminated] or
+                                                    [Grey U+2B24 Umbra/Below Horizon]
+         [.................................TRACK OBJECT.................................]
+         Values refresh at 1 Hz.
+         **button : active when ALL of:
+             - the object is above the actual horizon (0°), and
+             - its current pass rises above Lim EL (not a pass that peaks below Lim EL, and not
+               an object already setting below Lim EL), and
+             - the object is not within 15° of the Sun.
+           Otherwise disabled (reason on hover/status). When activated, the object is tracked
+           by the mount via TLE (satellites) or custom path (aircraft), see A1d.
+
+    A1b. Aircraft Track cards -> placeholder until the ADS-B data format is confirmed. The
+         aircraft UI is present but DISABLED ("No ADS-B source configured").
+         Aircraft icon  - Flight ID
+         ---------------------------------**separator**---------------------------------
+                          Latitude                  (cardinal) absvalue (.5f°)
+                          Longitude                 (cardinal) absvalue (.5f°)
+                          Altitude                  value (.0f ft)
+                          Range                     value (.3f km)
+         [.................................TRACK OBJECT.................................]
+
+    A1c. When nothing is selected or an object is deselected, the field shows "No object selected"
+
+    A1d. Object tracking workflow (run by the gateway)
+         1. Check the pass: object above 0° and its pass reaches above Lim EL; Sun check (G2).
+         2. If the object is still below Lim EL: compute where the pass crosses Lim EL, slew there
+            and wait (status = TRACKING, card shows a countdown to the crossing).
+         3. At the crossing time hand the object to PWI4 (follow_tle / custom path).
+         4. End of path: tracking stops at Lim EL (G3) — the mount does not follow it down to the
+            horizon. Mount becomes STOPPED.
+         Track Object can be started from: the Track Info card, Track Target modal (satellite),
+         and Pass Analysis [Track] button.
+
+    A1e. Card states and stacking
+         - Tracked card: pinned to Track Info, button disabled and labelled "TRACKING", its 'x' is
+           hidden. The track is ended with STOP (A5b).
+         - While tracking object A, selecting object B in the Sky Viewer shows B's card over A's.
+             * B assigned tracking -> B becomes the tracked object; A's card closes.
+             * B closed / deselected -> B's card closes, A's card remains.
+             * Clicking A's card re-focuses the Sky Viewer selection on A.
+         - Every tracking command brings up the tracked object's card.
+         - Track ends (STOP, limit, Goto, Home, sidereal TRACK): the card stays but is downgraded
+           to a normal selected-object card; if another object is selected at that moment the
+           card is dropped.
+
+A2 - FILTERS | Two groups: Visibility filters for the Sky Viewer (A3), and the Tools buttons.
+
+    A2a. Visibility group -> 3 main trees: Satellites, Aircrafts and Celestial Objects.
+         Deselecting the parent keeps the selection of the children but all the children will be
+         hidden from the viewer.
+
+         Inclusion of item types (database orbit classes)*
+            Low Earth Satellites       - LEO, SSO
+            Medium Earth Satellites    - MEO
+            Geosynchronous Satellites  - GEO (database GEO class, includes HEO)
+            Planetary Bodies           - Sun, Moon (non-selectables; name kept for later bodies)
+            Stars                      - Background stars (no labels, non-selectables):
+                                         HIP catalogue (data/hip_main.txt), pre-filtered to a
+                                         magnitude limit for the browser
+                                         (start V ≤ 6.5; adjustable parameter)
+         Aircrafts tree is present but disabled until ADS-B is confirmed.
+
+         This selection is per-type as described in the Sky Viewer (A3) section where the
+         functionality differs from the referenced ssa-toolkit version.
+
+    A2b. Tools group -> analysis tools and app settings. Each button opens its respective modal.
+
+         (i) - SATELLITE PASS ANALYSIS [Pass Analysis.png]
+         Same workflow as ssa-toolkit:Pass Analysis with simpler options.
+         - Station fixed to Settings location; limiting elevation = Lim EL.
+         - Interval in start-end mode (H1 datetime suite).
+         - Mode: OPTICAL | LINE OF SIGHT. Optical results show "Visible Duration" = time the object
+           is actually visible: above Lim EL, illuminated, AND the Sun below the horizon (0°) at
+           the observer (darkness); LOS shows "Duration".
+         - Search box (not a scenario list): comparable to the ssa-toolkit main satellite search,
+           excluding facilities and decayed objects.
+         - Result table is sortable and shows the reduced fields of the render.
+         - [Not shown in render] If a pass is currently occurring, a [Track] button appears to the
+           right of that row (space allocated right of the duration column) with the same
+           function as A1 TRACK OBJECT. The button refreshes live while the modal is open.
+           Passes that never clear Lim EL are not listed as valid, so they are never trackable.
+
+         (ii) - INITIAL ORBIT DETERMINATION [IOD.png]
+         Lightweight version of the ssa-toolkit OD tool.
+         - Inputs: 3 angles-only observations (manual or Astrometry; astrometry.net only, no ASTAP).
+         - Method: angles-only Gauss -> position vectors r1, r2, r3 -> velocity at P2 by Gibbs, or
+           Herrick-Gibbs when the observations are closely spaced -> state vector (P2).
+         - Outputs: "P2 State Vector" and "Coarse TLE Estimation" (TLE from the COE of the P2 state,
+           lightweight).
+         - Data entry table: sortable, fixed columns as in the render. All angle values in decimal
+           degrees, up to 4 decimal digits. RA/Dec in J2000.
+         - Initially rows 1, 2, 3 with their (...) option button. Remove Entry is inactive on an
+           empty row.
+         - Add Manual | Turns the row active and input boxes appear. Epoch is pre-filled with the
+                        current datetime; only digits can be typed, the '-' and ':' separators are
+                        fixed. Filling either az/el or ra/dec clears the other pair. Source shows
+                        "Manual". Enter or clicking outside the row confirms -> the other pair is
+                        computed (H4, using the ROW EPOCH) and shown dimmed.
+         - Add Astrometry | Opens the Astrometry from Image modal (A2b-iv). The job runs in the
+                        background (minimized work-queue pill, as in legacy ssa-toolkit).
+                        While solving the row shows "Astrometry pending"; on failure
+                        "Astrometry failed" (row must be removed or overwritten).
+                        On success: RA/Dec fill in (bright), az/el computed and shown dimmed, epoch
+                        = mid-exposure (DATE-OBS + exposure/2).
+         - Overwrite: adding to / removing an occupied VALID row asks for confirmation; a FAILED
+           row is overwritten without confirmation.
+         - IOD failure (diverged / error): report a comprehensive message on the status line under
+           the IOD button (no raw error codes).
+
+         (iv) - ASTROMETRY FROM IMAGE [Astrometry.png] (opened from IOD > Add Astrometry)
+         Lightweight version of the ssa-toolkit counterpart.
+         - Epoch (DATE-OBS, exposure start) and Exposure time fields sit above Data Entries (table
+           pushed down). Autofilled from image metadata when present, otherwise typed manually.
+         - Entry table always shown (T = target, S1..Sn streak start/end + brightness).
+         - On opening the image area is empty showing "select image"; click opens the upload
+           prompt. Accepted types = same as ssa-toolkit.
+         - DETECT STREAKS behaves as ssa-toolkit. Click-on-image to modify streaks/target is ported
+           from ssa-toolkit.
+         - Image controls: streak visibility toggle, zoom levels, scroll-zoom.
+         - CLEAR clears the image. RUN ASTROMETRY sends the job to astrometry.net — inactive until
+           at least 10 streaks AND a target are present.
+         - Astrometry jobs keep running if the modal closes; the result fills its IOD row.
+
+         (iii) - STATION SETTINGS [Settings.png]
+         Settings for the app (calculations and displays), stored on the mount PC with the gateway.
+         - Location group | As ssa-toolkit Add Facility without equipment: angular triads with
+                        cardinal chip and format selectors; vertical line separator between labels
+                        and form; altitude format FT/M/KM. Additional row "Timezone": dropdown of
+                        all time zones, defaults to the PC's own time zone.
+                        The location is the observer position app-wide. If it differs from PWI4's
+                        site configuration beyond ±0.01° (lat/lon) or ±100 m (altitude), show a
+                        warning (checked on Save and on Connect; the app never writes to PWI4).
+        - Hardware group | Mount and OTA dropdowns fixed (single entries: PW L-350, RASA11).
+                        "Lim EL." [      °] — numbers only, capped 0–90, default 15°. Used app-wide
+                        as the limiting elevation.
+        - Providers group | Astrometry and Satellite DB dropdowns fixed. Astrometry.net API key:
+                        write-only, shown masked, never sent back to the browser.
+        - ADS-B group | placeholder (disabled).
+        [Cancel] - same as "x" (closes without saving)
+        [Save Settings] - apply, save, close.
+
+A3 - SKY VIEWER | Main UI. Local hemisphere viewed from the observer location looking up toward the
+                  zenith (East on the left). A blue separated circle marks the current mount
+                  pointing. Below the chart is a clock with a "Time UTC" / "Local Time" tag; the tag
+                  is a toggle that swaps the displayed time (local = Settings timezone).
+
+    A3a. The Sky Chart -> same idea as ssa-toolkit OV:Hemisphere but live (current time only).
+         - Satellites are computed in 30-minute chunks, one layer per orbit class (LEO / MEO /
+           GEO). Results are cached; when 10 minutes of pre-computed data remain, the next chunk
+           is computed in the background and appended. Data older than its coverage is evicted.
+         - Hidden classes are still computed (they can be toggled on at any time).
+         - No item limit -> performance work is required (vectorised propagation, single canvas
+           layer per class, per-class cadence).
+         - Lim EL: objects below Lim EL are drawn dimmed; a dashed ring marks the limit.
+         - Sun and Moon are drawn on the chart (Planetary Bodies filter). Stars: no labels.
+
+         - Selecting an object highlights its data in Track Info (A1) and puts the chart in
+           focused mode*. Lightweight: no path drawn, only the current position highlighted.
+         - Deselect: 'x' on the card, or clicking anywhere that is not an object.
+         - Same overlay format and labelling as ssa-toolkit, with two changes (to be applied back
+           to ssa-toolkit later):
+             * hovering a LABEL does not bring up the object's data;
+             * the hovered object is the one CLOSEST to the pointer, not the one on top — so an
+               object inside a clump can be picked.
+
+*Referenced from ssa-toolkit
+
+A4+A5 - MOUNT | Mount readings (status) and mount controls, through PWI4.
+
+    A4x. Hemisphere three.js — ingests the mount pointing and displays pointing / Sun / Moon in the
+         3D view. Keeps its interactivity. Shows the 15° Sun keep-out disc and a Lim EL ring.
+
+    A4/A4a. Mount Status (Dashboard + Detailed Info.png) -> information read from the mount
+        (i) - Dashboard essentials
+        Azimuth, Elevation, mount status and Sun distance. Status shows green on TRACKING, Sun
+        distance green when > 15°; white otherwise. Status values per G8.
+        (ii) - Detailed modal (from the (...) button)
+        Expanded 3D module + mount control (A5) + parameters:
+            Modified Julian Date, Local Sidereal Time, Azimuth, Elevation, R.A. (J2000),
+            Declination (J2000), Hour Angle (= LST − RA), Mount Status, Axis 0 Status,
+            Axis 1 Status, Axis 0 RMS, Axis 1 RMS, Sun Distance.
+
+    A5. Mount Control Options
+        (A5a) - Connection
+                [Connect]    (start PWI4 if not running) -> connect mount -> enable both axes ->
+                             home mount
+                [Disconnect] (asks for confirmation once) home mount -> disable both axes ->
+                             disconnect mount. PWI4 is left open.
+                When disconnected,  [|DISCONNECTED|][    CONNECT    ]
+                When connected,     [  DISCONNECT  ][|  CONNECTED  |]
+                During either sequence the status is BUSY. If a step fails: stop at that step,
+                show which step failed, leave the mount safe (axes disabled), no rollback.
+        (A5b) - Pointing mode
+                When stopped        [|  STOPPED  |][    TRACK     ]
+                When tracking       [    STOP     ][|  TRACKING  |]
+                [STOP]  - stops any tracking (incl. object tracks) and holds the az/el of the moment.
+                [TRACK] - tracks the sidereal coordinates of the moment. Disabled below Lim EL or
+                          within the Sun disc. (TRACKING also shows while tracking objects.)
+        (A5c) - Commands
+                (i)   HOME MOUNT - stop, then home (status HOMING).
+                (ii)  TRACK TARGET [Track target Modal.png] - search and track.
+                      Satellite tab: search name/NORAD, Orbit (any/LEO/MEO/GEO), Origin (default
+                      any). Results capped at 500; with no filter the 500 latest NORAD IDs are
+                      listed. Decayed objects excluded. TRACK SELECTED TARGET follows A1d — checks
+                      the current elevation AND the selected object's pass (disabled if the pass
+                      never rises above Lim EL); status line gives the reason. The modal closes
+                      once tracking starts.
+                      Aircraft tab: disabled until ADS-B is confirmed. Range Limit presets 20, 50,
+                      100, 200, 350 km (default 100 km).
+                (iii) JOG [Job Modal.png]
+                      JOG mode  - the mount turns at the chosen speed while a direction is held.
+                                  Speeds 0.5 / 1.0 / 2.0 / 5.0 / 10.0 °/s (default 5.0), −/+ stepper.
+                      STEP mode - one step per press. Steps 1′ / 5′ / 10′ / 30′ / 1° (default 10′).
+                                  Further steps are blocked until the current step completes.
+                      Az/El boxes are read-only live values. Arrow keys: hold = jog, press = step.
+                      While sidereal tracking: jog/step nudges the pointing and tracking continues
+                      at the new RA/Dec. While stopped: plain move. During an object track: disabled.
+                      Limits G1–G3 apply (refuse at Lim EL / Sun disc).
+                (iv)  GO TO [Goto Modal.png] - slew to coordinates.
+                      Local Az/El -> mount ends STOPPED. Celestial RA/Dec (J2000) -> mount ends
+                      TRACKING. Local and celestial targets are both checked against Lim EL and the
+                      Sun disc; invalid -> elevation box(es) turn red and the command is disabled.
+                      The local Elevation box is capped 0–90° (scroll cannot go below 0°).
+                      Allowed during an object track (replaces it).
+
+----------------------------------------------------------------------------------------
+Helpers and Utilities
+----------------------------------------------------------------------------------------
+
+H1 - Datetime suite
+     Same as the ssa-toolkit suite, [YYYY]-[MM]-[DD] [hh]:[mm]:[ss][Datetime picker*]
+     Seconds precision only. *The picker button is the same height as the input fields.
+
+H2 - Angular triads
+     Same as ssa-toolkit incl. cardinal direction chip, +/- chips, scroller mechanics, overflow/value
+     caps and typing limits. Reference the LEGACY version where the Nuxt port is still missing chip
+     behaviour. Same format selector and value transforms — extends to the altitude FT/M/KM fields.
+
+H3 - Aircraft predicted position (planned)
+     Kalman-filter predictor for aircraft tracking; gain tuning required. Not in the first build.
+
+H4 - Local/Sidereal transformation helper
+     Transforms between local horizon (az/el) and J2000 (RA/Dec) for the Settings location at an
+     EXPLICIT time: Goto passes the current time, IOD passes the row epoch.
+
+H5 - Sun avoidance path planner (design task D-SUN)
+     Generates the detour path around the 15° Sun disc required by G2, for slews and object tracks.
+
+Font and number formatting: renders use Bahnschrift; the build uses Barlow (web-embeddable, OFL).
+Thousand separator is a single space, as in the concepts.
+
+Out of scope for now: camera control (IOD astrometry uses image uploads only), aircraft tracking
+(H3 / ADS-B), drawing satellite paths in the Sky Viewer, tracking IOD results.

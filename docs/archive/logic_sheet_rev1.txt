@@ -1,0 +1,221 @@
+Logic sheet for Mount Control app
+----------------------------------------------------------------------------------------
+
+(A) MAIN DASHBOARD [Main Dashboard 1.png/Main Dashboard 2.png]
+
+This is the home and the only page for the app, every tool and function opens as a modal 
+on top of this dashboard page. The dashboard consists of 5 main sections as follows:
+
+A1 - TRACK INFO | Displays the selected object info from the Sky Viewer (A3) window. 
+                  Sample track info cards are shown in [Track Cards.png]
+
+    A1a. Satellite Track cards -> very similar to ssa-toolkit OV-Hemisphere cards
+         Satellite icon - Satellite name [Flag], 
+                          Int'l designator (NORAD ID) [Colorcoded type chip*]
+         ---------------------------------**separator**---------------------------------
+                          Azimuth                   value (.2f°)
+                          Elevation          (sign) value (.2f°)
+                          Range                     value (.0f km)
+                          Illumination              [Yellow U+2B24 Illuminated] or 
+                                                    [Grey U+2B24 Umbra/Below Horizon]
+         [.................................TRACK OBJECT.................................]
+         **button : If the object is above the limiting horizon (settings) the button is 
+         active, if the object is below or too close to the sun (15°) then disabled.
+         when activated, the selected object is tracked by the mount via tle or custom path.
+
+    A1b. Aircraft Track cards -> without ADS-B data format confirmationcard is a placeholder
+         Aircraft icon  - Flight ID
+         ---------------------------------**separator**---------------------------------
+                          Latitude                  (cardinal) absvalue (.5f°)
+                          Longitude                 (cardinal) absvalue (.5f°)
+                          Altitude                  value (.0f ft)
+                          Range                     value (.3f km)
+         [.................................TRACK OBJECT.................................]
+
+    A1c. When nothing is selected or an object is deselected, the field shows "No object selected"
+
+A2 - FILTERS | Visibility filters for the Sky Viewer (A3) window and analysis tools
+
+    A2a. Visibility group -> 3 main tree: Satellites, Aircrafts and Celestial Objects. 
+         Deselecting the parent keeps the selection of the children but all the children will be 
+         hidden from the viewer.
+
+         Inclusion of item types* 
+            Low Earth Satellites - LEO, SSO 
+            Medium Earth Satellites - MEO
+            Geosynchronous Satellites - GEO, GSO, HEO
+            Planetary Bodies - Sun, Moon (non-selectables)
+            Stars - Background stars (no labels, non-selectables): Reference HIP catalog (data/)
+
+         This selection will be per-type as described in the sky viewer (A3) section where the 
+         functionality differs from the referenced ssa-toolkit version.
+
+    A2b. Tools group -> analysis tools and app settings. Each button opens their respective modal.
+
+         (i) - SATELLITE PASS ANALYSIS [Pass Analysis.png]
+         Same workflow as ssa-toolkit:Pass Analysis but with simpler options. The station is fixed to
+         what is set in the settings as well as the limiting elevation, interval is in start-end mode
+         and the result table shows reduced fields. Additionally, the searchbox is added here instead
+         of a selection list from what is imported to scenario and the result table is sortable.
+         [Not shown in render]
+         If a pass is currently occuring, additional [Track] button is added to the right of the list
+         which provides the same functionality as A1 [...TRACK OBJECT...] hence the allocated space
+         to the right of the duration column.
+
+         (ii) - INITIAL ORBIT DETERMINATION [IOD.png]
+         Covers a lightweight version of the OD tool from ssa-toolkit. Utilizing 3 observation points
+         specified manually or from Astrometry (astrometry.net only, no ASTAP) -> IOD using Gibbs or 
+         Herrick-Gibbs based on separation distances of the points. The results are then shown in the
+         allocated P_2 State Vector and Coarse TLE Estimation display fields. The coarse TLE is as 
+         the title suggest - a TLE from COE of the P_2 state (Lightweight version). The data entry 
+         table is sortable and the columns are fixed as shown in the render.
+
+         Initially, only 1, 2, 3 and their respective (...) option button is present. Each entry can 
+         be added via the option button (Remove entry option is not active when nothing is there). 
+         - Add Manual | Turns the row active and input boxes appear, epoch is pre-filled with the 
+                        current datetime and only the numbers can be typed in, the '-' and ':' 
+                        characters in the string are fixed and cannot be edited. When the user fills 
+                        in either az/el or ra/dec fields, the other format values are cleared. Source
+                        entry shows "Manual" and Enter key or clicking outside of the row confirms
+                        the input values -> this calculates the respective ra/dec or az/el values in 
+                        that row and is shown dimmed. [RA/DEC is in J2000 frame]
+        - Add Astrometry | Pulls up the Astrometry from Image modal (Astrometry.png). The modal is 
+                        also a lightweight version of the ssa-toolkit counterpart with entry table 
+                        always shown, detect streaks button act the same way. Image controls are
+                        streaks visibility button and zoom levels (scroll-zooming is still there).
+                        On openning, the image area is empty, showing only "select image" which on-
+                        click, opens an image upload prompt - the user then selects an image to use.
+                        Clear button clear the image and Run Astrometry button sends the data 
+                        over to astrometry.net (inactive if not enough streaks or no target specified)
+                        The work is placed in background and work queue is shown minimized in the same
+                        way as in ssa-toolkit. When solving - show "Astrometry pending", when failed
+                        show "Astrometry failed" and the entry has to be removed or add new overwrite.
+                        When Astrometry 
+        - Adding new or removing action over an existing entry overwrites the existing one, unless the 
+          row is an Astrometry failed item, give a warning and ask for confirmation of the overwrite.
+
+        In case the IOD did not solve (solution diverged or error), report the failure over the status 
+        line under the IOD button (do not show the error code, show the comprehensive message)
+
+        (iii) - STATION SETTINGS [Settings.png]
+        Settings for the app which covers calculation and displays.
+        - Location group | Almost the same as Add Facility for ssa-toolkit without the equipments
+                        angular triads/cardinal chip and selection options the same functionality as 
+                        ssa-toolkit, a vertical line separator helps with the separation between labels
+                        and form, additional format selector for altitude dropdown includes FT/M/KM.
+                        The value is used as reference for calculations app-wide as observer position.
+                        If the value conflicts with what PWI4 is configured, issue a warning (with a 
+                        difference tolerance so value precision would not trigger a false alarm)
+        - Hardware group | 2 Dropdown items currrently fixed as there will be only one item in the list
+                        as shown in the render (PW L-350 and RASA11). Add another field here (render 
+                        missed) "Lim EL." [          °], allow only numbers and caps between 0-90. This 
+                        value will also be used app-wide as the limiting elevation.
+        - Providers group | 2 Dropdown items also fixed with the same reason, Astrometry.net apikey is 
+                        provided here (take care with security concerns)
+        - ADS-B group | Aircraft detection related items, (placeholder)
+        [Cancel] - same as "x" (closes the modal without saving), 
+        [Save Settings] apply-save then close the modal
+
+A3 - SKY VIEWER | Main UI for the app, shows the local hemisphere as viewed from the observer Location
+                  looking upwards towards the zenith (hence East is to the left). Blue-separated-circle 
+                  indicates the current mount pointing. At the bottom of the sky window is a clock, 
+                  with either "Time UTC" or "Local Time" tag under the value - the tag itself is a
+                  toggle button that swaps the displayed time (zone calculated from location settings).
+
+    A3a. The Sky Chart -> Reuses the same idea as OV:Hemisphere* but only displays results for the
+         current time (live chart). Instead of calculating over a specified interval, the chart 
+         calculates (for satellites) in chunks of 30 minutes - one layer per each satellite level 
+         instead of one full search. The results are cached and used until 10 minutes remaining of the
+         pre-calculated data - the calculations rerun in the background and the new result appends the 
+         existing data points. The cached data points are cleared after its coverage interval passed.
+         **This means no item limits and can cause significant performance issues - may have to look 
+         out for any optimization solutions.
+         ***Station settings on elevation limits also apply here.
+
+         - Selecting an object from the chart highlights its data on Track Info section (A1) as well as
+         putting the chart into focused mode*. For now, we'll keep it lightweight and refrain from 
+         showing the satellite path when selected, only highlighting the current position.
+         - Keep the same overlay format and labelling, one change to make from the ssa-toolkit version 
+         is that mouse-over a label should not bring up the data of such object and the object being 
+         hovered should be the one closest to the mouse pointer instead of the one on-top. This 
+         eliminates the problem of being unable to select a certain object from a clump of points. 
+         (Note this down as it will also be applied to ssa-toolkit later as well)
+
+*Referenced from ssa-toolkit
+
+A4+A5 - MOUNT | This section is divided into mount readings (mount status) and mount controls. Utilizes,
+                PWI4 controls and readings to connect with the mount.
+
+    A4x. Hemisphere three.js - this is the exact intention of the item, it ingests the mount pointing 
+         and displays the pointing/sun/moon position in a comprehensive 3D display. The module should 
+         retain the interactive capabilities.
+
+    A4/A4a. Mount Status (Dashboard + Detailed Info.png) -> Information read from the mount
+        (i) - Dashboard essentials display 
+        The dashboard status shows only the essential values: "Azimuth, Elevation, mount status and sun
+        distances" The latter two shows green on "TRACKING" and safe values (>15°) White otherwise.
+        Status includes: STOPPED, SLEWING, TRACKING, DISCONNECTED
+        (ii) - Detailed modal
+        Accessed from the (...) button in the dashboard MOUNT STATUS section, the modal shows additional
+        parameters in more details with an expanded 3D mount pointing module as well option to use the 
+        mount control (A5) options.
+
+    A5. Mount Control Options -> The controls are groupped as follows:
+        (A5a) - Connection options
+                This is a simplified control workflow; 
+                [Connect] 
+                (starts PWI4 if not already) -> Connect mount -> Enable both axes -> Home mount
+                [Disconnect]
+                Home mount -> Disable both axes -> Disconnect mount -> Closes PWI4
+                When disconnected,  [|DISCONNECTED|][    CONNECT    ]
+                When connected,     [  DISCONNECT  ][|  CONNECTED  |]
+                Disconnecting mount asks once for user confirmation before starting the process.
+        (A5b) - Pointing mode
+                When stopped        [|  STOPPED  |][    TRACK     ]
+                When tracking       [    STOP     ][|  TRACKING  |]
+                [STOP] - stops any tracking and keeps the mount pointing at the az/el of the moment.
+                [TRACK] - tracks the sidereal coordinates of the moment, (TRACKING status also shows 
+                when tracking objects)
+        (A5c) - Command options
+                (i)   HOME MOUNT - Home Command: Stop mount and then Home.
+                (ii)  TRACK TARGET - [Track target Modal.png] Search and track function. Similar to
+                      ssa-toolkit AM:Satellites item list - starts blank until filtered. Filter options
+                      are as shown in the render for both aircraft and satellites.
+                      **Range dropdown list preset ranges from 20, 50, 100, 200, 350 km.
+                (iii) JOG - Jog commands: STEP mode steps the mount by specified distance by direction
+                      JOG mode keeps the mount turning at the specified speed when direction is held.
+                (iv)  GO TO - Slew to specified coordinates, STOP if slew to local angular coordinates,
+                      TRACK if slew to celestial coordinates. Disable command if specified celestial- 
+                      coordinates are below the horizon and show red values in the elevation box(es) 
+
+
+----------------------------------------------------------------------------------------
+
+Helpers and Utilities:
+
+H1 - Datetime suite
+     The same as ssa-toolkit suite, [YYYY]-[MM]-[DD] [hh]:[mm]:[ss][Datetime picker*]
+                                                                ^
+                                                                only up to seconds precision
+     *datetime picker button is now the same height as the input fields.
+
+H2 - Angular triads
+     Same reference as ssa-toolkit including the cardinal direction chip, +/- chips, scroller mechanics,
+     overflow/value caps and typing limitations. Reference the legacy version if possible (the current
+     nuxt version is still missing some of the chip functionalities). 
+     Same reference in the format selector and the value transform functionalities -> This extends to 
+     the position altitude ft/m/km fields.
+
+H3 - Planned for aircraft tracking
+     add a helper for aircraft predicted position (Kalman filter), gain tuning will be required.
+
+H4 - Local/Sidereal transformation helper
+     Transform between local horizon and sidereal (J2000) coordinates using the set location and current
+     time at trigger for transformation.
+
+Font and number formatting: Concept renders uses Bahnschrift but due to limitations on web 
+embedding (license issues) the main font for the build will be Barlow instead. Thousand 
+separators is one whitespace as shown in the concepts.
+
+Camera control will be done separately and not included at this time. IOD Astrometry is done only from
+image uploads.
