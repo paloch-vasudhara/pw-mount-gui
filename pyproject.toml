@@ -1,0 +1,11 @@
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["scope-pointer", "web", "concept", "data", "pwi4", "tools/bench"]  # tools/bench = one-off O1 benchmark scripts
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["gateway/tests", "analysis/tests", "tools/pwi4_harness/tests"]
+markers = ["pwi4sim: drives PWI4 in simulation mode (needs PWI4_SIM=1)"]

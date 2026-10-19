@@ -1,2 +1,10 @@
 hip_main.txt
 ui-concept.psd
+.venv/
+node_modules/
+.nuxt/
+.output/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+tools/pwi4_harness/out/
