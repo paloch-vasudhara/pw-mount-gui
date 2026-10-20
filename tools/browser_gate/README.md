@@ -11,7 +11,7 @@ node tools/browser_gate/cdp.mjs <out_dir_outside_repo> <steps.json>
   remote-debugging port **9333**, profile in `<out_dir>/profile` (delete it between runs to avoid stale caches).
 - Steps (JSON array, run in order):
   - `{"nav": url, "wait": ms}`
-  - `{"size": [w, h]}`
+  - `{"size": [w, h]}` or `{"size": [w, h, dpr]}` (device scale, e.g. 1.5 for a 150 % laptop)
   - `{"eval": "js expression", "label": "name"}` — prints `EVAL <label> <value>` (promises awaited)
   - `{"click": css}` / `{"focus": css}` (click + `select()`) / `{"wheelAt": [css, deltaY, count]}`
   - `{"type": "chars"}` — real keyDown/keyUp with text per character

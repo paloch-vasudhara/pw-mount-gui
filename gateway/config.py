@@ -1,0 +1,58 @@
+"""Env-driven gateway settings."""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from .settings import default_settings_path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_PORT = 8400
+DEFAULT_WEB_ORIGINS = ("http://127.0.0.1:3200", "http://localhost:3200")
+
+
+def _csv(value: str) -> list[str]:
+    return [v.strip().rstrip("/") for v in value.split(",") if v.strip()]
+
+
+@dataclass
+class Settings:
+    port: int = DEFAULT_PORT
+    pwi4_url: str = "http://127.0.0.1:8220"
+    poll_hz: float = 10.0
+    web_origins: list[str] = field(default_factory=lambda: list(DEFAULT_WEB_ORIGINS))
+    ephemeris: Path = REPO_ROOT / "data" / "ephemeris" / "de421.bsp"
+    settings_path: Path = field(default_factory=default_settings_path)
+    poll_enabled: bool = True
+    token: str | None = None  # None -> generated per process start
+
+    @classmethod
+    def from_env(cls, port: int | None = None) -> Settings:
+        env = os.environ
+        eph = Path(env.get("PW_EPHEMERIS", "data/ephemeris/de421.bsp"))
+        if not eph.is_absolute():
+            eph = REPO_ROOT / eph
+        origins = (
+            _csv(env["PW_ALLOWED_ORIGINS"])
+            if "PW_ALLOWED_ORIGINS" in env
+            else list(DEFAULT_WEB_ORIGINS)
+        )
+        return cls(
+            port=port if port is not None else int(env.get("PW_GATEWAY_PORT", DEFAULT_PORT)),
+            pwi4_url=env.get("PW_PWI4_URL", "http://127.0.0.1:8220").rstrip("/"),
+            poll_hz=float(env.get("PW_POLL_HZ", "10")),
+            web_origins=origins,
+            ephemeris=eph,
+            settings_path=default_settings_path(),
+        )
+
+    @property
+    def allowed_origins(self) -> set[str]:
+        own = {f"http://127.0.0.1:{self.port}", f"http://localhost:{self.port}"}
+        return set(self.web_origins) | own
+
+    @property
+    def allowed_hosts(self) -> set[str]:
+        return {f"127.0.0.1:{self.port}", f"localhost:{self.port}"}

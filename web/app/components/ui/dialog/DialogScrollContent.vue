@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { DialogContentEmits, DialogContentProps } from 'reka-ui'
+import type { DialogContentEmits } from 'reka-ui'
 
 import type { HTMLAttributes } from 'vue'
 import { XIcon } from '@lucide/vue'
@@ -17,7 +17,12 @@ defineOptions({
   inheritAttrs: false,
 })
 
-const props = defineProps<DialogContentProps & { class?: HTMLAttributes['class'] }>()
+const props = defineProps<{
+  // Explicit, see DialogContent.vue: the Vite SFC compiler can't resolve DialogContentProps.
+  forceMount?: boolean
+  disableOutsidePointerEvents?: boolean
+  class?: HTMLAttributes['class']
+}>()
 const emits = defineEmits<DialogContentEmits>()
 
 const delegatedProps = reactiveOmit(props, 'class')

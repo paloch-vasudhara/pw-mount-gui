@@ -26,7 +26,7 @@ await send('Runtime.enable'); await send('Log.enable'); await send('Page.enable'
 await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
 for (const s of steps) {
   if (s.nav) { await send('Page.navigate', { url: s.nav }); await sleep(s.wait ?? 3000); }
-  if (s.size) { await send('Emulation.setDeviceMetricsOverride', { width: s.size[0], height: s.size[1], deviceScaleFactor: 1, mobile: false }); await sleep(600); }
+  if (s.size) { await send('Emulation.setDeviceMetricsOverride', { width: s.size[0], height: s.size[1], deviceScaleFactor: s.size[2] ?? 1, mobile: false }); await sleep(600); }
   if (s.eval) { const r = await send('Runtime.evaluate', { expression: s.eval, awaitPromise: true, returnByValue: true });
     console.log('EVAL', s.label ?? '', JSON.stringify(r.result?.result?.value ?? r.result?.exceptionDetails?.exception?.description)); await sleep(s.wait ?? 300); }
   if (s.mouse) { for (const [type,x,y] of s.mouse) { await send('Input.dispatchMouseEvent', { type, x, y, button: 'left', buttons: type==='mouseReleased'?0:1, clickCount: 1 }); await sleep(60); } await sleep(s.wait ?? 400); }

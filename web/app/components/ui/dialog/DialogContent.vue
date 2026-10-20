@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { DialogContentEmits, DialogContentProps } from 'reka-ui'
+import type { DialogContentEmits } from 'reka-ui'
 
 import type { HTMLAttributes } from 'vue'
 import { XIcon } from '@lucide/vue'
@@ -18,7 +18,14 @@ defineOptions({
   inheritAttrs: false,
 })
 
-const props = withDefaults(defineProps<DialogContentProps & { class?: HTMLAttributes['class'], showCloseButton?: boolean }>(), {
+const props = withDefaults(defineProps<{
+  // Explicit (not `DialogContentProps &`): Nuxt's Vite SFC compiler cannot resolve reka-ui's
+  // `Omit<DialogContentImplProps, ...>` base type ("Failed to resolve extends base type").
+  forceMount?: boolean
+  disableOutsidePointerEvents?: boolean
+  class?: HTMLAttributes['class']
+  showCloseButton?: boolean
+}>(), {
   showCloseButton: true,
 })
 const emits = defineEmits<DialogContentEmits>()

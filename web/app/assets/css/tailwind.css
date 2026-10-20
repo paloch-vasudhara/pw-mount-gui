@@ -6,14 +6,14 @@
 
 @custom-variant dark (&:is(.dark *));
 
-/* Dark only. First-pass tokens from the concept renders; refined in T1.3. */
+/* Dark only. Tokens sampled from the concept renders (palette pass T1.3). */
 :root {
   /* App tokens */
   --page-bg: #252629;
   --sky-bg: #0d1116;
   --panel-border: #626262;
   --control-border: #848484;
-  --chip-bg: #7f7f7f;
+  --chip-text: #848484;
   --label-slate: #6f8796;
   --accent-green-border: #5d9f60;
   --accent-green-text: #71af74;
@@ -26,19 +26,19 @@
   /* shadcn variables */
   --radius: 0rem;
   --background: #252629;
-  --foreground: #e8e8e8;
+  --foreground: #d9d9d9;
   --card: #252629;
-  --card-foreground: #e8e8e8;
+  --card-foreground: #d9d9d9;
   --popover: #2c2d31;
-  --popover-foreground: #e8e8e8;
+  --popover-foreground: #d9d9d9;
   --primary: #277d2a;
   --primary-foreground: #ffffff;
   --secondary: #3a3b3f;
-  --secondary-foreground: #e8e8e8;
+  --secondary-foreground: #d9d9d9;
   --muted: #2c2d31;
   --muted-foreground: #979898;
   --accent: #3a3b3f;
-  --accent-foreground: #e8e8e8;
+  --accent-foreground: #d9d9d9;
   --destructive: #e05252;
   --border: #626262;
   --input: #848484;
@@ -81,7 +81,7 @@
   --color-sky: var(--sky-bg);
   --color-panel-border: var(--panel-border);
   --color-control-border: var(--control-border);
-  --color-chip: var(--chip-bg);
+  --color-chip-text: var(--chip-text);
   --color-label-slate: var(--label-slate);
   --color-accent-green-border: var(--accent-green-border);
   --color-accent-green-text: var(--accent-green-text);

@@ -150,10 +150,13 @@ input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; marg
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='6' viewBox='0 0 8 6'><path d='M0 0 L4 6 L8 0 Z' fill='%23e8e8e8'/></svg>");
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='6' viewBox='0 0 8 6'><path d='M0 0 L4 6 L8 0 Z' fill='%23d9d9d9'/></svg>");
   background-repeat: no-repeat;
   background-position: right 7px center;
 }
+/* The value text is a flex child: let it shrink and clip (ellipsis) inside the content box, so a
+   long value stops at the 20px right padding and never runs under the triangle. */
+.ov-fmt-sel.fmt-select-trigger > .fmt-select-text { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ov-fmt-sel.fmt-select-trigger[data-state="open"],
 .ov-fmt-sel.fmt-select-trigger:focus-visible { border-color: var(--accent-green-border); outline: none; }
 .ov-fmt-sel.fmt-select-trigger:disabled { color: var(--disabled); border-color: var(--panel-border); cursor: not-allowed; }

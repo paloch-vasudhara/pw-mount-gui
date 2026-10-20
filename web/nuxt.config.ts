@@ -26,6 +26,16 @@ export default defineNuxtConfig({
   vite: { plugins: [tailwindcss()] },
   shadcn: { prefix: '', componentDir: './app/components/ui' },
 
+  runtimeConfig: {
+    public: {
+      // Dev only: Nitro's devProxy does not forward WebSocket upgrades (they fall through to
+      // the Nuxt dev worker and get the SPA page back), so in dev the telemetry socket connects
+      // straight to the gateway (its Origin allow-list admits the web dev origin; the token is
+      // still fetched through the proxy). Empty = same-origin (production: gateway serves the app).
+      gatewayWs: process.env.NODE_ENV === 'production' ? '' : gateway.replace(/^http/, 'ws'),
+    },
+  },
+
   nitro: {
     preset: 'static',
     // Dev only (not part of `nuxt generate` output). h3's app.use() strips the

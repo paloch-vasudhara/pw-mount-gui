@@ -27,6 +27,9 @@ G4 - Disconnection: if the app loses its link to the gateway, the gateway stops 
      resumes automatically.
      Known limit: if the gateway process itself dies, nothing can send the stop. The app shows a
      warning that hands the user off to PWI4 (which stays open) to stop the operation there.
+     Start-up stop: whenever the gateway starts (incl. a restart after a crash) and finds the mount
+     moving (slewing, tracking, following a path/TLE or an active offset rate), it stops the mount
+     before doing anything else. PWI4 has no watchdog of its own (BUILD_PLAN §8 P1).
 
 G5 - One object may be tracked at a time.
 
@@ -231,8 +234,9 @@ A4+A5 - MOUNT | Mount readings (status) and mount controls, through PWI4.
 
     A4/A4a. Mount Status (Dashboard + Detailed Info.png) -> information read from the mount
         (i) - Dashboard essentials
-        Azimuth, Elevation, mount status and Sun distance. Status shows green on TRACKING, Sun
-        distance green when > 15°; white otherwise. Status values per G8.
+        Azimuth, Elevation, mount status and Sun distance. Status shows green on TRACKING, RED on
+        FAULT, white otherwise. Sun distance green when > 15°, RED when ≤ 15° (inside the keep-out
+        disc). Status values per G8. (Red rules added 2026-10-20, user decision.)
         (ii) - Detailed modal (from the (...) button)
         Expanded 3D module + mount control (A5) + parameters:
             Modified Julian Date, Local Sidereal Time, Azimuth, Elevation, R.A. (J2000),

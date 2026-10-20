@@ -1,12 +1,32 @@
-# Session handoff — 2026-10-19 → next session
+# Session handoff — updated 2026-10-20 (end of day, Phase 1 checkpoint)
 
-Read this first, then `docs/BUILD_PLAN.md` (§7 tracker + resume point, §8 logs), then `docs/logic_sheet.txt` as needed.
+Read this first, then `docs/BUILD_PLAN.md` (§7 tracker + **resume point**, §6 task specs, §8 logs/findings), then `docs/logic_sheet.txt` as needed.
 
 ## Where we are
 
-- **Phase 0 (Foundations) is COMPLETE and verified**: T0.1 scaffold, T0.2 shared widgets, T0.3 PWI4-sim harness. User approved the Phase 0 check (widgets).
-- **Next task: T1.1 — Gateway core** (Phase 1 "Read path & status"). Not started; no spec written yet.
-- Commit at end of this session: _see `git log -1`_ ("Phase 0 complete …").
+- **Phase 0 COMPLETE** (commit `7d0bbdb`).
+- **Phase 1 COMPLETE, accepted by the user 2026-10-20.** The user commits it as the Phase 1 checkpoint; check `git log`, and if `7d0bbdb` is still on top the commit is pending.
+  - **T1.1 Gateway core**: read-only PWI4 poller (`GET /status` only), G8 state machine, Sun/Moon (skyfield, local `de421.bsp`), 10 Hz publish ticker decoupled from fetching, `pwi4.age_ms` staleness, gateway-computed time, pointing null when disconnected, hardened WS (Origin allowlist + first-message token, 4401) and Host check.
+  - **T1.2 Station Settings**: `%LOCALAPPDATA%\pw-mount-control\settings.json` (`PW_SETTINGS_PATH`), API key in Windows Credential Manager (`PW_SECRET_STORE=memory` for tests), REST settings + site-check (`X-Mount-Token`), first-run `timezone: null` = PC zone, site mismatch warning.
+  - **T1.3 Mount Status panel**: Pinia store + single socket with auto-reconnect after gateway restarts (time-limited fetch/open, 5 s backoff cap), stale display, palette pass.
+  - **T1.4 3D view + Details modal**: scope-pointer port (three 0.169.0), render-on-demand, full WebGL disposal, red rules (FAULT, Sun ≤ 15°).
+  - **T1.5 UI polish** (the user's review): Settings row grid via CSS vars `--ss-label 100 / --ss-fmt 60 / --ss-field 162`, separator 2│1│2, span 227, Lim EL 90, modal 788, Providers rows on the Location pitch ("clear key" inside the API key box); dropdown values ellipsize before the triangle (`.fmt-select-text`); Mount Status panel text scales with panel width (container query + clamp, unchanged at 1920, floors on the 150 % laptop).
+- **Open item O-SITE (resolve before Phase 3):** Details-modal LST/HA differ from PWI4 by 3 m 36 s. The cause is that the Settings longitude (E 101.4639°) differs from PWI4's site (E 100.5656°); it is not J2000 drift (HA uses apparent RA). See BUILD_PLAN §8 T1.5 log for the options.
+- **Next session: Phase 2, Sky Viewer.** Write the T2.1 spec into §6 (star data prep from `data/hip_main.txt`, V ≤ 6.5 adjustable (O5) + sky chart canvas, Lim EL ring), delegate it, verify.
+- Gate tooling: `tools/browser_gate/cdp.mjs` (`size` takes an optional DPR: `[w, h, 1.5]`) + `tools/pwi4_harness/simdrv.py` (sim-guarded driver). Only drive the sim to above-horizon targets (P14).
+- Decisions logged 10-20: G4 **start-up stop** (implement in T3.1); A4 **red warnings**; Lim EL field stays 90 px.
+
+## Gotchas learned this phase
+
+- Nitro `devProxy` is HTTP-only (no WS) and **hangs forever when its backend is down** → in dev the browser WS goes straight to the gateway (`runtimeConfig.public.gatewayWs`); every fetch through the proxy must be time-limited.
+- Windows: connecting to a closed localhost port waits the full timeout (≈0.5 s) — never couple a periodic loop to a connect attempt.
+- PWI4 reports zeros (JD 0, az/alt 0) when the mount is disconnected.
+- shadcn `DialogContent`/`DialogScrollContent` needed explicit props (Nuxt SFC compiler can't resolve reka-ui's extended prop types) — browser-only failure; vitest passed.
+- Nuxt auto-import mis-parses tuple-typed `export const X: [number, number]` in `app/utils/`.
+- The user often runs `pnpm dev` (3200) + gateway (8400): never touch them; throwaway Nuxt needs `NUXT_IGNORE_LOCK=1`; throwaway gateway: temp `PW_SETTINGS_PATH`, `PW_SECRET_STORE=memory`, `PW_ALLOWED_ORIGINS=<web origin>`.
+- Ephemeris `data/ephemeris/de421.bsp` is local-only: run `tools/fetch_ephemeris.py` on a fresh checkout.
+- Workers must kill processes **by PID only** (a worker once ran `taskkill /IM chrome.exe`, which closes the user's Chrome too).
+- Python on this Windows box can't see Git Bash `/tmp` — use the session scratchpad or repo-relative paths.
 
 ## What exists (repo map)
 
@@ -21,9 +41,10 @@ Read this first, then `docs/BUILD_PLAN.md` (§7 tracker + resume point, §8 logs
 | `data/` | HIP catalogue (`hip_main.txt` local only, git-ignored), `bright_stars.csv` | data |
 | `web/` | Nuxt 4 + shadcn-vue (`reka-lyra` style), Tailwind 4 with Preflight, Barlow font, Pinia | T0.1/T0.2 |
 | `web/app/components/widgets/` | Ported ssa-toolkit widgets + sign chip, caps, `invalid`, AltitudeField | T0.2 |
-| `web/app/pages/index.vue` | Dashboard shell: 5 empty `SectionFrame` panels | T0.1 |
-| `web/app/pages/dev/{health,widgets}.vue` | Dev-only harness pages (unlinked) | T0.1/T0.2 |
-| `gateway/` | FastAPI, `GET /api/mount/health`, `python -m gateway [--port]`, loopback only | skeleton |
+| `web/app/pages/index.vue` | Dashboard: 5 `SectionFrame` panels; MOUNT STATUS live, Tools group | T0.1/T1.3 |
+| `web/app/components/{mount,settings}/`, `stores/mount.ts`, `lib/hemisphere3d/` | Mount Status panel, Details modal, 3D view, Station Settings | T1.2–T1.5 |
+| `web/app/pages/dev/{health,widgets,mount}.vue` | Dev-only harness pages (unlinked) | T0.1/T0.2/T1.1 |
+| `gateway/` | FastAPI read-only gateway: poller, state, snapshot, hub (WS), security, settings | T1.1/T1.2 |
 | `analysis/` | FastAPI, `GET /api/health`, `python -m analysis [--port]`, no orekit | skeleton |
 | `tools/pwi4_harness/` | PWI4 **simulator-only** harness (10 scenarios) + `sim_guard` | T0.3 |
 | `tools/browser_gate/` | Headless-Chrome CDP driver used for UI gates (see its README) | supervisor tool |
@@ -33,7 +54,7 @@ Read this first, then `docs/BUILD_PLAN.md` (§7 tracker + resume point, §8 logs
 
 ```
 # Python (repo-root venv, Python 3.12)
-.venv\Scripts\python -m pytest          # 8 pass, 11 PWI4-sim tests skipped by default
+.venv\Scripts\python -m pytest          # 84 pass, 13 PWI4-sim tests skipped by default
 .venv\Scripts\python -m ruff check .
 .venv\Scripts\python -m gateway         # :8400
 .venv\Scripts\python -m analysis        # :8410
@@ -47,7 +68,7 @@ pnpm lint | pnpm typecheck | pnpm test | pnpm generate
 set PWI4_SIM=1 && .venv\Scripts\python tools\pwi4_harness\run_harness.py   # ~7 min, report in tools/pwi4_harness/out/
 ```
 
-Gate expectations today: lint 0 errors (11 warnings, all generated `components/ui/*`), typecheck 0, vitest 199/199, generate OK, pytest 8 pass / 11 skip, ruff clean.
+Gate expectations today: lint 0 errors (11 warnings, all generated `components/ui/*`), typecheck 0, vitest 245/245, pytest 84 pass / 13 skip, ruff clean. Fresh checkout: run `tools/fetch_ephemeris.py` first.
 
 ## Working method (user-mandated: /fable-supervise)
 
@@ -76,8 +97,10 @@ Gate expectations today: lint 0 errors (11 warnings, all generated `components/u
 
 | Item | Where it lands |
 |---|---|
-| Section title chip colours: renders show light text in an outlined box; build has grey fill + dark text (size already reduced) | T1.3 palette pass |
-| PWI4 has **no watchdog** (P1) → propose "gateway stops any motion it finds at start-up" policy — ask the user | T3.1 |
+| PWI4 has **no watchdog** (P1) → user decided: gateway stops any motion it finds at start-up (G4) | T3.1 |
+| PWI4 accepts below-horizon targets (P14) → gateway Lim EL check is the only guard | T3.1 |
+| O-SITE: one authoritative site (Settings vs PWI4); LST/HA offset; maybe block motion on mismatch, HA via LAST | before Phase 3 |
+| User's later UI sizing/alignment tweaks | as they come |
 | "Stopped" must be judged from position/velocity; `is_slewing` lags up to 1.65 s (P2); SLEWING beats TRACKING (P3) | T1.1 state machine |
 | Offsets only move a **tracking** mount (P10) → jog/step while STOPPED needs another mechanism | T3.4 design |
 | Always `update_wrap=0`; manage axis0 wrap explicitly; `goto_alt_az` may unwind the long way (P8, P9) | T3.1/T3.4, D-SUN |
@@ -86,8 +109,8 @@ Gate expectations today: lint 0 errors (11 warnings, all generated `components/u
 | Harness metric `08_watchdog.explicit_stop_latency_s` mis-measured | opportunistic fix |
 | Fields commit on blur (legacy parity), not Enter; IOD rows need row-level Enter | T5.3 |
 
-## T1.1 kickoff checklist
+## T2.1 kickoff checklist
 
-1. Re-read BUILD_PLAN §2 (I2, I3, I5, I7), §3, and §8 findings P1–P3, P11.
-2. Write the T1.1 spec into §6: PWI4 poller (10 Hz, async, own process), status model, state machine G8 (incl. P2/P3 rules, DISCONNECTED when PWI4 unreachable), Sun/Moon via skyfield, WS hub (snapshot broadcast, drop-old for slow clients, message envelope), localhost hardening (Origin + Host checks, per-launch token), tests (unit + PWI4-sim marked `pwi4sim`).
-3. Brief a Sonnet worker; verify independently (unit tests, sim run, forged-origin WS rejected, sustained telemetry rate).
+1. Re-read BUILD_PLAN §5 Phase 2 rows, logic sheet Sky Viewer rules, O5 (magnitude limit adjustable), and concept renders for the Sky Viewer panel.
+2. Write the T2.1 spec into §6: star data prep from `data/hip_main.txt` (local, git-ignored; V ≤ 6.5 default, adjustable) → compact asset; sky chart canvas (alt-az projection, horizon, cardinal points, Lim EL ring, Sun keep-out), fed by the store's time/site; render-on-demand like the 3D view.
+3. Brief a Sonnet worker (kill processes by PID only), then verify: gates, real-browser screenshots at 1920 and 1280@1.5, star positions spot-checked against skyfield for the Settings site.

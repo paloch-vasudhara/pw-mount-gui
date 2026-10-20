@@ -135,7 +135,7 @@ footer { color: var(--muted); font-size: 13px; margin-top: 28px; }
       <span class="chip r">FAULT</span>
       <span class="chip m">DISCONNECTED</span> <span class="ref">incl. PWI4 not running</span></td></tr>
   </table>
-  <div class="callout warn"><b>Known limit (G4):</b> if the gateway process itself dies, nothing can send the stop. The app shows a warning that hands the user off to PWI4 (which stays open) to stop the operation there.</div>
+  <div class="callout warn"><b>Known limit (G4):</b> if the gateway process itself dies, nothing can send the stop. The app shows a warning that hands the user off to PWI4 (which stays open) to stop the operation there. <b>Start-up stop:</b> whenever the gateway starts (incl. after a crash) and finds the mount moving — slewing, tracking, following a path/TLE or an active offset rate — it stops the mount before anything else (PWI4 has no watchdog).</div>
 </section>
 
 <!-- ============================ A1 ============================ -->
@@ -287,7 +287,7 @@ footer { color: var(--muted); font-size: 13px; margin-top: 28px; }
   <div class="two">
     <div>
       <h4>Dashboard essentials</h4>
-      <p>Azimuth · Elevation · Status · Sun distance. Status green on TRACKING; Sun distance green when &gt; 15°; white otherwise.</p>
+      <p>Azimuth · Elevation · Status · Sun distance. Status <b>green</b> on TRACKING, <b>red</b> on FAULT, white otherwise. Sun distance <b>green</b> when &gt; 15°, <b>red</b> when ≤ 15° (inside the keep-out disc).</p>
     </div>
     <div>
       <h4>Detailed modal <span class="ref">Detailed Info.png · via (…)</span></h4>

@@ -124,7 +124,7 @@ Each phase ends with a **supervisor gate** (independent checks) and a **user che
 ### Phase 3 — Control path & safety
 | Task | Scope | Gate |
 |---|---|---|
-| T3.1 | Command protocol (ids/acks), control lock, audit log, link-loss stop (G4), safety engine v1 = **refuse/stop** at Lim EL & Sun (G1–G3) | I3, I4 tests incl. forged commands; audit entries |
+| T3.1 | Command protocol (ids/acks), control lock, audit log, link-loss stop (G4), **start-up stop (G4)**, safety engine v1 = **refuse/stop** at Lim EL & Sun (G1–G3) | I3, I4 tests incl. forged commands; audit entries |
 | T3.2 | Connection sequence (A5a) with BUSY/FAULT, failed-step message, confirmation; Home (HOMING) | PWI4-sim: success path + failure handling |
 | T3.3 | Pointing mode STOP/TRACK (A5b); H4 transform helper (explicit time) | H4 unit tests vs astropy reference ≤ 1″; sidereal track on PWI4-sim |
 | T3.4 | Go To modal (A5c-iv) and Jog modal (A5c-iii): dead-man jog, serialized steps, arrow keys, sidereal nudge, disabled during object track | I3 for jog; red-box/disable rules; step serialization |
@@ -249,6 +249,160 @@ _Filled in by the designer at the start of each task (files touched, contract, i
 
 **Gate (supervisor re-runs):** pytest (default: guard tests pass, sim scenarios skipped) · ruff · guard refusal demo with a non-sim cfg · supervisor runs the full harness against PWI4-sim and checks the report · mount left disconnected · I1, I2.
 
+### T1.1 — Gateway core (spec, 2026-10-20)
+
+**Goal:** a read-only gateway that polls PWI4, turns raw status into a clean mount snapshot with the G8 state, adds Sun/Moon, and streams it to the browser over a hardened local WebSocket. **No mount commands in T1.1** (control is Phase 3) — the gateway must not call any PWI4 endpoint other than `/status`.
+
+**Modules (`gateway/`):**
+- `config.py` — env-driven settings: `PW_GATEWAY_PORT` (8400), `PW_PWI4_URL` (`http://127.0.0.1:8220`), `PW_POLL_HZ` (10), `PW_ALLOWED_ORIGINS` (default `http://127.0.0.1:3200,http://localhost:3200` + the gateway's own origin), `PW_EPHEMERIS` (default `data/ephemeris/de421.bsp`).
+- `pwi4_io.py` — async status fetch with one keep-alive `httpx.AsyncClient`; parse with `pwi4/pwi4_client.py`'s parser (`PWI4.status_text_to_dict` / `parse_status`, imported via path insert; `pwi4/` stays unmodified). Timeout ≈ 0.5 s. Unreachable → typed "unreachable" result, never an exception up the loop.
+- `snapshot.py` — pydantic `MountSnapshot` (schema below) built from parsed status + previous snapshot.
+- `state.py` — pure G8 state function (rules below), unit-tested with fixtures.
+- `ephem.py` — skyfield Sun/Moon topocentric alt/az, Moon illumination, own Sun distance to the pointing; computed at ≤ 1 Hz and cached between polls. Ephemeris file local (offline use): add `tools/fetch_ephemeris.py` that downloads `de421.bsp` into `data/ephemeris/` (git-ignored).
+- `poller.py` — one asyncio task: poll at `PW_POLL_HZ`, build snapshot, publish to the hub; records poll latency. Must never block on clients.
+- `hub.py` — WebSocket fan-out: per-client queue of size 1 (latest snapshot wins, older dropped); connect/disconnect hooks (T3.1 will attach the link-loss stop here).
+- `security.py` — Host check, Origin check, per-launch token (rules below).
+- `app.py` — FastAPI app with a lifespan that starts/stops the poller; routes below.
+
+**Site for T1.1:** PWI4's own `site.*` values (`site.source = "pwi4"`). T1.2 switches to the Settings location and adds the mismatch warning.
+
+**Snapshot schema (`MountSnapshot`):**
+`seq`, `ts_utc`, `state` (G8), `state_reason` (str|null), `pwi4 {reachable, version, latency_ms}`, `site {lat, lon, height_m, source}`, `time {jd, mjd, lmst_hours}`, `mount {connected, az, alt, ra_j2000_h, dec_j2000_deg, ra_apparent_h, dec_apparent_deg, target_ra_apparent_h, target_dec_apparent_deg, is_slewing_raw, is_tracking_raw, axis0_wrap_min_deg, distance_to_sun_deg_pwi4}`, `axes [ {enabled, position_deg, velocity_deg_s (derived from positions/timestamps — PWI4 sim velocity fields are 0, P12), rms_arcsec, dist_to_target_arcsec, min_deg, max_deg, max_vel_deg_s, accel_deg_s2} ×2 ]`, `sun {alt, az}`, `moon {alt, az, illumination}`, `sun_distance_deg` (ours, pointing → Sun), `hour_angle_h` (LMST − RA apparent, wrapped ±12).
+
+**State rules (G8, pure function of current + recent snapshots):**
+1. PWI4 unreachable → `DISCONNECTED`, reason "PWI4 not running / not reachable".
+2. `mount.is_connected = false` → `DISCONNECTED`, reason "mount not connected".
+3. Connected and any axis disabled → `FAULT`, reason "axis N disabled".
+4. `is_slewing_raw` and measurable motion (any axis |v| > 0.05 °/s within the last 0.3 s) → `SLEWING`. **`is_slewing_raw` with positions frozen ≥ 0.3 s → not slewing** (P2: the flag lags a stop by up to 1.65 s).
+5. Else `is_tracking_raw` → `TRACKING` (P3: SLEWING already took precedence).
+6. Else `STOPPED`.
+`HOMING` and `BUSY` are set only by the command layer (Phase 3) via an override hook — provide the hook (`state.set_override(state, reason) / clear_override()`), unused in T1.1.
+
+**Routes:**
+- `GET /api/mount/health` (unchanged).
+- `GET /api/mount/status` → latest snapshot JSON (debug / fallback).
+- `GET /api/mount/session` → `{token}`; only when the Host check passes and the request is same-origin (`Sec-Fetch-Site` is `same-origin` or `none`, or Origin is in the allowlist).
+- `WS /api/mount/ws` → Origin must be in the allowlist (missing Origin = reject); the client's **first message** must be `{"type":"auth","token":…}` within 2 s, else close code **4401**. Then server sends `{"type":"hello", …}` and a `{"type":"status","seq":…,"data":MountSnapshot}` stream at the poll rate. Envelope for all messages: `{type, seq, ts, data}`.
+
+**Security (I7):** Host header must be `127.0.0.1:<port>` / `localhost:<port>` (else 400 — DNS-rebinding guard). Token = 32 random bytes (urlsafe) per process start; never in URLs or logs. No CORS middleware. Bind 127.0.0.1 only (already).
+
+**Web side (minimal, for verification only):** `web/app/composables/useMountSocket.ts` (fetch token from `/api/mount/session`, open WS, reconnect with backoff, expose the latest snapshot + connection state) and a dev page `web/app/pages/dev/mount.vue` showing the live snapshot JSON + state. Dev proxy must forward the WS (`/api/mount` already proxied — confirm WS upgrade works through Nitro's devProxy; if not, document the fix). The real Mount Status panel is T1.3.
+
+**Tests:**
+- Unit (always run): status-text fixtures → snapshot; state table incl. P2 (flag true + frozen positions → not SLEWING after 0.3 s) and P3; derived velocity; Host/Origin/token rules (bad Host → 400, bad/missing Origin → WS rejected, no/late/wrong auth → 4401, good → hello + status); hub drop-old behaviour with a slow client; poller against a fake PWI4 via `httpx.MockTransport` incl. unreachable → DISCONNECTED and recovery.
+- `pwi4sim` (only with `PWI4_SIM=1`, guarded by `tools/pwi4_harness/sim_guard`): run the gateway against PWI4-sim for 10 s → ≥ 9.5 Hz snapshots; drive a goto + STOP with `pwi4_client` **from the test** (the gateway itself still sends nothing) and assert the gateway's states go STOPPED → SLEWING → STOPPED with the STOPPED transition ≤ 0.5 s after motion stops (P2 rule).
+
+**Must not touch:** `pwi4/`, `scope-pointer/`, `concept/`, `docs/`, existing widgets/pages other than adding the two new web files + proxy fix, ssa-toolkit. No commits.
+
+**Gate (supervisor re-runs):** pytest (unit) + ruff + web lint/typecheck/test · gateway on a throwaway port: forged Host → 400, forged-Origin WS rejected, no-token WS → 4401 · PWI4-sim run: snapshot rate ≥ 9.5 Hz, states through a goto/STOP driven from a separate script, P2 rule observed · browser: `/dev/mount` through the web dev proxy shows live snapshots · gateway sends **only `/status`** to PWI4 (check PWI4's `HTTPServer.txt` log for the run) · I1, I2, I5 (gateway unaffected while analysis busy — trivial now, note), I9.
+
+### T1.2 — Station Settings (spec, 2026-10-20)
+
+**Goal:** persistent station settings owned by the gateway, the Settings modal (A2b-iii, Settings.png), the PWI4 site-mismatch warning, and the gateway switching its site (Sun/Moon/LMST) from PWI4's values to the Settings location.
+
+**Gateway — store (`gateway/settings.py`):**
+- File: `%LOCALAPPDATA%\pw-mount-control\settings.json` (override env `PW_SETTINGS_PATH`). Atomic write (temp file + `os.replace`). Schema-versioned (`"version": 1`).
+- Fields: `location {lat_deg, lon_deg, alt_m, timezone (IANA)}`, `hardware {mount: "PW L-350", ota: "Celestron RASA11", lim_el_deg}`, `providers {astrometry: "astrometry.net", satellite_db: "DELV Aerospace"}`, `display {lat_format, lon_format, alt_unit}` (remembers the user's DD/DMS and FT/M/KM choices).
+- Validation (pydantic): lat −90…90, lon −180…180, alt −500…9000 m, timezone valid via `zoneinfo` (add `tzdata` to requirements — Windows has no system tz database), lim_el 0…90.
+- First run (no file): seed location from PWI4's site if reachable, else N 13.7862° E 101.4639° 40.8 m (Settings.png values); timezone = the PC's zone (sent by the browser on first save; gateway default `UTC` until then); lim_el 15.
+- **API key (secret):** stored in the Windows Credential Manager via `keyring` (service `pw-mount-control`, user `astrometry.net`), behind a small `SecretStore` interface with an in-memory implementation for tests. Never written to `settings.json`, never logged, never returned — responses only carry `api_key_set: bool`.
+
+**Gateway — API (all require the WS token in header `X-Mount-Token` **and** pass the Host/Origin checks; no token → 401):**
+- `GET /api/mount/settings` → settings + `api_key_set`.
+- `PUT /api/mount/settings` → validate, save, apply live; body may include `api_key`: string = set, `""` = clear, absent/null = keep. Response = saved settings + `site_check` (below).
+- `GET /api/mount/site-check` → current comparison against PWI4.
+- `site_check` = `{pwi4_reachable, ok, lat_diff_deg, lon_diff_deg, alt_diff_m, tolerance {lat_lon_deg: 0.01, alt_m: 100}}` (`ok` = within tolerance; null diffs when PWI4 unreachable). The gateway never writes the site to PWI4.
+
+**Gateway — snapshot changes:** `site` now comes from Settings (`site.source = "settings"`), so Sun/Moon/LMST work even when PWI4 is down. Add `limits {lim_el_deg, sun_keepout_deg: 15}` and `site_check` (recomputed on each successful PWI4 fetch; the UI shows it on Save now and on Connect in T3.2).
+
+**Web — Settings modal (`components/settings/StationSettingsDialog.vue`):**
+- Layout per Settings.png: four fieldset groups with legends — Location (left top), Providers (right top), Hardware (left bottom), ADS-B (right bottom, disabled "Section awaiting protocol template") — and [CANCEL] / [SAVE SETTINGS] (green). Vertical separator between labels and form in Location.
+- Location: Latitude/Longitude = `AngleField` with N/S and E/W cardinal chips + DD/DMS format selector; Altitude = `AltitudeField` (FT/M/KM); **Timezone** = searchable dropdown of `Intl.supportedValuesOf('timeZone')`, defaulting to the PC zone.
+- Hardware: Mount / OTA = fixed single-entry dropdowns; **Lim EL [ °]** = numbers only, capped 0–90.
+- Providers: Astrometry / Satellite DB fixed dropdowns; **API key** = password input, placeholder shows "•••• set" when `api_key_set`, empty means keep; a small "clear key" action.
+- Cancel / ✕ = close without saving. Save = PUT → on success close, **unless** `site_check.ok` is false: then stay open showing an amber warning with the differences ("Location differs from PWI4's site: Δlat …°, Δlon …°, Δalt … m") and a Close button. Validation errors in red on the field; Save disabled while invalid.
+- Opened from a minimal **Tools** group in the FILTERS panel (SATELLITE PATH ANALYSIS, INITIAL ORBIT DETERMINATION — present but disabled until Phase 5 — and STATION SETTINGS), matching the render.
+- `composables/useGatewayApi.ts`: REST helper that gets the token from `/api/mount/session` (time-limited fetch, like `useMountSocket`) and sends `X-Mount-Token`.
+
+**Tests:** Python — store round-trip + atomic write, validation edges, first-run seeding (PWI4 up / down), secret never in file/response/log (grep the written file and responses), token required (401), Origin/Host enforced, `site_check` tolerance edges (0.0099 vs 0.0101°, 99 vs 101 m), snapshot site source switch. Web (vitest) — dialog validation, Save disabled when invalid, payload shape (api_key omitted when untouched).
+
+**Must not touch:** `pwi4/`, `scope-pointer/`, `concept/`, `docs/`, ssa-toolkit; never write PWI4 settings or site. No commits.
+
+**Gate (supervisor re-runs):** pytest + ruff + web gates · browser: open STATION SETTINGS, change lat in DMS + altitude in FT + timezone, Save → reload → values persist; Cancel discards; API key never appears in DOM/network responses/settings.json; mismatch warning shown against PWI4-sim's site and absent when equal; snapshot `site.source = settings`, Sun/Moon present with PWI4 down · screenshot vs Settings.png · I1, I6, I7.
+
+### T1.3 — Dashboard shell + Mount Status panel + palette pass (spec, 2026-10-20)
+
+**Goal:** one app-wide telemetry store, the dashboard MOUNT STATUS panel (A4-i) driven by it, and the palette corrected against the renders.
+
+**Palette pass (re-sampled from Main Dashboard 1.png with dominant-colour counts, 2026-10-20):**
+- Section title chip: **transparent background, 1 px border `#626262` (same as the panel border), text `#848484`**, bold uppercase. Size stays as the user reduced it (13 px). The chip sits on the panel's top-left corner with its border shared with the panel border, as in the render.
+- Main text `#d9d9d9` (replaces `#e8e8e8`); captions/labels in panels `#d9d9d9`; value-box border `#848484`; status/positive values green `#5d9f60`; button "active" green text `#71af74` (unchanged); page/panel bg `#252629`.
+- Update the tokens in `tailwind.css` (not per-component colours) and re-check `/dev/widgets` + the Settings dialog still look right.
+
+**Telemetry store (`web/app/stores/mount.ts`, Pinia):** wraps the existing `useMountSocket` logic so the app opens **one** gateway socket. Exposes `snapshot`, `connection` (`connecting|open|closed`), `linkStale` (socket not open, or the last status message older than 1.5 s by wall clock), and a `display` getter with formatted fields. `/dev/mount` switches to the store.
+
+**Display rules (pure functions in `web/app/utils/mount-format.ts`, unit-tested):**
+- Azimuth `204.63` (2 decimals, no sign); Elevation `+ 58.32` / `− 3.10` (sign, space, 2 decimals, U+2212 minus); Sun Distance `136.17°`.
+- `null` value or `linkStale` → `—` shown dimmed.
+- Status text = G8 state. When the gateway link itself is down (`linkStale`), Status shows `DISCONNECTED` with reason "gateway not reachable".
+- Colours per A4-i: Status **green on TRACKING**, `#d9d9d9` otherwise; Sun Distance **green when > 15°** (`limits.sun_keepout_deg`), `#d9d9d9` otherwise.
+- The state reason (G7) appears as a tooltip on the Status value.
+
+**MOUNT STATUS panel (`components/mount/MountStatusPanel.vue`), layout per the render (crop: panel ≈ 450 × 560 px at 1920 × 1080):**
+- Top: a 3D slot (`<div data-testid="mount-3d-slot">`, ~60 % of the panel height, empty dark area for now — T1.4 fills it).
+- Two outlined value boxes side by side (Azimuth, Elevation) with captions `AZIMUTH (°)` / `ELEVATION (°)` below; value text bold, larger (≈ 20 px at 1920 width).
+- Rows `Status` / `Sun Distance`, label left, value right-aligned.
+- A small rounded-pill `…` button centred at the bottom → emits `open-details` (the detailed modal is T1.4; for now it opens nothing and has a "Details — coming in T1.4" tooltip).
+- Panel content must not overflow at 1280 × 800.
+
+**Must not touch:** gateway code (no backend changes in T1.3), `pwi4/`, `scope-pointer/`, `concept/`, `docs/`, ssa-toolkit; widgets only through tokens. No commits.
+
+**Tests:** vitest for the formatters/colour rules (incl. null, negative elevation, sun at exactly 15°, stale) and the store's staleness logic (fake timers).
+
+**Gate (supervisor re-runs):** web gates · browser with a live gateway + PWI4-sim: values match PWI4's GUI, Status colours for STOPPED/TRACKING, Sun Distance colour, stale handling when the gateway is killed and recovery after restart · screenshot of the dashboard vs Main Dashboard 1.png (chip style, panel crop) at 1920 × 1080 and 1280 × 800 · the T1.2 PWI4 site-mismatch warning shown against the real sim.
+
+### T1.4 — 3D mount view + Detailed Mount Status modal (spec, 2026-10-20)
+
+**Goal:** port the `scope-pointer/` three.js prototype into the app as a reusable Vue component fed by the telemetry store, show it in the MOUNT STATUS panel slot and in the Detailed Mount Status modal (A4-ii, Detailed Info.png), and apply the red-warning rules.
+
+**3D component (`components/mount/MountHemisphere3D.vue` + `app/lib/hemisphere3d/*.ts`):**
+- Port the **current** `scope-pointer/src` (coords, config, scene/{hemisphere, mount, celestial, pointer}) faithfully — the user refined it on 2026-10-16 (e.g. `FAR_SIDE_DIM` far-side depth cue); treat its visual choices as hand-styling, don't "clean them up". `three` from npm, pinned (same major/minor the prototype uses, 0.169.x), not the CDN. Drop the mock control panel / mock source — inputs now come from the store.
+- Inputs: mount az/alt (store snapshot; smoothed toward each 10 Hz report like the prototype's `DISPLAY_TAU`), Sun alt/az, Moon alt/az + illumination, `limits.lim_el_deg`, `limits.sun_keepout_deg` (15 — replaces the prototype's 10°), target marker from `target_ra/dec_apparent` converted to alt/az with LMST + site latitude (prototype's `haDecToAltAz`), shown only while SLEWING.
+- New: a dashed **Lim EL ring** on the dome at `alt = lim_el_deg` (matches the planned Sky Viewer ring). Pointer arrow/marker turn red inside the Sun keep-out (prototype behaviour, now 15°).
+- Mount not connected / stale: hide arrow + markers, keep the mount model at its last pose (or the prototype default pose before any data), dim nothing else.
+- Keep **render-on-demand** (frame only on data change, smoothing in progress, or orbit interaction). Expose the rendered-frame count as `data-frames` on the canvas wrapper for the gate.
+- Two sizes: `compact` (dashboard slot — fills the panel's 3D area, orbit interaction kept) and `expanded` (modal). Each instance owns its renderer and **fully disposes** it on unmount (geometries, materials, textures, renderer, `forceContextLoss`) — opening/closing the modal repeatedly must not leak WebGL contexts.
+
+**Detailed Mount Status modal (`components/mount/MountDetailsDialog.vue`)**, opened by the panel's `…` button; layout per Detailed Info.png:
+- Left: expanded 3D view (black backdrop). Right: **Parameters** fieldset — Modified Julian Date, Local Sidereal Time, Azimuth, Elevation, R.A. (J2000), Declination (J2000), Hour Angle, Mount Status, Axis 0 Status, Axis 1 Status, Axis 0 RMS, Axis 1 RMS, Sun Distance (fixes the render's duplicated "Axis 0 Status" label).
+- Formats: MJD `61 333.19885` (5 decimals, single-space thousands); LST `HH:MM:SS`; Az `320.500°`, El `39.302°` (3 decimals, signed El); RA `16ʰ 25ᵐ 43.32ˢ` (superscript h/m/s as in the render); Dec `+50° 08′ 39.30″`; Hour Angle `03ʰ 12ᵐ 20.11ˢ` signed; axis status = green dot "Enabled" / grey dot "Disabled"; RMS `0.560″`; Sun Distance `82.270°`. Null → dimmed `—`.
+- Below Parameters: **Connection / Pointing Mode / Commands** groups rendered as in the render but **disabled** (tooltip "Mount control arrives in Phase 3").
+- ✕ closes.
+
+**Red-warning rules (A4-i, user 2026-10-20)** in `utils/mount-format.ts` + tests, used by the panel and the modal: Status green on TRACKING, **red on FAULT**, `#d9d9d9` otherwise; Sun Distance green when > keep-out, **red when ≤ keep-out**. Add a `--danger`-based tone (token already exists).
+
+**Must not touch:** gateway code, `pwi4/`, `scope-pointer/` (read-only source for the port), `concept/`, `docs/`, ssa-toolkit. No commits.
+
+**Gate (supervisor, with PWI4-sim running — includes carried T1.2/T1.3 live checks):** web gates · browser vs live gateway + PWI4-sim: 3D pointer follows PWI4 gotos (compare with PWI4 GUI az/alt), target marker during a slew, Sun disc 15° + Lim EL ring visible, idle → `data-frames` stops increasing · panel values vs PWI4 GUI (T1.3 carry) · FAULT red (disable an axis in PWI4) · modal parameters vs PWI4 (MJD/LST/RA/Dec/HA/axes) · open/close modal 10× without WebGL context warnings · screenshots vs Main Dashboard 1.png (panel) and Detailed Info.png (modal) · T1.2 site-mismatch warning against the real sim (carry).
+
+### T1.5 — Phase 1 UI polish (spec, 2026-10-20, user-approved adjustment list)
+
+**Goal:** the user's Phase 1 review items A (Station Settings geometry) and B (Mount Status panel text on small/scaled screens). Web only.
+
+**A. Station Settings modal (`components/settings/StationSettingsDialog.vue` styles; shared widgets untouched unless scoped under `.station-dialog`).** One row grid in every section: `[label column L] [format 60] 2px │1px 2px [field 162]` → the full control span after the label column is **227 px**.
+- A1: one shared label column width L (~100 px, enough for "Satellite DB"/"Longitude") in all sections. The left edge of the Lat/Lon/Alt format selectors = left edge of Mount, OTA, Lim EL (Hardware) and Astrometry, API key, Satellite DB (Providers, same offset inside its own fieldset).
+- A2: Lat/Lon/Alt format/unit selectors 70 → **60 px** (`margin-right: 2px` stays).
+- A3: exactly **2 px gap · 1 px separator · 2 px gap** between format selector and every value control in Location (Lat/Lon DMS suites and DD box, Altitude, Timezone). Separator position derived from L + 60 + 2, not a magic number.
+- A4: every Location value control after the separator is **162 px** wide (= DMS suite 56+42+64; measure the suite — if it is wider, use the measured width throughout). Timezone clips long names.
+- A5: Mount, OTA, Astrometry, API key, Satellite DB = **227 px**. **Lim EL stays 90 px** (user decision), left-aligned at the format-selector edge.
+- A5c: both grid columns equal; modal width shrinks to fit (≈ 790 px: 2 × (L + 227 + fieldset padding/borders) + gap + body padding); single-column breakpoint moved down to match. No change to behaviour, validation, testids or the warning/error texts.
+
+**B. MOUNT STATUS panel text scale (`components/mount/MountStatusPanel.vue`).** Size text from the panel's own width (CSS container query / `cqw` with `clamp`). At the panel width it has on a 1920×1080 @100 % screen (~430 px wide) the result must be **identical to today** (Az/El values 20 px, box min-w 100 × h 32, captions 14 px, Status/Sun rows 16 px, Az–El gap 65 px). At ~290 px (1280×720 CSS = 1080p @150 %) about: values ~15 px, box ~80 × 26, captions ~12 px, rows ~13 px, gap ~45 px; floors keep text readable (captions ≥ 11 px, rows ≥ 12 px). Details modal, title chips and the 3D view unchanged.
+
+**Must not touch:** gateway, `pwi4/`, `docs/`, ssa-toolkit, other widgets' global CSS (scope overrides). No commits.
+
+**Gate (supervisor):** web gates · real-browser geometry measurement of every A item (left edges, widths, 2|1|2 spacing, modal width) · screenshots of the panel at 1920×1080 DPR 1 (must equal pre-change computed sizes) and 1280×720 DPR 1.5.
+
 ---
 
 ## 7. Progress tracker
@@ -260,10 +414,11 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | T0.1 | ✅ | ✅ 10-19 | ✅ 10-19 | ✅ 10-19 | — (phase-end) | `reka-lyra`; ports 3200/8400/8410; title-chip colours → T1.3 |
 | T0.2 | ✅ | ✅ 10-19 | ✅ 10-19 | ✅ 10-19 | phase-end | 2 browser bugs found at gate, fixed + regression-tested |
 | T0.3 | ✅ | ✅ 10-19 | ✅ 10-19 | ✅ 10-19 | ✅ (Phase 0 approved) | findings → §8 PWI4 behaviour |
-| T1.1 | ⬜ | | | | | |
-| T1.2 | ⬜ | | | | | |
-| T1.3 | ⬜ | | | | | |
-| T1.4 | ⬜ | | | | | |
+| T1.1 | ✅ | ✅ 10-20 | ✅ 10-20 | ✅ 10-20 | phase-end | read-only verified (PWI4 log: 379/379 `GET /status`); 10 Hz up/down; STOPPED 0.09–0.13 s after STOP |
+| T1.2 | ✅ | ✅ 10-20 | ✅ 10-20 | ✅ 10-20 | phase-end | dialog 1000 px like render; key secrecy + keyring live ✓; mismatch warning vs real PWI4-sim to be shown at next sim session |
+| T1.3 | ✅ | ✅ 10-20 | ✅ 10-20 | ✅ 10-20 | phase-end | chips/palette fixed; live vs PWI4 GUI + T1.2 mismatch warning carried to the T1.4 sim gate |
+| T1.4 | ✅ | ✅ 10-20 | ✅ 10-20 | ✅ 10-20 | **Phase 1 user check pending** | live vs PWI4-sim ✓ (values, FAULT red, sun-zone red, TRACKING green, target marker, modal ×10, idle frames); carried T1.2 mismatch + T1.3 values ✓ |
+| T1.5 | ✅ | ✅ 10-20 | ✅ 10-20 | ✅ 10-20 | user check pending | Settings: label col 100, fmt 60, 2│1│2, fields 162, full span 227, Lim EL 90, modal 788 (1-col < 820); panel clamp/cqw: 1920 identical, 1280@1.5 → 14/80×26/11/12/45 (panel 258 px → floors) |
 | T2.1 | ⬜ | | | | | O5 adjustable |
 | T2.2 | ⬜ | | | | | |
 | T2.3 | ⬜ | | | | | |
@@ -282,7 +437,7 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | T6.2 | ⬜ | | | | | |
 | T6.3 | ⬜ | | | | | |
 
-**Resume point:** Phase 0 complete and committed. Next **T1.1** (gateway core) — start from `docs/HANDOFF.md`.
+**Resume point:** **Phase 1 complete and accepted by the user (T1.1–T1.5 + follow-up polish), committed by the user as the Phase 1 checkpoint** (if `git log` still shows `7d0bbdb` on top, the commit is still pending). Open item O-SITE (§8 T1.5 log) is to be resolved before Phase 3. Next: **Phase 2 / T2.1** (star data + sky chart canvas) — write its spec first.
 
 ---
 
@@ -298,6 +453,18 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | 2026-10-19 | O1–O7 | Resolved (§4); D-SUN design approved |
 | 2026-10-19 | Order | Sky Viewer (Phase 2) before control path (Phase 3) so control tests run from the Sky Viewer |
 | 2026-10-19 | Plan | Build plan approved |
+| 2026-10-20 | T1.4 | Elevation / Hour Angle show a sign only when negative (U+2212), as in the render; Dec always signed | render parity | supervisor (user may change) |
+| 2026-10-20 | T1.4 | 3D Moon phase from the Sun/Moon geometry (prototype), not the gateway's `moon.illumination` | the drawing can't disagree with itself | supervisor |
+| 2026-10-20 | T1.4 | Modal MJD shows 5 decimals (`61 333.33261`); render shows an integer | more useful live; single-space thousands kept | supervisor (user may change) |
+| 2026-10-20 | T1.4 | `test_snapshot_from_status_text` compared hour angle unwrapped → failed whenever LMST − RA > 12 h; fixed to compare the wrapped value (code was correct) | clock-dependent test bug from T1.1 | supervisor |
+| 2026-10-20 | T1.2 | shadcn `DialogContent`/`DialogScrollContent` props declared explicitly | Nuxt's Vite SFC compiler can't resolve reka-ui's `DialogContentProps` extends → whole page broke when the dialog was imported (browser-only; vitest passed) | supervisor |
+| 2026-10-20 | T1.2 | `PW_SECRET_STORE=memory` env for dev/test runs | keeps throwaway runs out of the real Windows Credential Manager | supervisor |
+| 2026-10-20 | T1.1 | `useMountSocket`: session fetch time-limited (3 s), socket-open timeout (5 s), backoff cap 5 s | user run-through: page never reconnected after a gateway restart — the Nitro dev proxy hangs (no reply) while its backend is down, and the un-timed fetch stalled reconnection forever. Browser-verified: reconnects ~2 s after restart | supervisor |
+| 2026-10-20 | T1.1 | Snapshot `time` (jd/mjd/lmst) computed by the gateway from its clock + site longitude; PWI4's values used only when connected and agreeing (≤ 1 s / 0.01 h). Pointing-derived fields + axis rms/dist are `null` when the mount is disconnected or data stale | PWI4 reports zeros when the mount is disconnected (MJD −2400000.5 seen live) | supervisor |
+| 2026-10-20 | T1.1 | Publish ticker decoupled from PWI4 fetch; `pwi4.age_ms`; > 1 s stale → DISCONNECTED "PWI4 not responding"; connect timeout 0.25 s, retry 1 s when unreachable | Windows connect to a closed localhost port waits the full timeout (~0.5 s) → stream fell to ~2 Hz | supervisor |
+| 2026-10-20 | T1.1 | WebSocket can't pass Nitro devProxy (HTTP only) → in dev the page connects straight to the gateway (`runtimeConfig.public.gatewayWs`); token fetch stays proxied; prod = same-origin (gateway serves the app) |
+| 2026-10-20 | A4-i | **Red warnings** (user): Status red on FAULT; Sun Distance red when ≤ 15° (green > 15°). Implemented in T1.4 |
+| 2026-10-20 | G4 / T3.1 | **Start-up stop** (user): on every gateway start, if any motion is active (slewing, tracking, path/TLE follow, offset rate) the gateway stops the mount first — mitigates P1 (no PWI4 watchdog) after a crash/restart |
 | 2026-10-19 | T0.1 | Section title tags reduced (text-lg → 13 px, tighter padding) per user review |
 | 2026-10-19 | UI kit | shadcn-vue **Lyra** style (user; the React preset code can't be applied to shadcn-vue, so the style is set directly); Tailwind Preflight ON |
 
@@ -328,6 +495,7 @@ Agreement (first 50 satellites × 7 epochs): TEME position diff max 1.4e-7 km; a
 | P10 | **Offsets (rate / add_arcsec) only move the mount while it is tracking**; on an idle mount they only change bookkeeping. While tracking: rate exact (0.1668 vs 0.1667 °/s), stop_rate ≈ 0.12 s, 120″ step ≈ 0.23 s | T3.4: jog/step while TRACKING = offsets (sidereal nudge ✓); jog/step while STOPPED needs another mechanism (goto_alt_az increments or a short altaz custom path) — design in T3.4 |
 | P11 | `/status` at 10 Hz: mean 18 ms, p95 27 ms, max 30 ms, 0 > 100 ms | 10 Hz poll is comfortable (T1.1) |
 | P12 | Simulator only: `find_home` is a no-op (no motion, no homing field); velocity fields always 0 | HOMING detection and velocity fields must be verified on the real mount (Phase 3 user session); gateway derives velocity from position |
+| P14 | **PWI4 accepts below-horizon targets**: `goto_ra_dec_j2000` to a target ~11.7 h from the meridian drove the sim mount to its −40° mechanical altitude limit and kept slewing/tracking there (2026-10-20, T1.4 gate) | The gateway's G1 Lim EL check (T3.1) is the only guard — validate every goto/track target before sending, and refuse below Lim EL |
 | P13 | Slews approach exponentially (slew time constant 0.5): 90° ≈ 9.5 s, 180°-ish ≈ 13.8 s | D-SUN slew-time model uses vmax/accel + the approach constant |
 
 Harness note: `08_watchdog.explicit_stop_latency_s` is mis-measured in the supervisor run (includes the silent period); conclusion unaffected — fix opportunistically.
@@ -357,6 +525,12 @@ _Differences between the as-built app and the logic sheet / concept renders, wit
 | Date | Session | Summary |
 |---|---|---|
 | 2026-10-19 | Planning | Concepts reviewed; logic sheet Rev 2 + HTML; plan drafted, reviewed, O1 benchmarked, approved |
+| 2026-10-20 | T1.4 | 3D view (scope-pointer port, three 0.169.0) + Details modal + red rules by worker. Supervisor gate vs live PWI4-sim driven by `tools/pwi4_harness/simdrv.py` (sim-guarded): panel 180.00/+45.00 STOPPED matches PWI4; modal MJD/LST/RA/Dec/HA/axes match PWI4 within the ~2 s sampling gap; SLEWING + target marker mid-slew; FAULT red (axis 0 disabled, tooltip "axis 0 disabled"); 5° from the Sun → Sun Distance 4.88° red + red arrow; TRACKING green; modal open/close ×10 → no WebGL warnings, 1 canvas left; idle STOPPED → `data-frames` flat; T1.2 mismatch warning live ("Δlat +1.0000°…"). Found P14 (PWI4 accepts below-horizon targets). Fixed a clock-dependent T1.1 test. Sim mount left disconnected |
+| 2026-10-20 | T1.3 | Telemetry store + MOUNT STATUS panel + palette (chips now outlined light text) by worker; supervisor: web gates (vitest 225), screenshots 1920/1280 vs render (TRACKING green, Sun green, stale → dimmed — + DISCONNECTED, recovery), removed the unused `useMountSocket` wrapper. Live PWI4-sim comparison deferred to T1.4 (PWI4 not running) |
+| 2026-10-20 | T1.2 | User: settings OK; UI sizing/alignment tweaks to come later |
+| 2026-10-20 | T1.2 | Settings by worker; gate found dialog ~1870 px wide (unlayered CSS beat Tailwind max-w) + UTC-means-unset heuristic → fixed (1000 px modal, fixed field widths, visible separator; first-run `timezone: null`). Supervisor: Chrome round trip (DMS/FT/Bangkok/LimEL persisted, cancel discards), key absent from DOM/file/responses, 401/403/422, snapshot site=settings with Sun while PWI4 down, KeyringSecretStore live vs Windows Credential Manager (throwaway entry); pytest 84, vitest 212 |
+| 2026-10-20 | T1.1 | User run-through on /dev/mount passed (8 checks) after the reconnect fix |
+| 2026-10-20 | T1.1 | Gateway core by worker; supervisor gate found 2 issues (≈2 Hz stream when PWI4 down; bogus time/pointing when mount disconnected), both fixed + tested. Final: pytest 50 pass/13 skip, ruff, web gates; security probes (Host 400, session 403, WS Origin 403, auth 4401, token ok); PWI4-sim 9.98 Hz, STOPPED→SLEWING→STOPPED, STOPPED 0.13 s after STOP; PWI4 HTTP log only `/status`; time vs skyfield 0.09 s |
 | 2026-10-19 | Wrap-up | Browser-gate driver + O1 bench scripts moved into `tools/`; `docs/HANDOFF.md` written; Phase 0 committed at the user's request |
 | 2026-10-19 | Phase 0 | User check: widgets approved |
 | 2026-10-19 | T0.3 | PWI4-sim harness by worker (+ LEO pass and `update_wrap` variants). Supervisor: pytest 8 pass/11 skip, ruff clean, guard refuses real-mount + missing cfg (exit 2, no command sent), own full run 10/10 ok, mount left disconnected + axes disabled. Findings P1–P13 recorded |
@@ -364,6 +538,15 @@ _Differences between the as-built app and the logic sheet / concept renders, wit
 | 2026-10-19 | T0.1 | Scaffold by Sonnet worker; supervisor gate re-run: lint (0 err/8 warn), typecheck, generate, vitest, pytest, ruff, health direct + via proxy on 18401/18411/13201, loopback-only binds, Barlow loaded, shell screenshot ≈ Main Dashboard 1 layout, I1 clean @84f2ded, I9 clean, all throwaway servers killed |
 
 ---
+
+### T1.5 log (2026-10-20)
+- User Phase 1 functional check passed; UI review list A1–A5c + B approved (Lim EL stays 90 px — user).
+- Worker implemented; supervisor re-measured in headless Chrome: every Settings control at the spec'd x/width (label 0/100, fmt 100/60, separator 162, value 165/162 in DD/DMS/M/FT, full span 100/227, Lim EL 100/90), columns 361/361, modal 788. Panel 1920×1080: 20/100×32/14/16/65 (unchanged); 1280×720 @1.5: 14/80×26/11/12/45.
+- Deviation: the panel at 1280 CSS px is 258 px wide (spec estimated ~290), so the floors apply there.
+- Gates: lint 0 errors, typecheck 0, vitest 245/245. `tools/browser_gate/cdp.mjs` `size` step gained an optional DPR (`[w, h, dpr]`).
+- Follow-up review (user, same day), done by supervisor: (1) Providers rows now sit on the Location row pitch (Satellite DB level with Altitude, 4th row blank; both fieldsets 182 px) — the "clear key" link moved inside the API key box (left, the key text is right-aligned), shown only while a key is set and the box is empty; (2) all dropdowns (`FormatSelect`, `TimezoneSelect`) wrap the value in `.fmt-select-text` (shrinkable flex child with ellipsis), so long values stop at the 20 px right padding instead of running under the triangle (measured: long timezone ends 21 px from the box edge). Gates re-run: lint 0 errors, typecheck 0, vitest 245/245.
+- **Open item O-SITE (user, 10-20): Details-modal LST / HA differ from PWI4's.** Diagnosed: not J2000 drift (HA = LMST − *apparent* RA, the same RA PWI4 uses) but the **site mismatch**. LMST comes from the Settings longitude (E 101.4639°) vs PWI4's site (E 100.5656°): Δ 0.898° = 3 m 36 s of sidereal time. PWI4's LMST is only adopted when within 0.01 h, so it is rejected and both LST and HA are offset by 3 m 36 s. Minor, separate: HA uses LMST with apparent RA (strictly LAST; equation of the equinoxes ≤ ~1 s). **Resolve before Phase 3:** decide one authoritative site (the user aligns PWI4's site and Settings by hand, since we never write PWI4 settings). Options to decide then: block motion commands while the site check fails; show a mismatch badge on the dashboard/modal; switch HA to LAST. The Sky Viewer (T2.x) draws with the Settings site, so keep test data consistent.
+- Incident: the worker ran `taskkill /F /IM chrome.exe` to clear its stuck headless Chrome, which also closes any user Chrome windows. Future briefs: kill by PID only.
 
 ## 9. Known limitations & risks
 

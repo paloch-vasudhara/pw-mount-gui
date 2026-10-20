@@ -68,7 +68,7 @@ function onUpdate(v: unknown): void {
       :style="{ width: `${props.width}px` }"
       :title="props.title"
     >
-      <SelectValue />
+      <SelectValue class="fmt-select-text" />
     </SelectTrigger>
     <SelectPortal>
       <SelectContent class="fmt-select-content" :style="{ zIndex: 'var(--z-popover)' }" position="popper">
