@@ -403,6 +403,109 @@ _Filled in by the designer at the start of each task (files touched, contract, i
 
 **Gate (supervisor):** web gates · real-browser geometry measurement of every A item (left edges, widths, 2|1|2 spacing, modal width) · screenshots of the panel at 1920×1080 DPR 1 (must equal pre-change computed sizes) and 1280×720 DPR 1.5.
 
+### T2.1 — Star data + Sky Viewer chart canvas + clock (spec, 2026-10-21)
+
+**Goal:** the SKY VIEWER panel (A3, A3a; Main Dashboard 1.png) shows the live local sky: grid, cardinals, stars, Lim EL ring with dimming, Sun/Moon, the mount pointing circle, and the UTC/Local clock. No satellites (T2.2), no filters/picking (T2.3).
+
+**Star data (O5):** `tools/build_star_data.py [--vmag 6.5]` reads `data/hip_main.txt` (git-ignored; pipe-separated: H1 HIP, H5 Vmag, H8/H9 RA/Dec deg ICRS at J1991.25, H12/H13 pmRA·cosδ / pmDE mas/yr). It skips rows with no position or no Vmag, keeps V ≤ cutoff, and applies proper motion linearly to J2000.0. It writes `web/public/data/stars.json` (**committed**, since the catalogue isn't): `{"source":"Hipparcos (ESA 1997)","vmag_max":6.5,"epoch":"J2000","count":N,"stars":[[ra_deg, dec_deg, vmag], ...]}`, rounded to 4 dp RA/Dec and 2 dp V, sorted by V (brightest first). Changing the cutoff = re-run the script. Unit test for the parser on a few fixture lines.
+
+**Gateway (only change):** add `site.timezone` (the Settings IANA zone, `null` = PC zone) to the snapshot so the clock can show Local Time. Read path only, tests updated.
+
+**Sky maths (`web/app/utils/sky-chart.ts`, pure, unit-tested):**
+- `projXY(az, el, cx, cy, R)`: azimuthal equidistant, `r = R·(1 − el/90)`, **N up, E left, W right**. Same formula as ssa-toolkit `utils/observer-hemisphere.ts` `projXY` @84f2ded, parameterised by size.
+- LMST from the client clock + Settings longitude (the same IAU 1982 GMST as `gateway/snapshot.py` `lmst_hours_from`), so the chart keeps running between telemetry messages.
+- Precess J2000 → date (IAU 1976 precession angles ζ, z, θ), then equatorial → alt/az for the site latitude.
+  - No nutation, aberration or refraction: the error is < 0.02° vs skyfield apparent positions above 10° elevation, invisible at chart scale.
+  - Vectorised over `Float64Array`s, no per-star allocation.
+- Tests: alt/az of 5 stars (Polaris, Vega, Sirius, Canopus, Altair) at a fixed UTC + site, against skyfield values the worker generates once into a fixture (tolerance 0.05°). Projection tests: N top, E left, zenith centre, horizon at R.
+
+**Component (`components/sky/SkyChart.vue` + `SkyClock.vue`, in the SKY VIEWER panel of `pages/index.vue`):**
+- Square chart, the largest that fits the panel above the clock; DPR-aware canvases; redraws on resize (ResizeObserver).
+- **Layered canvases, render on demand:**
+  - `base`: disc, grid, cardinals, ring labels, Lim EL ring. Redrawn on resize or a Lim EL change.
+  - `stars`: recomputed + redrawn at **1 Hz** and on resize / site change.
+  - `overlay`: Sun, Moon, Sun keep-out outline, mount circle. Redrawn when those values change.
+  - T2.2 will add one canvas per satellite class above `stars`.
+  - Expose per-layer frame counts as `data-frames-base/stars/overlay` on the wrapper.
+- **Look (match the render):**
+  - Dark navy sky disc (no daylight tint); outer horizon ring light grey.
+  - Elevation rings every 15° with `15°…75°` labels along az 22.5°.
+  - N/S/E/W axes and diagonal lines; 8 cardinal labels outside the rim (N, NE, E, SE, S, SW, W, NW) in the panel's Barlow.
+  - **Stars:** white dots, size and alpha by magnitude, **no labels** (A3a overrides the render).
+- **Lim EL:** dashed ring at `limits.lim_el_deg`. Stars between the horizon and Lim EL are drawn dimmed (alpha × 0.35). Below the horizon: not drawn.
+- **Sun / Moon** from the snapshot (`sun`, `moon` + `illumination`):
+  - Sun: an amber disc.
+  - Moon: a grey disc with a lit fraction.
+  - Sun keep-out: the 15° circle (`limits.sun_keepout_deg`) around the Sun, drawn as a thin red dashed outline, sampled as a small circle in the projection (it is not a circle on the chart).
+  - Not drawn below the horizon.
+- **Mount pointing:** the "blue separated circle" (inner dot + gapped ring, accent blue) at the snapshot `mount.az/alt`. Hidden when null or the link is stale.
+- **Props for T2.3's filters:** `showStars` and `showBodies` (default true).
+- **No data yet / link stale:**
+  - Stars keep running from the last-known site.
+  - Sun/Moon and pointing hide while the link is stale.
+  - Before any site is known: grid only, plus a muted "Waiting for gateway" note.
+- **Clock (`SkyClock.vue`, A3):** `YYYY-MM-DD | HH : MM : SS` (time bold), PC clock, 1 Hz. A small clickable tag under it, `Time UTC` ↔ `Local Time`.
+  - Local Time uses `site.timezone`, or the PC zone when that is null.
+  - The choice is remembered per viewer in localStorage, wrapped in try/catch.
+
+**Must not touch:** `pwi4/`, ssa-toolkit (read/copy only), `docs/`, other panels, PWI4 writes (gateway stays `GET /status`-only). No commits.
+
+**Gate (supervisor):**
+- Gates: web lint/typecheck/vitest; pytest + ruff.
+- Star data:
+  - the count matches an independent count of `hip_main.txt` at V ≤ 6.5;
+  - a re-run with `--vmag 5` produces fewer stars.
+- **Real browser vs live throwaway gateway (+ PWI4-sim):**
+  - star pixel positions of bright stars match skyfield alt/az for the Settings site (≤ 1 px at 1920);
+  - E left;
+  - the pointing circle follows a sim goto;
+  - Sun/Moon placed per the snapshot;
+  - the Lim EL ring moves when Lim EL changes;
+  - the stars layer redraws at about 1 Hz and the base layer stays flat;
+  - the clock toggle works and survives a reload.
+- Screenshots at 1920 and 1280 @1.5 vs Main Dashboard 1.png.
+
+### T2.1b — User review polish: sky colour, pointing marker, Settings save flow (spec, 2026-10-21)
+
+**1. Sky colour follows the Sun (SkyChart base + stars):**
+- Disc colour from the Sun's altitude, using the ssa-toolkit `skyColor` stop table (`utils/observer-hemisphere.ts` @84f2ded): 5° `[235,242,255]`, 0° `[220,140,100]`, −6° `[40,30,70]`, −12° `[13,17,23]`.
+  - The **daytime end is bluer** (user), e.g. `[170,205,245]` at ≥ 20° and `[205,225,250]` at 5°. The stop table lives in `lib/sky/theme.ts` so it is easy to tune.
+  - Night keeps today's dark navy.
+- Sun altitude: computed client-side from the site + clock (port ssa `sunElevationApprox`), so it works while the link is stale. Quantise to 0.5°; the base layer redraws only when the colour changes.
+- Grid, ring labels and the Lim EL ring stay readable on a light disc: their colours interpolate toward darker tones as the sky gets brighter.
+- **Stars fade with the brightening sky:**
+  - limiting magnitude ≈ 6.5 at Sun ≤ −18°, ≈ 4 at −6°, ≈ 1 at 0°;
+  - no stars at Sun ≥ +5°;
+  - plus an alpha factor that falls with sky brightness.
+  - Unit-test the colour and limiting-magnitude functions.
+
+**2. Pointing marker:** replace the ring + centre dot with a **broken ring**: 4 arcs with gaps at N/E/S/W, no centre dot, so whatever is being tracked stays visible inside. Same blue, at about today's ring radius, slightly heavier line.
+
+**3. Station Settings save flow (T1.2 follow-up):**
+- **SAVE SETTINGS is disabled when nothing changed** compared with the loaded settings. A typed API key or "clear key" counts as a change.
+- **The warning never replaces the buttons.** CANCEL and SAVE SETTINGS stay in every state; CLOSE is gone.
+- **Mismatch flow:** clicking SAVE first checks the *proposed* location against PWI4 **without saving**.
+  - Mismatch → show the warning and save nothing.
+  - Any edit to a Location field (lat, lon, alt, and their formats) clears the warning and the acknowledgement.
+  - Clicking SAVE again with the warning showing accepts it: PUT, then close.
+  - No mismatch, or PWI4 unreachable → PUT and close at once.
+  - The check runs whenever the proposed location mismatches PWI4, whichever field changed.
+- **Gateway:** new `POST /api/mount/site-check` (auth `X-Mount-Token`).
+  - Body: a Location `{lat_deg, lon_deg, alt_m}`.
+  - Returns `compute_site_check(proposed, pwi4_site)`.
+  - Read-only: no settings write, no PWI4 call beyond the poller's cached `/status` site.
+  - Bad input → 422.
+- Save errors (422/network) show under the form; the buttons stay as they are.
+
+**Must not touch:** `pwi4/`, ssa-toolkit, `docs/`. No commits.
+
+**Gate (supervisor):**
+- Code checks: web and Python test suites.
+- **Sky colour:** browser screenshots with injected/clock-shifted Sun altitudes (+30°, +2°, −4°, −10°, −20°). Night is unchanged from T2.1; daytime is blue with no stars; twilight is graded.
+- **Marker:** the broken ring, with the centre clear.
+- **Settings flow:** unchanged form → SAVE disabled. Mismatching edit → SAVE shows the warning and the file is unchanged. Editing lat clears the warning. SAVE twice → saved and closed. CANCEL always present.
+- **New endpoint:** the gateway's PWI4 request log still shows only `GET /status`.
+
 ---
 
 ## 7. Progress tracker
@@ -419,7 +522,8 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | T1.3 | ✅ | ✅ 10-20 | ✅ 10-20 | ✅ 10-20 | phase-end | chips/palette fixed; live vs PWI4 GUI + T1.2 mismatch warning carried to the T1.4 sim gate |
 | T1.4 | ✅ | ✅ 10-20 | ✅ 10-20 | ✅ 10-20 | **Phase 1 user check pending** | live vs PWI4-sim ✓ (values, FAULT red, sun-zone red, TRACKING green, target marker, modal ×10, idle frames); carried T1.2 mismatch + T1.3 values ✓ |
 | T1.5 | ✅ | ✅ 10-20 | ✅ 10-20 | ✅ 10-20 | user check pending | Settings: label col 100, fmt 60, 2│1│2, fields 162, full span 227, Lim EL 90, modal 788 (1-col < 820); panel clamp/cqw: 1920 identical, 1280@1.5 → 14/80×26/11/12/45 (panel 258 px → floors) |
-| T2.1 | ⬜ | | | | | O5 adjustable |
+| T2.1 | ✅ | ✅ 10-21 | ✅ 10-21 | ✅ 10-21 | pending (incl. live sim goto follow) | 8 870 stars (V ≤ 6.5, indep. count ✓); 10 bright stars ≤ 0.37 px vs skyfield at 1920; stars 1 Hz / base flat; clock UTC↔Local persists, Asia/Bangkok ✓ |
+| T2.1b | ✅ | ✅ 10-21 | ✅ 10-21 | ✅ 10-21 | pending | user review: sky colour by Sun alt + star fading, broken-ring marker, Settings save flow (disabled when unchanged, warn-then-confirm) |
 | T2.2 | ⬜ | | | | | |
 | T2.3 | ⬜ | | | | | |
 | T3.1 | ⬜ | | | | | |
@@ -437,7 +541,7 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | T6.2 | ⬜ | | | | | |
 | T6.3 | ⬜ | | | | | |
 
-**Resume point:** **Phase 1 complete and accepted by the user (T1.1–T1.5 + follow-up polish), committed by the user as the Phase 1 checkpoint** (if `git log` still shows `7d0bbdb` on top, the commit is still pending). Open item O-SITE (§8 T1.5 log) is to be resolved before Phase 3. Next: **Phase 2 / T2.1** (star data + sky chart canvas) — write its spec first.
+**Resume point:** Phase 1 committed (`52a3e3a`). **T2.1 + T2.1b verified, UNCOMMITTED**; the user's look at T2.1b (sky colour, marker, Settings save flow) is pending, plus a live check that the pointing circle follows a PWI4-sim goto (PWI4 was not running at the gate). Open item O-SITE is to be resolved before Phase 3. Next: **T2.2** (analysis: vectorised SGP4 class layers in 30-min chunks + web chunk cache) — write its spec first.
 
 ---
 
@@ -547,6 +651,59 @@ _Differences between the as-built app and the logic sheet / concept renders, wit
 - Follow-up review (user, same day), done by supervisor: (1) Providers rows now sit on the Location row pitch (Satellite DB level with Altitude, 4th row blank; both fieldsets 182 px) — the "clear key" link moved inside the API key box (left, the key text is right-aligned), shown only while a key is set and the box is empty; (2) all dropdowns (`FormatSelect`, `TimezoneSelect`) wrap the value in `.fmt-select-text` (shrinkable flex child with ellipsis), so long values stop at the 20 px right padding instead of running under the triangle (measured: long timezone ends 21 px from the box edge). Gates re-run: lint 0 errors, typecheck 0, vitest 245/245.
 - **Open item O-SITE (user, 10-20): Details-modal LST / HA differ from PWI4's.** Diagnosed: not J2000 drift (HA = LMST − *apparent* RA, the same RA PWI4 uses) but the **site mismatch**. LMST comes from the Settings longitude (E 101.4639°) vs PWI4's site (E 100.5656°): Δ 0.898° = 3 m 36 s of sidereal time. PWI4's LMST is only adopted when within 0.01 h, so it is rejected and both LST and HA are offset by 3 m 36 s. Minor, separate: HA uses LMST with apparent RA (strictly LAST; equation of the equinoxes ≤ ~1 s). **Resolve before Phase 3:** decide one authoritative site (the user aligns PWI4's site and Settings by hand, since we never write PWI4 settings). Options to decide then: block motion commands while the site check fails; show a mismatch badge on the dashboard/modal; switch HA to LAST. The Sky Viewer (T2.x) draws with the Settings site, so keep test data consistent.
 - Incident: the worker ran `taskkill /F /IM chrome.exe` to clear its stuck headless Chrome, which also closes any user Chrome windows. Future briefs: kill by PID only.
+
+### T2.1 log (2026-10-21)
+- **Worker delivered:**
+  - `tools/build_star_data.py` producing `web/public/data/stars.json`: 8 870 stars at V ≤ 6.5, 1 625 at V ≤ 5. The file is committed; the catalogue is not.
+  - `utils/sky-chart.ts`: projection, IAU 1976 precession and vectorised alt/az.
+  - `utils/sky-clock.ts`.
+  - `components/sky/{SkyChart,SkyClock}.vue` and `lib/sky/theme.ts`.
+  - Gateway: `site.timezone` added to the snapshot.
+  - Fixture generator `tools/gen_sky_fixture.py`, with the fixture at `web/tests/fixtures/sky-altaz.json` (max error 0.0064° alt / 0.0086° az).
+  - `pyproject.toml` testpaths now include `tools/tests`.
+- **Supervisor gate:**
+  - Tests: pytest 87 passed / 13 skipped; ruff clean; web lint 0 errors; typecheck 0; vitest 258/258.
+  - Star count independently recounted: 8 870.
+  - **Star pixel positions vs skyfield**, 10 bright isolated stars at 1920 px, own measurement: max error **0.37 px**. E is left.
+  - Layer frame rate: over 10 s, stars +10 and base +0.
+  - Clock: the toggle persists across a reload. With the timezone null, Local Time = PC zone; this PC is set to UTC. With Asia/Bangkok, Local Time = UTC+7.
+  - Injected pointing at 204.63/58.32 plots south-southwest, as in the render.
+  - 3D Sun position cross-checked numerically: it looked "near N" only because of the camera's view from az 160°.
+- **Not run:** the live sim goto follow, because PWI4 was not running. This moves to the user check.
+- **Choices to show the user:**
+  - No star labels.
+  - Always-dark sky.
+  - The Sun keep-out outline is drawn on the chart, and still drawn while the Sun is less than 15° below the horizon.
+  - The Moon's lit limb is oriented toward the Sun's chart position.
+  - The pointing marker is a ring plus a dot (the render's "separated circle" has a gapped ring).
+
+### T2.1b log (2026-10-21)
+- **User review of T2.1:** functionally clean. Asked for: sky colour by Sun altitude (OV:Hemisphere, bluer day) with stars fading; a broken-ring pointing marker; and the Settings save flow below.
+- **Settings save flow:**
+  - SAVE disabled when unchanged.
+  - The warning never swaps the buttons.
+  - Mismatch: the first SAVE warns (nothing saved); a location edit clears it; a second SAVE accepts.
+  - Match or PWI4 unreachable: one click saves and closes. The user confirmed both paths.
+  - The warning shows whenever the proposed location mismatches, whichever field changed (user-confirmed).
+- **Delivered:**
+  - New gateway `POST /api/mount/site-check`: read-only; checks a proposed location against the cached PWI4 site.
+  - Sky colour and star-fade tables in `lib/sky/theme.ts`.
+  - Test hook: `window.__skyTestSunAlt` plus the `sky-test-refresh` event.
+- **Supervisor gate:**
+  - Tests: pytest 88/13 skipped; ruff clean; lint 0 errors; typecheck 0; vitest 271/271.
+  - Browser vs a throwaway gateway + a fake PWI4 (conftest status, site 14.3479/100.5656/12):
+    - first run → 1 click saves;
+    - reopen unchanged → SAVE disabled;
+    - Lim EL 15→16 (match) → 1 click saves and closes;
+    - lat 13.5 → warning, file unchanged;
+    - edit → warning cleared;
+    - lat 13.6 → warning → second click saves;
+    - PWI4 stopped → 1 click saves.
+    - Fake PWI4 log: 1 066 × `GET /status` only.
+  - Sky colour strip at +30 / +2 / −4 / −10 / −20: blue day with no stars, peach, mauve with faint stars, violet, navy. Grid readable throughout.
+  - Marker: broken ring, centre clear.
+- **Noted for the user:** the marker's contrast on the daytime blue sky is low.
+- **First run:** SAVE starts enabled because the PC zone is substituted for a null timezone. This is intended.
 
 ## 9. Known limitations & risks
 

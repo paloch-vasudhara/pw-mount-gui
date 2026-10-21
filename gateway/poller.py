@@ -124,6 +124,7 @@ class Poller:
                 lon=cur.location.lon_deg,
                 height_m=cur.location.alt_m,
                 source="settings",
+                timezone=cur.location.timezone,
             )
             site_check = self.current_site_check()
             limits = Limits(lim_el_deg=cur.hardware.lim_el_deg)

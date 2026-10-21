@@ -4,6 +4,8 @@ import SectionFrame from '~/components/SectionFrame.vue'
 import ToolsGroup from '~/components/ToolsGroup.vue'
 import MountDetailsDialog from '~/components/mount/MountDetailsDialog.vue'
 import MountStatusPanel from '~/components/mount/MountStatusPanel.vue'
+import SkyChart from '~/components/sky/SkyChart.vue'
+import SkyClock from '~/components/sky/SkyClock.vue'
 
 const detailsOpen = ref(false)
 </script>
@@ -20,7 +22,14 @@ const detailsOpen = ref(false)
         </div>
       </SectionFrame>
     </div>
-    <SectionFrame title="Sky Viewer" />
+    <SectionFrame title="Sky Viewer">
+      <div class="flex h-full min-h-0 flex-col">
+        <div class="min-h-0 flex-1">
+          <SkyChart />
+        </div>
+        <SkyClock />
+      </div>
+    </SectionFrame>
     <div class="grid min-h-0 grid-rows-[minmax(0,1fr)_minmax(0,1fr)] gap-3">
       <SectionFrame title="Mount Status">
         <MountStatusPanel @open-details="detailsOpen = true" />

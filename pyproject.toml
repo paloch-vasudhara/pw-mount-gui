@@ -7,5 +7,5 @@ extend-exclude = ["scope-pointer", "web", "concept", "data", "pwi4", "tools/benc
 select = ["E", "F", "I", "W", "B"]
 
 [tool.pytest.ini_options]
-testpaths = ["gateway/tests", "analysis/tests", "tools/pwi4_harness/tests"]
+testpaths = ["gateway/tests", "analysis/tests", "tools/pwi4_harness/tests", "tools/tests"]
 markers = ["pwi4sim: drives PWI4 in simulation mode (needs PWI4_SIM=1)"]

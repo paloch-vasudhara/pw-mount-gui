@@ -146,6 +146,7 @@ def test_token_required_401(tmp_path):
             ("get", "/api/mount/settings"),
             ("put", "/api/mount/settings"),
             ("get", "/api/mount/site-check"),
+            ("post", "/api/mount/site-check"),
         ):
             r = getattr(c, method)(path)
             assert r.status_code == 401, path
@@ -229,7 +230,12 @@ def test_put_applies_live_to_snapshot_and_sunmoon(tmp_path):
             "/api/mount/settings",
             headers=AUTH,
             json=body(
-                location={"lat_deg": 10.0, "lon_deg": 99.0, "alt_m": 5.0},
+                location={
+                    "lat_deg": 10.0,
+                    "lon_deg": 99.0,
+                    "alt_m": 5.0,
+                    "timezone": "Asia/Bangkok",
+                },
                 hardware={"lim_el_deg": 20},
             ),
         )
@@ -243,7 +249,13 @@ def test_put_applies_live_to_snapshot_and_sunmoon(tmp_path):
                 if snap["site"]["lat"] == 10.0 and snap["sun"]["alt"] is not None:
                     break
             time.sleep(0.05)
-    assert snap["site"] == {"lat": 10.0, "lon": 99.0, "height_m": 5.0, "source": "settings"}
+    assert snap["site"] == {
+        "lat": 10.0,
+        "lon": 99.0,
+        "height_m": 5.0,
+        "source": "settings",
+        "timezone": "Asia/Bangkok",
+    }
     assert snap["state"] == "DISCONNECTED"
     if snap["sun"]["alt"] is None:
         pytest.skip("ephemeris file not available locally")
@@ -324,3 +336,39 @@ def test_site_check_route_mismatch_and_match(tmp_path):
         time.sleep(1.4)
         sc = c.get("/api/mount/site-check", headers=AUTH).json()
         assert sc["pwi4_reachable"] is False and sc["ok"] is None
+
+
+def test_site_check_post_proposed_is_read_only(tmp_path):
+    import time
+
+    fake = FakePwi4()
+    c, _, _, settings = make_client(tmp_path, fake)
+    with c:
+        time.sleep(0.4)
+        saved = c.put("/api/mount/settings", headers=AUTH, json=body()).json()["location"]
+        before = (tmp_path / "s.json").read_text(encoding="utf-8")
+        paths_before = len(fake.paths)
+        url = "/api/mount/site-check"
+        prop = {"lat_deg": 13.0, "lon_deg": 101.0, "alt_m": 5.0}
+        bad = c.post(url, headers=AUTH, json=prop)
+        assert bad.status_code == 200 and bad.json()["ok"] is False
+        assert bad.json()["lat_diff_deg"] == pytest.approx(13.0 - 14.3479)
+        good = c.post(
+            "/api/mount/site-check",
+            headers=AUTH,
+            json={"lat_deg": 14.3479, "lon_deg": 100.5656, "alt_m": 12.0},
+        )
+        assert good.json()["ok"] is True
+        # nothing saved; the saved location is unchanged
+        assert (tmp_path / "s.json").read_text(encoding="utf-8") == before
+        assert c.get("/api/mount/settings", headers=AUTH).json()["location"] == saved
+        # read-only towards PWI4: only polling GET /status, never anything else
+        assert all(p == "GET /status" for p in fake.paths[paths_before:])
+        # bad input -> 422
+        assert c.post(url, headers=AUTH, json={"lat_deg": 95}).status_code == 422
+        assert c.post(url, headers=AUTH, json={"lat_deg": "x"}).status_code == 422
+        # PWI4 unreachable -> ok null
+        fake.down = True
+        time.sleep(1.4)
+        r = c.post("/api/mount/site-check", headers=AUTH, json={"lat_deg": 1.0})
+        assert r.json()["pwi4_reachable"] is False and r.json()["ok"] is None

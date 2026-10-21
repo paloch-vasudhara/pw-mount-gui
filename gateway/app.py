@@ -21,7 +21,7 @@ from .security import (
     session_request_ok,
     token_ok,
 )
-from .settings import SecretStore, SettingsStore, SettingsUpdate
+from .settings import Location, SecretStore, SettingsStore, SettingsUpdate, compute_site_check
 from .snapshot import site_key
 
 VERSION = "0.1.0"
@@ -118,6 +118,11 @@ def create_app(
     @app.get("/api/mount/site-check", dependencies=[Depends(require_auth)])
     def site_check() -> JSONResponse:
         return JSONResponse(poller.current_site_check().model_dump())
+
+    @app.post("/api/mount/site-check", dependencies=[Depends(require_auth)])
+    def site_check_proposed(loc: Location) -> JSONResponse:
+        """Check a PROPOSED location against PWI4's cached site. Read-only: nothing is saved."""
+        return JSONResponse(compute_site_check(loc, poller.pwi4_site()))
 
     @app.websocket("/api/mount/ws")
     async def ws(websocket: WebSocket) -> None:

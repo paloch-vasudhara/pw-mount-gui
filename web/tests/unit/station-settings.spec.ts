@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import StationSettingsDialog from '../../app/components/settings/StationSettingsDialog.vue'
 import {
-  buildPayload, formFromDto, siteWarning, validateForm,
+  buildPayload, buildSiteCheckBody, formFromDto, isDirty, siteWarning, validateForm,
   type SettingsResponse, type StationSettingsDto,
 } from '../../app/utils/station-settings'
 
@@ -80,13 +80,55 @@ describe('station-settings utils', () => {
   })
 })
 
+describe('isDirty', () => {
+  it('unchanged form is clean', () => {
+    expect(isDirty(formFromDto(DTO), formFromDto(DTO))).toBe(false)
+  })
+  it('any edited field, a typed key, clear-key and a format-only change are dirty', () => {
+    const base = formFromDto(DTO)
+    const edit = (fn: (f: ReturnType<typeof formFromDto>) => void) => {
+      const f = formFromDto(DTO)
+      fn(f)
+      return isDirty(f, base)
+    }
+    expect(edit((f) => { f.lat = 13.5 })).toBe(true)
+    expect(edit((f) => { f.limEl = 20 })).toBe(true)
+    expect(edit((f) => { f.timezone = 'UTC' })).toBe(true)
+    expect(edit((f) => { f.latFormat = 'dms' })).toBe(true)
+    expect(edit((f) => { f.altUnit = 'ft' })).toBe(true)
+    expect(edit((f) => { f.apiKey = 'k' })).toBe(true)
+    expect(edit((f) => { f.clearKey = true })).toBe(true)
+    expect(edit((f) => { f.lat = 13.7862 + 1e-9 })).toBe(false)
+  })
+  it('site-check body is just the proposed location', () => {
+    expect(buildSiteCheckBody(formFromDto(DTO))).toEqual({ lat_deg: 13.7862, lon_deg: 101.4639, alt_m: 40.8 })
+  })
+})
+
 describe('StationSettingsDialog', () => {
   const calls: { method: string, url: string, body?: string, headers?: Record<string, string> }[] = []
   let putResponse: SettingsResponse
   let apiKeySet = false
+  let checkResponse: Record<string, unknown> = { pwi4_reachable: false, ok: null }
 
   function q(testid: string): HTMLElement | null {
     return document.body.querySelector(`[data-testid="${testid}"]`)
+  }
+
+  async function typeKey(v = 'KEY-1') {
+    const input = q('ss-apikey') as HTMLInputElement
+    input.value = v
+    input.dispatchEvent(new Event('input'))
+    await flushPromises()
+  }
+
+  async function editLat(v: string) {
+    const input = document.body.querySelector('[data-testid="ss-lat"] input') as HTMLInputElement
+    input.value = v
+    input.dispatchEvent(new Event('input'))
+    input.dispatchEvent(new Event('change'))
+    input.dispatchEvent(new Event('blur'))
+    await flushPromises()
   }
 
   async function openDialog() {
@@ -99,12 +141,14 @@ describe('StationSettingsDialog', () => {
   beforeEach(() => {
     calls.length = 0
     apiKeySet = false
+    checkResponse = { pwi4_reachable: false, ok: null }
     putResponse = { ...DTO, api_key_set: false }
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
       const method = init?.method ?? 'GET'
       calls.push({ method, url, body: init?.body as string, headers: init?.headers as Record<string, string> })
       const json = (o: unknown) => ({ ok: true, status: 200, json: async () => o }) as Response
       if (url === '/api/mount/session') return json({ token: 'tok' })
+      if (method === 'POST') return json(checkResponse)
       if (method === 'PUT') return json(putResponse)
       return json({ ...DTO, api_key_set: apiKeySet })
     }))
@@ -127,16 +171,18 @@ describe('StationSettingsDialog', () => {
     w.unmount()
   })
 
-  it('Save PUTs without api_key when untouched, then closes', async () => {
+  it('Save is disabled when unchanged; after a change it checks, PUTs and closes', async () => {
     const w = await openDialog()
     const save = q('ss-save') as HTMLButtonElement
+    expect(save.disabled).toBe(true) // nothing changed yet
+    await typeKey()
     expect(save.disabled).toBe(false)
     save.click()
     await flushPromises()
     const put = calls.find(c => c.method === 'PUT')!
     expect(put.url).toBe('/api/mount/settings')
     const body = JSON.parse(put.body!)
-    expect('api_key' in body).toBe(false)
+    expect(body.api_key).toBe('KEY-1')
     expect(body.location.lat_deg).toBeCloseTo(13.7862)
     expect(w.emitted('update:open')!.at(-1)).toEqual([false])
     w.unmount()
@@ -144,10 +190,7 @@ describe('StationSettingsDialog', () => {
 
   it('typed API key is sent once and never rendered back', async () => {
     const w = await openDialog()
-    const input = q('ss-apikey') as HTMLInputElement
-    input.value = 'SECRET-KEY-XYZ'
-    input.dispatchEvent(new Event('input'))
-    await flushPromises()
+    await typeKey('SECRET-KEY-XYZ')
     putResponse = { ...DTO, api_key_set: true }
     ;(q('ss-save') as HTMLButtonElement).click()
     await flushPromises()
@@ -166,22 +209,57 @@ describe('StationSettingsDialog', () => {
     w.unmount()
   })
 
-  it('stays open with an amber warning when the site differs from PWI4', async () => {
-    putResponse = {
-      ...DTO,
-      api_key_set: false,
-      site_check: {
-        pwi4_reachable: true, ok: false, lat_diff_deg: -0.56, lon_diff_deg: 0.9, alt_diff_m: 28.8,
-        tolerance: { lat_lon_deg: 0.01, alt_m: 100 },
-      },
-    }
+  const MISMATCH = {
+    pwi4_reachable: true, ok: false, lat_diff_deg: -0.56, lon_diff_deg: 0.9, alt_diff_m: 28.8,
+    tolerance: { lat_lon_deg: 0.01, alt_m: 100 },
+  }
+
+  it('mismatch: first SAVE warns without saving, buttons stay, second SAVE saves and closes', async () => {
+    checkResponse = MISMATCH
     const w = await openDialog()
+    await typeKey()
     ;(q('ss-save') as HTMLButtonElement).click()
     await flushPromises()
     expect(q('ss-warning')!.textContent).toContain('differs from PWI4')
+    expect(calls.filter(c => c.method === 'POST')).toHaveLength(1)
+    expect(JSON.parse(calls.find(c => c.method === 'POST')!.body!)).toEqual({ lat_deg: 13.7862, lon_deg: 101.4639, alt_m: 40.8 })
+    expect(calls.some(c => c.method === 'PUT')).toBe(false)
     expect(w.emitted('update:open')).toBeUndefined()
-    ;(q('ss-close') as HTMLButtonElement).click()
+    expect(q('ss-close')).toBeNull()
+    expect(q('ss-cancel')).not.toBeNull()
+    expect((q('ss-save') as HTMLButtonElement).disabled).toBe(false)
+    ;(q('ss-save') as HTMLButtonElement).click()
     await flushPromises()
+    expect(calls.filter(c => c.method === 'POST')).toHaveLength(1) // acknowledged: no second check
+    expect(calls.some(c => c.method === 'PUT')).toBe(true)
+    expect(w.emitted('update:open')!.at(-1)).toEqual([false])
+    w.unmount()
+  })
+
+  it('editing a Location field clears the warning and the acknowledgement', async () => {
+    checkResponse = MISMATCH
+    const w = await openDialog()
+    await editLat('13.5')
+    ;(q('ss-save') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(q('ss-warning')).not.toBeNull()
+    await editLat('13.6')
+    expect(q('ss-warning')).toBeNull()
+    ;(q('ss-save') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(calls.filter(c => c.method === 'POST')).toHaveLength(2) // checked again
+    expect(q('ss-warning')).not.toBeNull()
+    expect(calls.some(c => c.method === 'PUT')).toBe(false)
+    w.unmount()
+  })
+
+  it('PWI4 unreachable: PUT and close at once', async () => {
+    const w = await openDialog()
+    await typeKey()
+    ;(q('ss-save') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(calls.some(c => c.method === 'PUT')).toBe(true)
+    expect(q('ss-warning')).toBeNull()
     expect(w.emitted('update:open')!.at(-1)).toEqual([false])
     w.unmount()
   })

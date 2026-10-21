@@ -24,6 +24,7 @@ class Site(BaseModel):
     lon: float | None = None
     height_m: float | None = None
     source: str = "pwi4"
+    timezone: str | None = None  # Settings IANA zone; null = PC zone (client side)
 
 
 class SiteTolerance(BaseModel):

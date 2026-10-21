@@ -122,3 +122,30 @@ export function timeZoneList(): string[] {
   catch { /* fall through */ }
   return ['UTC']
 }
+
+const EPS = 1e-7
+
+/**
+ * True when the form differs from the loaded settings (`baseline` = formFromDto of the DTO as
+ * loaded, before any first-run timezone substitution). A typed API key or "clear key" counts, and
+ * so does a format-only change (those are persisted in settings.display).
+ */
+export function isDirty(f: SettingsForm, baseline: SettingsForm): boolean {
+  if (f.apiKey !== '' || f.clearKey) return true
+  const num = (a: number | null, b: number | null) =>
+    a === b || (a != null && b != null && Math.abs(a - b) <= EPS)
+  return !(
+    num(f.lat, baseline.lat) && num(f.lon, baseline.lon) && num(f.altM, baseline.altM)
+    && num(f.limEl, baseline.limEl)
+    && f.timezone === baseline.timezone
+    && f.latFormat === baseline.latFormat && f.lonFormat === baseline.lonFormat
+    && f.altUnit === baseline.altUnit
+    && f.mount === baseline.mount && f.ota === baseline.ota
+    && f.astrometry === baseline.astrometry && f.satelliteDb === baseline.satelliteDb
+  )
+}
+
+/** Body for POST /api/mount/site-check (the proposed location, nothing saved). */
+export function buildSiteCheckBody(f: SettingsForm): Record<string, unknown> {
+  return { lat_deg: f.lat, lon_deg: f.lon, alt_m: f.altM }
+}

@@ -1,6 +1,6 @@
 <script setup lang="ts">
-// Station Settings modal (A2b-iii, concept/Settings.png). Cancel / X discards; Save PUTs to the
-// gateway. The API key is write-only: the box is always empty on open, "set" is only a placeholder.
+// Station Settings modal (A2b-iii, concept/Settings.png). Cancel / X discards; Save (enabled only when something changed) checks the proposed site
+// against PWI4 first, then PUTs. The API key is write-only: the box is always empty on open, "set" is only a placeholder.
 import { computed, ref, watch } from 'vue'
 import AltitudeField from '@/components/widgets/AltitudeField.vue'
 import AngleField from '@/components/widgets/AngleField.vue'
@@ -11,8 +11,8 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { GatewayError, useGatewayApi } from '@/composables/useGatewayApi'
 import {
-  buildPayload, formFromDto, LIM_EL_MAX, LIM_EL_MIN, pcTimeZone, siteWarning, timeZoneList, validateForm,
-  type SettingsForm, type SettingsResponse,
+  buildPayload, buildSiteCheckBody, formFromDto, isDirty, LIM_EL_MAX, LIM_EL_MIN, pcTimeZone, siteWarning, timeZoneList, validateForm,
+  type SettingsForm, type SettingsResponse, type SiteCheckDto,
 } from '@/utils/station-settings'
 
 const open = defineModel<boolean>('open', { default: false })
@@ -21,6 +21,7 @@ const api = useGatewayApi()
 const zones = timeZoneList()
 
 const form = ref<SettingsForm | null>(null)
+const baseline = ref<SettingsForm | null>(null)
 const apiKeySet = ref(false)
 const loading = ref(false)
 const saving = ref(false)
@@ -30,7 +31,8 @@ const warning = ref<string | null>(null)
 
 const errors = computed(() => (form.value ? validateForm(form.value, zones) : {}))
 const valid = computed(() => form.value !== null && Object.keys(errors.value).length === 0)
-const canSave = computed(() => valid.value && !saving.value && !loading.value && warning.value === null)
+const dirty = computed(() => form.value !== null && baseline.value !== null && isDirty(form.value, baseline.value))
+const canSave = computed(() => valid.value && dirty.value && !saving.value && !loading.value)
 
 const keyPlaceholder = computed(() => {
   if (form.value?.clearKey) return 'key will be cleared'
@@ -43,9 +45,11 @@ async function load(): Promise<void> {
   saveError.value = null
   warning.value = null
   form.value = null
+  baseline.value = null
   try {
     const d = await api.get<SettingsResponse>('/api/mount/settings')
     const f = formFromDto(d)
+    baseline.value = formFromDto(d)
     // null = never chosen (first run): offer the PC zone. A saved zone (even UTC) is respected.
     if (d.location.timezone == null) {
       const pc = pcTimeZone()
@@ -66,25 +70,41 @@ async function load(): Promise<void> {
 
 watch(open, (o) => {
   if (o) void load()
-  else form.value = null // never keep a typed key around after close
+  else {
+    form.value = null // never keep a typed key around after close
+    baseline.value = null
+  }
 }, { immediate: true })
 
 function close(): void {
   open.value = false
 }
 
+// Any Location edit (lat, lon, alt and their formats) clears the mismatch warning, which also
+// withdraws the acknowledgement: the next SAVE checks the new location again.
+watch(
+  () => form.value && [form.value.lat, form.value.lon, form.value.altM, form.value.latFormat, form.value.lonFormat, form.value.altUnit],
+  () => { warning.value = null },
+)
+
 async function save(): Promise<void> {
   if (!form.value || !canSave.value) return
   saving.value = true
   saveError.value = null
   try {
+    // First SAVE checks the PROPOSED location against PWI4 without saving anything. A mismatch
+    // shows the warning and stops; SAVE again (warning still showing = acknowledged) goes through.
+    if (warning.value === null) {
+      const check = await api.post<SiteCheckDto>('/api/mount/site-check', buildSiteCheckBody(form.value))
+      const w = siteWarning(check)
+      if (w) {
+        warning.value = w
+        return
+      }
+    }
     const d = await api.put<SettingsResponse>('/api/mount/settings', buildPayload(form.value))
     apiKeySet.value = d.api_key_set
-    form.value.apiKey = ''
-    form.value.clearKey = false
-    const w = siteWarning(d.site_check)
-    if (w) warning.value = w
-    else close()
+    close()
   }
   catch (e) {
     saveError.value = e instanceof GatewayError && e.status === 422
@@ -255,21 +275,13 @@ const SATDB = [{ value: 'DELV Aerospace', label: 'DELV Aerospace' }]
 
         <div class="ss-actions">
           <Button
-            v-if="warning" type="button" variant="outline" class="ss-btn"
-            data-testid="ss-close" @click="close"
+            type="button" variant="outline" class="ss-btn" data-testid="ss-cancel" @click="close"
           >
-            CLOSE
+            CANCEL
           </Button>
-          <template v-else>
-            <Button
-              type="button" variant="outline" class="ss-btn" data-testid="ss-cancel" @click="close"
-            >
-              CANCEL
-            </Button>
-            <Button type="submit" class="ss-btn ss-save" :disabled="!canSave" data-testid="ss-save">
-              SAVE SETTINGS
-            </Button>
-          </template>
+          <Button type="submit" class="ss-btn ss-save" :disabled="!canSave" data-testid="ss-save">
+            SAVE SETTINGS
+          </Button>
         </div>
       </form>
     </DialogContent>

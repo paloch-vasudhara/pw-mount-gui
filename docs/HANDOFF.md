@@ -12,7 +12,14 @@ Read this first, then `docs/BUILD_PLAN.md` (§7 tracker + **resume point**, §6 
   - **T1.4 3D view + Details modal**: scope-pointer port (three 0.169.0), render-on-demand, full WebGL disposal, red rules (FAULT, Sun ≤ 15°).
   - **T1.5 UI polish** (the user's review): Settings row grid via CSS vars `--ss-label 100 / --ss-fmt 60 / --ss-field 162`, separator 2│1│2, span 227, Lim EL 90, modal 788, Providers rows on the Location pitch ("clear key" inside the API key box); dropdown values ellipsize before the triangle (`.fmt-select-text`); Mount Status panel text scales with panel width (container query + clamp, unchanged at 1920, floors on the 150 % laptop).
 - **Open item O-SITE (resolve before Phase 3):** Details-modal LST/HA differ from PWI4 by 3 m 36 s. The cause is that the Settings longitude (E 101.4639°) differs from PWI4's site (E 100.5656°); it is not J2000 drift (HA uses apparent RA). See BUILD_PLAN §8 T1.5 log for the options.
-- **Next session: Phase 2, Sky Viewer.** Write the T2.1 spec into §6 (star data prep from `data/hip_main.txt`, V ≤ 6.5 adjustable (O5) + sky chart canvas, Lim EL ring), delegate it, verify.
+- **Phase 1 committed `52a3e3a`.**
+- **T2.1 Sky Viewer chart ✅ (verified 10-21, UNCOMMITTED):**
+  - stars from `web/public/data/stars.json` (re-generate with `tools/build_star_data.py --vmag X`);
+  - `components/sky/{SkyChart,SkyClock}.vue` with three render-on-demand canvases (base / stars 1 Hz / overlay), `data-geom` + `data-frames-*` test hooks;
+  - gateway `site.timezone` in the snapshot.
+  - **T2.1b ✅:** sky colour follows the Sun (test hook `window.__skyTestSunAlt` + `sky-test-refresh` event), broken-ring marker, Settings save flow (disabled when unchanged; mismatch warns first, second SAVE accepts; new read-only `POST /api/mount/site-check`).
+  - The user check of T2.1b is pending; the live sim goto follow was confirmed clean by the user.
+- **Next: T2.2.** Write its spec (analysis service: vectorised SGP4 per orbit class in 30-min chunks, DB query changes G6; web chunk cache, refresh at 10 min remaining, eviction; one canvas per class above `stars`).
 - Gate tooling: `tools/browser_gate/cdp.mjs` (`size` takes an optional DPR: `[w, h, 1.5]`) + `tools/pwi4_harness/simdrv.py` (sim-guarded driver). Only drive the sim to above-horizon targets (P14).
 - Decisions logged 10-20: G4 **start-up stop** (implement in T3.1); A4 **red warnings**; Lim EL field stays 90 px.
 
@@ -26,6 +33,8 @@ Read this first, then `docs/BUILD_PLAN.md` (§7 tracker + **resume point**, §6 
 - The user often runs `pnpm dev` (3200) + gateway (8400): never touch them; throwaway Nuxt needs `NUXT_IGNORE_LOCK=1`; throwaway gateway: temp `PW_SETTINGS_PATH`, `PW_SECRET_STORE=memory`, `PW_ALLOWED_ORIGINS=<web origin>`.
 - Ephemeris `data/ephemeris/de421.bsp` is local-only: run `tools/fetch_ephemeris.py` on a fresh checkout.
 - Workers must kill processes **by PID only** (a worker once ran `taskkill /IM chrome.exe`, which closes the user's Chrome too).
+- This PC's system time zone is **UTC**, so "Local Time" with a null timezone equals UTC here. Test local time with an explicit zone.
+- Browser-gate `eval` strings: never use regex literals (they break in the JSON step file); use `JSON.stringify(innerText)`.
 - Python on this Windows box can't see Git Bash `/tmp` — use the session scratchpad or repo-relative paths.
 
 ## What exists (repo map)

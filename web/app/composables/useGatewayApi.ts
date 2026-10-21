@@ -58,5 +58,6 @@ export function useGatewayApi() {
   return {
     get: <T>(path: string) => request<T>('GET', path),
     put: <T>(path: string, body: unknown) => request<T>('PUT', path, body),
+    post: <T>(path: string, body: unknown) => request<T>('POST', path, body),
   }
 }
