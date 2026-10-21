@@ -9,3 +9,8 @@ __pycache__/
 .ruff_cache/
 tools/pwi4_harness/out/
 data/ephemeris/
+
+# Local secrets (DB connection etc.) — never commit
+.env
+.env.*
+!.env.example

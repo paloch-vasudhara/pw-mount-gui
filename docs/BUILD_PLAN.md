@@ -137,7 +137,7 @@ Each phase ends with a **supervisor gate** (independent checks) and a **user che
 |---|---|---|
 | T4.1 | TRACK OBJECT button rules (A1): above 0°, pass reaches Lim EL, Sun | Rule table tests |
 | T4.2 | Gateway track workflow (A1d): pass check, pre-position wait at the Lim EL crossing, follow_tle handoff, stop at Lim EL, D-SUN for track segments | PWI4-sim passes: normal, rising-below-limit, peak-below-limit (refused), through-the-Sun |
-| T4.3 | Card pinning/stacking rules (A1e) + Track Target modal (A5c-ii): 500-cap search, latest-500 default, filters, aircraft tab disabled | A1e scenario table walked in e2e |
+| T4.3 | Card pinning/stacking rules (A1e) + Track Target modal (A5c-ii): 500-cap search, latest-500 default, filters, aircraft tab disabled; **stale-TLE badge** (TLE age > 30 d, user 10-21) on search results and on the Track Info card, also used by Pass Analysis results (T5.1) | A1e scenario table walked in e2e |
 
 **User check:** satellite track on PWI4-sim, then on the real mount (pre-position → follow → stop at Lim EL).
 
@@ -506,6 +506,221 @@ _Filled in by the designer at the start of each task (files touched, contract, i
 - **Settings flow:** unchanged form → SAVE disabled. Mismatching edit → SAVE shows the warning and the file is unchanged. Editing lat clears the warning. SAVE twice → saved and closed. CANCEL always present.
 - **New endpoint:** the gateway's PWI4 request log still shows only `GET /status`.
 
+### T2.2 — Satellite layers (spec, 2026-10-21; user decisions same day)
+
+**User decisions (10-21):**
+- **DB:** the satellite DB is reached through `POSTGRESQL_DSN` in the repo-root `.env` (git-ignored; same variable as ssa-toolkit). It points to the local DB now and to a server DB later. The Settings "Satellite DB" dropdown will later select between servers: provider id → DSN variable, with `DELV Aerospace` → `POSTGRESQL_DSN` for now.
+- **Live viewer scope:** **active payloads only** (`object_type = 'PAYLOAD' AND is_active AND decay_epoch IS NULL`). Other object types stay reachable through search (Track Target / Pass Analysis) but are never drawn as live tracks.
+- **Hardware:** this PC is the mount PC, so timing is measured here.
+- **Hard requirements:**
+  - the first load (all classes visible) populates quickly;
+  - the calculation never stalls mount operations, monitoring or commands.
+
+**Rules for all T2.2 work:**
+- The DSN is a secret: never print, log, return or commit it, and never read it outside the code path that connects.
+- DB access is **read-only** (SELECT only).
+
+#### T2.2a — Analysis backend (`analysis/`)
+
+- **Catalogue (`analysis/catalog.py`):**
+  - SQLAlchemy Core + psycopg2, read-only SELECTs on `satellites`.
+  - Load `.env` with python-dotenv (repo root); a missing DSN gives a clear 503.
+  - Live set = active payloads (decision above) mapped to layers: **LEO** = LEO + SSO, **MEO** = MEO, **GEO** = GEO + HEO; UNKNOWN excluded.
+  - Hold the TLEs per layer in memory as an sgp4 `SatrecArray`. Refresh every 6 h (and on demand via an endpoint) without blocking requests.
+  - Log counts only.
+- **Search (`GET /api/sats/search?q=&orbit_class=&object_type=&limit=500`):**
+  - Any object type, never decayed (G6/I8).
+  - With no `q`, returns the **latest 500** (highest NORAD id first).
+  - Returns `norad, name, cospar, country, object_type, orbit_class, tle_epoch`.
+  - `GET /api/sats/{norad}` returns the same fields plus the TLE lines, or 404 when decayed.
+- **Sky chunk (`POST /api/sky/chunk`):**
+  - Body: `{layer: "leo"|"meo"|"geo", site: {lat, lon, alt_m}, t0_unix, duration_s}`.
+  - Steps: LEO 10 s, MEO 60 s, GEO 300 s.
+  - `t0` is snapped down to the step grid; `duration_s` is 1800 for a full chunk, or 120 for the quick **head** chunk.
+  - Vectorised SGP4 (`SatrecArray.sgp4` over all objects × all times) → TEME → ECEF (GMST rotation) → topocentric az/el for the site, all numpy. No orekit/Java (I9).
+  - **Only above-horizon spans are returned** (alt > −2°, plus one sample of margin either side), so LEO data shrinks about 20×.
+  - **Binary response** (`application/octet-stream`), documented in the module docstring:
+    - a little-endian `uint32` header length, then a JSON header `{layer, t0_unix, step_s, n_steps, norad:[...]}`;
+    - then typed arrays: segments `Int32[obj_idx, start_step, n]` and samples `Float32[az, alt]`.
+    - The client decodes it without per-sample objects.
+  - A server-side cache keyed by (layer, site rounded to 1e-4°, t0, duration) keeps recent chunks for 10 min, so tabs and repeats don't recompute.
+- **`GET /api/sky/objects?layer=`:** `[norad, name, cospar, country, orbit_class]` for the live set (T2.3 uses it for labels/cards).
+- **Never stall anything (I5):**
+  - Chunks are computed in a `ProcessPoolExecutor(max_workers=1)` that owns its own catalogue copy, so the API loop stays free.
+  - On Windows the analysis process and its pool run at **BELOW_NORMAL priority** (ctypes `SetPriorityClass`), so the gateway always wins the CPU.
+  - `/api/health` must answer in < 100 ms during a chunk computation.
+- **Tests:**
+  - A fixture catalogue (a handful of TLEs: ISS-like LEO, an SSO, a GPS MEO, two GEO, one HEO, plus a decayed row and a non-payload row) behind the same catalogue interface. Use SQLite via SQLAlchemy, or an in-memory fake; no real DB in automated tests.
+  - Chunk az/el vs skyfield `EarthSatellite` topocentric alt/az at 5 instants: ≤ 0.02° (LEO) / 0.01° (MEO/GEO).
+  - Decayed and non-payload rows never appear in a chunk or `objects` (I8). Search excludes decayed but includes non-payloads.
+  - Binary round-trip.
+  - Above-horizon trimming correct at the rim.
+  - Health latency while a chunk runs.
+
+**Gate T2.2a (supervisor), against the real local DB (read-only):**
+- Unit tests, pytest and ruff.
+- Live payload counts per layer.
+- **Timings on this PC:**
+  - cold catalogue load;
+  - head chunk and full chunk per layer;
+  - all three full chunks.
+  - Targets: **full chunks for all three layers ≤ 5 s warm**, **head chunks ≤ 1 s**.
+- Response sizes.
+- Positions of a few real objects vs skyfield.
+- No decayed object in any output (I8), checked against the DB.
+- **I5:** gateway publish rate stays ≥ 9.5 Hz and `/api/mount/status` p95 < 50 ms while the three full chunks compute.
+
+#### T2.2b — Web satellite layers
+
+- **Cache (`stores/sky.ts` + pure `utils/sky-chunks.ts`)**, per layer:
+  - first fetch the **head** chunk (120 s) and draw at once, then the full 30-min chunk;
+  - when coverage left < 10 min, fetch the next chunk in the background;
+  - evict chunks whose end < now;
+  - flush and refetch on a site change (> 1e-4°).
+  - AbortController on flush; retry with backoff (max 30 s) on errors.
+  - Hidden layers are still fetched (A3a).
+  - The scheduler is a pure, unit-tested function, tested with fake timers.
+- **Drawing (in `SkyChart.vue`):**
+  - Three canvases (LEO, MEO, GEO) between `stars` and `overlay`.
+  - Redraw cadence LEO 1 s, MEO 5 s, GEO 20 s, staggered so they don't land on the same frame.
+  - Position = interpolation between the bracketing samples in unit-vector space (handles az wrap).
+  - Objects not in a segment at time t are not drawn.
+  - Colours: port ssa-toolkit `utils/orbit-class.ts` `orbitClassColor` @84f2ded.
+  - Dot about 2 px; dimmed (× 0.35) below Lim EL. Satellites are **not** faded by daylight (they are data, not optical).
+  - No labels/hover (T2.3).
+  - Props `showLeo/showMeo/showGeo` (default true) for T2.3.
+  - Gate hooks: `data-frames-leo/meo/geo`, `data-sats-leo/meo/geo` (drawn counts).
+  - No per-frame allocation; chunk decode happens once.
+- **Main-thread budget:** no long task > 50 ms in steady state, and a chunk decode ≤ 30 ms. If a full LEO decode exceeds that, decode in a Web Worker.
+
+**Gate T2.2b (supervisor):**
+- Web gates and unit tests.
+- **Real browser vs throwaway gateway + analysis + the local DB:**
+  - time from page load to first satellites drawn: **target ≤ 3 s** with a warm catalogue; report cold too;
+  - drawn positions of a few real objects vs skyfield ≤ 1.5 px at 1920;
+  - long tasks measured with PerformanceObserver;
+  - frame cadences per layer;
+  - the next-chunk fetch happens at about 10 min remaining (fake-timer unit test, plus one observed request with a clock-offset test hook);
+  - I5 re-checked with the browser running: gateway 10 Hz and the dashboard Mount Status still updating smoothly.
+- Screenshots vs Main Dashboard 2.png (satellites only, no labels yet).
+
+### T2.3 — Filters, hover/pick, selection/focus, labels, Track Info card (read-only) (spec, 2026-10-21)
+
+**Goal:** the Sky Viewer becomes interactive (A2a, A3a) and the TRACK INFO panel shows the selected satellite's card (A1a, A1c) with live 1 Hz values. Tracking itself is Phase 4: the TRACK OBJECT button is shown but disabled.
+
+**Reference:** ssa-toolkit (read/copy only, @84f2ded):
+- `components/panels/observer/ObserverHemisphereCanvas.vue`: tooltip content, selection ring, focus dim 0.22, labels;
+- `assets/css/observer-hemisphere.css`;
+- `components/common/FlagBadge.vue`.
+- Renders: `concept/Main Dashboard 1.png` / `2.png` (filters, labels, selection ring) and `Track Cards.png`.
+
+**1. Filters panel (A2a)**, `components/filters/VisibilityFilters.vue` in the FILTERS panel above Tools:
+- **Tree:**
+  - **Satellites** › Low Earth Satellites (LEO+SSO), Medium Earth Satellites (MEO), Geosynchronous Satellites (GEO+HEO);
+  - **Aircrafts**: present, disabled, tooltip "No ADS-B source configured";
+  - **Celestial Objects** › Planetary Bodies (Sun, Moon), Stars.
+- **Parent semantics:** unchecking a parent hides all its children but **keeps the children's own checks**; children render greyed while the parent is off. Child visible = parent on AND child on.
+- Defaults: everything on (except the disabled Aircrafts). Persisted per viewer in localStorage (try/catch).
+- Drives SkyChart's `showLeo/showMeo/showGeo/showStars/showBodies`.
+- Hidden layers keep being fetched (A3a); only drawing stops.
+- Pure helper `utils/filters.ts` with unit tests for the semantics.
+
+**2. Hover — nearest object (A3a change vs ssa):**
+- On pointer move over the chart, the hovered object is the **closest drawn marker** to the pointer within a pick radius (about 10 px, scaled), among visible layers and above the horizon. It is never the topmost one.
+- Labels are not hit targets, so **hovering a label does nothing**.
+- Implementation: each layer draw stores its screen positions + object indices in reusable typed arrays; picking scans them (O(n), no allocation).
+- Cursor: pointer when something is hovered.
+- **Tooltip** (ssa format), following the pointer and kept inside the chart:
+  - first line: **name** (NORAD);
+  - second line: `Az x.xx° El ±x.xx° | range km | class | ● Illuminated/Umbra`;
+  - plus **`TLE age N.N d`**, added for the user's fast-mover investigation (O-FAST).
+  - Az/El come from the chunk at once; range, illumination and TLE age come from the state endpoint (item 6), cached per NORAD for 1 s.
+
+**3. Selection / focus / deselect (A3a):**
+- **Select:** click → select the nearest hovered object. Click anywhere that is not an object → deselect. The card × also deselects.
+- **Focused mode:** the selected object gets a **white ring** (render) and its label is always drawn, bold. All other satellites dim to **0.22** (ssa `.ov-sat.dim`). Stars and bodies are unchanged. No path is drawn (lightweight).
+- **Selection state** lives in a Pinia store `stores/selection.ts` (`selectedNorad` + metadata), so Track Info and the chart share it.
+- **Persistence:** the selection survives chunk refreshes. If the object's layer is hidden or it sets, the selection stays (no ring drawn); the card stays.
+
+**4. Labels (ssa labelling):**
+- Name drawn to the right of the marker (ssa: bold small font, white with a dark halo).
+- To keep hundreds of LEO labels readable, labels are **decluttered greedily** each draw. Priority: selected > hovered > GEO > MEO > LEO. A label whose box overlaps an already-placed label (or a placed marker) is skipped.
+- Label widths are measured once per object (cache).
+- Labels draw on their own canvas at the LEO cadence; budget ≤ 3 ms per draw at 1920.
+- Labels are never hit targets (item 2).
+
+**5. Track Info card (A1a, A1c)**, `components/track/TrackCard.vue` in the TRACK INFO panel:
+- Nothing selected → centred muted "No object selected".
+- Card per `Track Cards.png`:
+  - satellite icon, **name + flag** (port `FlagBadge`; DB `country_code`);
+  - `COSPAR (NORAD)` + a **class chip** coloured per the ssa `ORBIT_CLASS_COLOR` with the DB orbit class (LEO/SSO/MEO/GEO/HEO);
+  - × button; separator;
+  - rows: Azimuth `x.xx°`, Elevation signed `±x.xx°`, Range `x xxx km` (`.0f`, single-space thousands), Illumination `● Illuminated` (yellow) / `● Umbra` (grey) / `● Below Horizon` (grey, when alt < 0);
+  - values refresh at **1 Hz** from the state endpoint.
+- **TRACK OBJECT** button: full width, rendered in the disabled (grey) style, tooltip "Object tracking arrives in Phase 4".
+- Aircraft card (A1b): not built until ADS-B exists.
+- Card states/stacking (A1e) come with tracking in Phase 4.
+
+**6. Analysis: `POST /api/sky/state`:**
+- Body `{norad, site:{lat,lon,alt_m}, t_unix?}`. Returns `{norad, name, cospar, country, object_type, orbit_class, az, alt, range_km, illuminated, tle_epoch, tle_age_days}`.
+- Any non-decayed object, so it also serves Phase 4/5 search results. Decayed or unknown → 404.
+- Computed in the main process (one object; must answer in < 20 ms). skyfield `EarthSatellite` + `is_sunlit` with the local `data/ephemeris/de421.bsp`; az/alt geometric (same convention as the chunks).
+- Tests: values vs a direct skyfield computation; 404 for decayed (fixture).
+
+**7. Stale-TLE cutoff for the live viewer (user decision 10-21, O-FAST):**
+- The live set (sky layers, chunks, `/api/sky/objects`) additionally requires `tle_epoch >= now − 30 days`.
+- Constant `STALE_TLE_DAYS = 30` in the analysis config; evaluated at each catalogue (re)load.
+- Search, `GET /api/sats/{norad}` and `/api/sky/state` are **not** filtered (stale objects stay searchable and selectable); they return `tle_age_days` so Phase 4/5 can badge them.
+- Tests: a fixture row with an old epoch is absent from chunks/objects but present in search.
+
+**Must not touch:** `pwi4/`, ssa-toolkit, `docs/`, the gateway (no change needed). No commits.
+
+**Gate (supervisor):**
+- Python and web gates; unit tests.
+- **Stale cutoff:** the four O-FAST outliers (63490, 51844, 68224, 51657) and every live-set object with TLE age > 30 d are absent from all chunks/objects, and still found by search.
+- **Real browser, throwaway servers + the local DB:**
+  - filter semantics: parent off keeps the children's checks, children greyed, layers hidden; persistence across reload;
+  - **nearest picking inside a GEO clump**: synthetic pointer positions next to known marker pixels pick the nearest NORAD, never the topmost;
+  - a label hover picks nothing;
+  - select → white ring, others dimmed, card shows correct values vs skyfield (az/el/range) and the illumination state; values update at 1 Hz;
+  - click empty → deselect, card "No object selected";
+  - tooltip content incl. TLE age;
+  - label declutter cost ≤ 3 ms, no long tasks;
+  - Mount Status still 10 msg/s.
+- Screenshots vs Main Dashboard 2.png and Track Cards.png at 1920 and 1280 @1.5.
+
+### T2.3b — Labels toggle + FILTERS panel scaling (spec, 2026-10-21, user review)
+
+**Context:** LEO labels flicker because declutter decisions change every 100 ms. The user chose a simpler fix than sticky placement: a **Labels** toggle. The user's screenshot (windowed browser at 150 %, about 1280 × 600 CSS px) shows the FILTERS content overflowing.
+- Measured: content needs 443 px in a 403 px panel; the Tools group spills out and the page grows to 661 px with a scrollbar.
+- At 1280 × 720 it fits with only 13 px to spare.
+- Cause: the filter rows use fixed sizes (the tree is 263 px tall at every size).
+
+**1. Labels toggle (`stores/filters.ts`, `VisibilityFilters.vue`, `SkyChart.vue`):**
+- A top-level **"Labels"** checkbox as the last item of the Visibility tree. No children. Default on, persisted with the other filters.
+- **Off:** no labels are drawn. Exceptions:
+  - the **hovered** object's label still draws, and the tooltip works as now;
+  - the **selected** object keeps its ring and label.
+- **On:** behaviour unchanged.
+- Unit test the semantics.
+
+**2. FILTERS panel scaling** (same method as the Mount Status panel, T1.5):
+- `container-type: size` on the FILTERS panel body.
+- **Scaled from the panel's height** with `clamp(min, N·cqh, max)`: the Visibility tree font, row spacing, checkbox size, tree indent, gaps between groups, legend sizes, and the **Tools** group (legend, button height and font, gaps).
+- **Max = today's values**, so the 1920 × 1080 layout is **identical** (measure before/after).
+- **Minimums:** text ≥ 11 px, buttons ≥ 22 px tall.
+- **Layout:** a flex column. Visibility at the top; **Tools anchored to the bottom** (`margin-top: auto`), never overlapping or pushed out of the panel.
+- **Fallback:** when even the minimums don't fit, the Visibility tree scrolls inside its own box (thin scrollbar). Tools stays fully visible and the page never scrolls.
+- **Page level:** at 1280 × 600 and 1280 × 720 (DPR 1.5) and 1920 × 1080, `document.scrollHeight == innerHeight` and no panel overflows its frame. If another panel (e.g. Track Info) overflows at 600, give it the same no-overflow treatment and report it.
+
+**Must not touch:** `pwi4/`, ssa-toolkit, `docs/`, `analysis/`, the gateway. No commits.
+
+**Gate (supervisor):**
+- Web gates.
+- Labels off → labels-drawn = 0; hover shows only that label + tooltip; the selected label remains.
+- Measurements at 1920 × 1080 (unchanged from before), 1280 × 720 @1.5 and 1280 × 600 @1.5: no overflow; Tools bottom inside the panel; no page scroll; font sizes per size.
+- Screenshots at all three sizes.
+
 ---
 
 ## 7. Progress tracker
@@ -524,8 +739,10 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | T1.5 | ✅ | ✅ 10-20 | ✅ 10-20 | ✅ 10-20 | user check pending | Settings: label col 100, fmt 60, 2│1│2, fields 162, full span 227, Lim EL 90, modal 788 (1-col < 820); panel clamp/cqw: 1920 identical, 1280@1.5 → 14/80×26/11/12/45 (panel 258 px → floors) |
 | T2.1 | ✅ | ✅ 10-21 | ✅ 10-21 | ✅ 10-21 | pending (incl. live sim goto follow) | 8 870 stars (V ≤ 6.5, indep. count ✓); 10 bright stars ≤ 0.37 px vs skyfield at 1920; stars 1 Hz / base flat; clock UTC↔Local persists, Asia/Bangkok ✓ |
 | T2.1b | ✅ | ✅ 10-21 | ✅ 10-21 | ✅ 10-21 | pending | user review: sky colour by Sun alt + star fading, broken-ring marker, Settings save flow (disabled when unchanged, warn-then-confirm) |
-| T2.2 | ⬜ | | | | | |
-| T2.3 | ⬜ | | | | | |
+| T2.2a | ✅ | ✅ 10-21 | ✅ 10-21 | ✅ 10-21 | with T2.2b | analysis: catalogue (active payloads), search (latest-500), binary sky chunks, pool + BELOW_NORMAL priority |
+| T2.2b | ✅ | ✅ 10-21 | ✅ 10-21 | ✅ 10-21 | pending | web: chunk cache (head → 30 min, next at 10 min left), 3 class canvases |
+| T2.3b | ✅ | ✅ 10-21 | ✅ 10-21 | ✅ 10-21 | pending | Labels toggle + FILTERS panel height scaling (user screenshot 1280×600 @1.5 overflow) |
+| T2.3 | ✅ | ✅ 10-21 | ✅ 10-21 | ✅ 10-21 | pending (+ O-FAST recheck) | filters tree, nearest hover + tooltip (TLE age), select/focus, decluttered labels, read-only Track Info card, `/api/sky/state` |
 | T3.1 | ⬜ | | | | | |
 | T3.2 | ⬜ | | | | | |
 | T3.3 | ⬜ | | | | | |
@@ -541,7 +758,7 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | T6.2 | ⬜ | | | | | |
 | T6.3 | ⬜ | | | | | |
 
-**Resume point:** Phase 1 committed (`52a3e3a`). **T2.1 + T2.1b verified, UNCOMMITTED**; the user's look at T2.1b (sky colour, marker, Settings save flow) is pending, plus a live check that the pointing circle follows a PWI4-sim goto (PWI4 was not running at the gate). Open item O-SITE is to be resolved before Phase 3. Next: **T2.2** (analysis: vectorised SGP4 class layers in 30-min chunks + web chunk cache) — write its spec first.
+**Resume point:** Phase 1 committed (`52a3e3a`). T2.1/T2.1b committed (`053ef61`). **T2.2a + T2.2b verified, UNCOMMITTED**; the user check of the satellite layers is pending, with the markers now 5 px outlined squares. Previously pending: a live check that the pointing circle follows a PWI4-sim goto (PWI4 was not running at the gate). Open item O-SITE is to be resolved before Phase 3. Next: **T2.3** (filters tree, nearest-pointer hover, selection/focus, read-only Track Info cards); write its spec first.
 
 ---
 
@@ -704,6 +921,130 @@ _Differences between the as-built app and the logic sheet / concept renders, wit
   - Marker: broken ring, centre clear.
 - **Noted for the user:** the marker's contrast on the daytime blue sky is low.
 - **First run:** SAVE starts enabled because the PC zone is substituted for a null timezone. This is intended.
+
+### T2.2a log (2026-10-21)
+- **User decisions:**
+  - DB via `POSTGRESQL_DSN` in the repo `.env`.
+  - **`.env` was not git-ignored when the user added it.** The supervisor added `.env`, `.env.*` and `!.env.example` to `.gitignore` before any work started.
+  - Live viewer = active payloads only.
+  - This PC is the mount PC.
+  - Requirements: fast first load; never stall mount operations.
+- **Worker delivered:** `analysis/{db,catalog,chunks,service,priority}.py` plus endpoints `/api/sats/{status,refresh,search,{norad}}` and `/api/sky/{chunk,objects}`.
+  - `db.py` is the only place the DSN is read. Postgres sessions run with `default_transaction_read_only=on`. Error text is never returned.
+  - Enums are stored by name (= value).
+  - Binary chunk header gains `n_seg`/`n_samples`, padded to 4-byte alignment.
+  - `n_steps = ceil(d/step) + 1`, so a chunk boundary sample is shared with the next chunk.
+- **Supervisor gate:**
+  - **Tests and DB:** pytest 108 passed / 13 skipped; ruff clean. Live counts LEO+SSO 16 071, MEO 223, GEO+HEO 611. DB session confirmed `transaction_read_only = on`.
+  - **Timing (HTTP, cold cache):**
+    - LEO head 0.11 s / 86 KB; LEO full 1.82 s / 1.04 MB.
+    - MEO/GEO head and full < 10 ms.
+    - All three full chunks 1.86 s (target ≤ 5 s).
+  - **Accuracy vs skyfield**, own float64 decoder, all samples of about 25 objects per layer:
+
+    | Layer | Median | p99 | Max |
+    |---|---|---|---|
+    | LEO | 0.0008° | 0.0039° | 0.0045° |
+    | MEO | 0.0004° | 0.0007° | 0.0007° |
+    | GEO | 0.0004° | 0.0005° | 0.0005° |
+
+    A first run showed 0.016° spikes. The cause was the supervisor's own float32 `arccos` quantisation in the check script, not the service.
+  - **I8 / scope, against the DB:**
+    - 0 of 3 151 not-live rows (non-payload / inactive / decayed) appear in any layer's objects list or chunk.
+    - The default search (500, NORAD 100391–101108) contains 0 decayed.
+    - GET of 5 decayed objects → 404.
+    - Non-payloads remain searchable.
+  - **I5:** with 33 full chunks computed back to back during a 20 s window, gateway WS 10.10 Hz (same as idle), `/status` p95 8.2 ms, analysis health max 9 ms. The analysis process and its pool child are both BelowNormal.
+
+### T2.2b log (2026-10-21)
+- **Worker delivered:** `utils/sky-chunks.ts`, `stores/sky.ts`, three layer canvases in SkyChart, and `SAT_COLORS` in `theme.ts`.
+  - **Decoder:** typed-array views over the fetched buffer with no copies, per-object and per-segment lookup tables, and a unit-vector array for every sample. `positionsAt` is O(objects) with no allocation.
+  - **Scheduler (`LayerScheduler`, pure):** fetches the 120 s head, then the full 1800 s chunk, and the next chunk when less than 600 s of coverage is left; evicts past chunks; flushes on a site change.
+  - **Retries:** backoff from 0.5 s up to 30 s. Deviation: a 503 (catalogue loading) retries every 1 s.
+  - **Web Worker:** not needed; a full LEO decode takes about 12–19 ms.
+  - **Hooks:** `window.__skyTestClockOffsetMs`, `window.__skyStats`, `data-sats-*`, `data-frames-*`.
+- **Supervisor gate:**
+  - **Tests:** lint 0 errors, typecheck 0, vitest 286/286.
+  - **Drawn pixel positions vs skyfield at 1920**, own measurement at the recorded draw times:
+    - 8 LEO (including fast movers), max 0.33 px;
+    - 5 MEO, max 0.17 px;
+    - 6 GEO, max 0.10 px. One apparent 7 px was a neighbour inside the search box; the dot itself was within 0.3 px.
+  - **First satellites after navigation (warm):** MEO/GEO 0.98 s, LEO 1.36 s (target ≤ 3 s). The worker measured a cold start (analysis just started) at about 3.5 s.
+  - **Steady 30 s:** no long tasks; Mount Status 10 msg/s.
+  - **Next-chunk fetch:** observed by the worker with the clock-offset hook; also covered by unit tests.
+- **Marker change (user, option 2, done by supervisor):** 2 px dots became **5 px squares** (`SAT_SQUARE_PX`, scaled like the stars), filled with the class colour at 0.85 alpha with an opaque 1 px outline.
+  - The outline is a lighter tint on the night disc and a darker shade on the day disc (switching at sky brightness 0.5).
+  - Night, twilight (−5°) and day (+30°) screenshots: all three classes clearly visible, so **no colour nudge was needed** (the user's concern was that brighter colours would blend into the day sky).
+  - Gates re-run: lint 0 errors, typecheck 0, vitest 286/286.
+- **Smoother motion (user, 10-21):** positions were already interpolated between the 10 s samples; the jumps came from the 1 Hz LEO redraw (a fast mover near the zenith stepped about 2.4 px per redraw at 1920).
+  - New cadences: **LEO 10 Hz** (about 0.25 px steps), MEO 5 s, **GEO 10 s** (user).
+  - Measured: LEO draw 0.7 ms per frame at 1920 (0.5 ms at 1280 @1.5), about 515 objects drawn, so about 0.7 % of the main thread; no long tasks; Mount Status 10 msg/s.
+  - New gate hook `data-ms-<layer>` (last draw cost).
+
+### Open item O-FAST (user, 2026-10-21)
+- Some LEO objects look unnaturally fast in the Sky Viewer. The user will check, via the T2.3 hover/card, whether the cause is bad data (e.g. stale or bad TLEs) or rendering/calculation/interpolation.
+- Supervisor hypotheses: stale or bad TLEs (old epoch, SGP4 nonsense); interpolation across a sample gap (it must not); high-eccentricity objects near perigee.
+- T2.3 adds TLE age to the tooltip and card data to help.
+- **Supervisor diagnosis (10-21): bad data, not rendering.**
+  - Method: max topocentric rate per LEO object over a real 30-min dense grid.
+  - Normal objects: p99 0.90°/s; the fastest fresh-TLE objects (Starlink at about 300 km) reach 1.15°/s.
+  - Outliers at 7–17°/s, which is physically impossible: HYDRA-W 63490, JILIN-1 GAOFEN 03D18 51844, STARLINK-36977 68224, INSPIRESAT 1 51657.
+    - All have **TLEs 175–194 days old**, with perigee 227–289 km.
+    - SGP4 far past its epoch on high-drag orbits gives nonsense; these have almost certainly re-entered but are not marked decayed in the DB.
+  - **Live payloads by TLE age** (≤7 d / 7–30 / 30–90 / >90 d):
+    - LEO 12211/12/1/60; SSO 3736/4/8/39; MEO 195/8/6/14; GEO 544/1/0/0; HEO 54/5/2/5.
+    - 90 objects older than 30 days sit below 350 km perigee.
+  - Proposal to the user: exclude TLE age > 30 d from the live viewer, keeping such objects searchable with a stale-TLE badge.
+  - **User decision (10-21):** apply the 30-day cutoff to the live viewer (T2.3 item 7). Stale objects stay searchable with a **stale-TLE badge** (T4.3; also T5.1 results and the Track Info card).
+- Side note: the newest `tle_epoch` in the DB is 2026-10-23, in the future relative to 10-21; some feeds publish predicted elements.
+
+### T2.3 log (2026-10-21)
+- **Worker delivered:**
+  - `analysis/state.py` + `POST /api/sky/state`; the `STALE_TLE_DAYS = 30` live filter; `tle_age_days` on search/get/state.
+  - Web: `utils/{filters,sky-pick,track-format,country-flag}.ts`, `stores/{filters,selection}.ts`, `components/filters/VisibilityFilters.vue`, `components/track/{TrackCard,FlagBadge}.vue`.
+  - SkyChart: picking, labels canvas (greedy declutter), white selection ring, 0.22 focus dim, tooltip with TLE age.
+  - Hooks: `__skyPick(x, y)` / `.positions(layer)`, `data-hover-norad`, `data-selected-norad`, `data-ms-labels`.
+- **Supervisor gate:**
+  - **Tests:** pytest 116 / 13 skipped; ruff clean; lint 0 errors; typecheck 0; vitest 297/297.
+  - **Stale cutoff vs the DB:** live set 16 770 = an independent DB count; 0 of 135 stale payloads in the live set; the four O-FAST objects absent from live but searchable (ages 175–194 d). Max LEO topocentric rate now 1.52°/s (was 17°/s).
+  - **Nearest picking:** synthetic pointer moves at 6 points in a dense GEO clump; the picker equals a brute-force nearest every time.
+  - **Selection:** a click selects the clicked NORAD; the card (name, COSPAR/NORAD, chip, disabled TRACK OBJECT) updates at 1 Hz.
+  - **Below Horizon:** TDRS 3 at −55.29°, live.
+  - **Deselect:** a click on empty sky → "No object selected".
+  - **Filters:** parent off → 0 drawn with the child checks kept; persists across a reload; parent on restores only the checked children.
+- **BUG FOUND AND FIXED by the supervisor:** `/api/sky/state` was **27 s behind real time**.
+  - Cause: `ts.utc(1970, 1, 1, 0, 0, t_unix)` counts the 27 leap seconds since 1972. Card az was off by up to about 7° for a LEO; the tooltip's range/illumination were affected the same way.
+  - The worker's tests built their reference with the same call, so they could not catch it.
+  - Fix: `ts.from_datetime(datetime.fromtimestamp(t_unix, timezone.utc))`.
+  - The test reference uses an independent construction, plus a new regression test comparing state against the chunk pipeline's jday time grid along an ISS-fixture pass. It fails on the old code and passes now.
+  - After the fix, browser card values lie between skyfield at t−1 s and t (poll latency) for a LEO (COSMOS 2416) and a GEO (FLTSATCOM 8).
+- **Not live-checked:** the Umbra card state (no object above the horizon is in shadow near local noon); unit tests only.
+- **Labels:** p95 about 3.3 ms in headless Chrome without a GPU, slightly over the 3 ms budget. Mount Status stays at 10 msg/s.
+- **Open for the user:** flags load from **flagcdn.com** (as in ssa-toolkit), an external request from the mount PC and no flag offline. Proposal: bundle the flags locally.
+
+### T2.3 follow-ups (2026-10-21, user review, done by supervisor)
+- **Local assets:**
+  - flags: `web/public/flags/*.svg` from flag-icons 7.2.3 (MIT, `LICENSE.txt` + README); 270 SVGs, 2.5 MB, scanned for scripts (none);
+  - icons: `web/public/icons/{satellite,aircraft}.svg` (editable, README).
+  - `FlagBadge` uses the local files.
+  - Browser check: flags and icon load locally; **0 external hosts** in the page's resource list.
+- **Track card:** data rows are indented by icon width + gap, so "Azimuth" starts exactly under the name (x 80.2 = 80.2). Label column = widest label + `column-gap: max(4ch, 2em)` (about 32 px at 1920).
+- **Label flashing:** the supervisor offered sticky placement + fade + alternative positions; the user chose a simpler Labels toggle (T2.3b).
+
+### T2.3b log (2026-10-21)
+- **Worker delivered:**
+  - `filters.labels` + the "Labels" checkbox (last top-level item);
+  - SkyChart `showLabels` (off → only the hovered and selected labels);
+  - FILTERS sizes as `clamp(min, --u·N, N)` with `--u = 100cqh/450` on the panel body (`container-type: size`), Tools `margin-top: auto`, and the Visibility fieldset `overflow-y: auto` as fallback;
+  - `main` min-height lowered from 640 to 480 px (the 640 floor alone forced a page scroll at 600 tall).
+- **Supervisor gate:**
+  - **Tests:** lint 0 errors, typecheck 0, vitest 298/298.
+  - **Page scroll == innerHeight and no panel overflow:**
+    - 1920×1080: Tools 911–1047, identical to before;
+    - 1280×720 @1.5: Tools 562–687 inside the panel (242–700);
+    - 1280×600 @1.5: Tools 462–567 inside the panel (204–580); row font 11 px (the floor).
+  - **Labels toggle:** 61 → 0 → 65 labels drawn.
+  - The worker also checked hover/selected labels while off, persistence across a reload, the fallback scroll at 1280×500, and 1366×768 / 1536×864 / 1440×640 / 1280×560.
 
 ## 9. Known limitations & risks
 

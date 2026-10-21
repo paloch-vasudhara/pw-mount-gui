@@ -3,6 +3,8 @@ import os
 
 import uvicorn
 
+from .priority import set_below_normal
+
 DEFAULT_PORT = 8410
 
 
@@ -14,6 +16,7 @@ def main() -> None:
         default=int(os.environ.get("PW_ANALYSIS_PORT", DEFAULT_PORT)),
     )
     args = parser.parse_args()
+    set_below_normal()
     # Always bind loopback only.
     uvicorn.run("analysis.app:app", host="127.0.0.1", port=args.port)
 

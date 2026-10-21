@@ -19,7 +19,19 @@ Read this first, then `docs/BUILD_PLAN.md` (§7 tracker + **resume point**, §6 
   - gateway `site.timezone` in the snapshot.
   - **T2.1b ✅:** sky colour follows the Sun (test hook `window.__skyTestSunAlt` + `sky-test-refresh` event), broken-ring marker, Settings save flow (disabled when unchanged; mismatch warns first, second SAVE accepts; new read-only `POST /api/mount/site-check`).
   - The user check of T2.1b is pending; the live sim goto follow was confirmed clean by the user.
-- **Next: T2.2.** Write its spec (analysis service: vectorised SGP4 per orbit class in 30-min chunks, DB query changes G6; web chunk cache, refresh at 10 min remaining, eviction; one canvas per class above `stars`).
+- T2.1/T2.1b committed `053ef61`.
+- **T2.2 satellite layers ✅ (verified 10-21, UNCOMMITTED):**
+  - analysis `catalog/chunks/service/db/priority.py`: DB via `POSTGRESQL_DSN` in `.env`, read-only; active payloads only; binary chunks; process pool at BelowNormal priority;
+  - web `stores/sky.ts` + `utils/sky-chunks.ts` + 3 layer canvases.
+  - The user check is pending; LEO/MEO colours may need to be brighter.
+- **T2.3 ✅ (verified 10-21, UNCOMMITTED):**
+  - filters tree, nearest-pick hover + tooltip (TLE age), selection/focus, decluttered labels, read-only Track Info card, `POST /api/sky/state`;
+  - live set excludes TLE age > 30 d (O-FAST cause).
+  - Supervisor fixed a 27 s leap-second bug in the state endpoint; regression-tested.
+  - **T2.3b ✅:** Labels toggle; FILTERS panel scales with height (fits down to 1280×560, Visibility scrolls internally below that). Plus local flags (`web/public/flags`, flag-icons 7.2.3 MIT) and icons (`web/public/icons`); Track card rows aligned under the name.
+  - The user's Phase 2 check is pending (incl. the O-FAST recheck).
+- **Next:** Phase 2 user check → commit → Phase 3 (control path; resolve O-SITE first).
+- **The DB is real and local:** `analysis` reads it on start. Never print or read `.env`; gate scripts use `analysis.db.make_engine()` (read-only session) and print counts only.
 - Gate tooling: `tools/browser_gate/cdp.mjs` (`size` takes an optional DPR: `[w, h, 1.5]`) + `tools/pwi4_harness/simdrv.py` (sim-guarded driver). Only drive the sim to above-horizon targets (P14).
 - Decisions logged 10-20: G4 **start-up stop** (implement in T3.1); A4 **red warnings**; Lim EL field stays 90 px.
 
@@ -35,6 +47,7 @@ Read this first, then `docs/BUILD_PLAN.md` (§7 tracker + **resume point**, §6 
 - Workers must kill processes **by PID only** (a worker once ran `taskkill /IM chrome.exe`, which closes the user's Chrome too).
 - This PC's system time zone is **UTC**, so "Local Time" with a null timezone equals UTC here. Test local time with an explicit zone.
 - Browser-gate `eval` strings: never use regex literals (they break in the JSON step file); use `JSON.stringify(innerText)`.
+- Skyfield + Unix time: never `ts.utc(1970,1,1,0,0,t_unix)` (it counts leap seconds → 27 s off); use `ts.from_datetime(datetime.fromtimestamp(t, timezone.utc))`.
 - Python on this Windows box can't see Git Bash `/tmp` — use the session scratchpad or repo-relative paths.
 
 ## What exists (repo map)

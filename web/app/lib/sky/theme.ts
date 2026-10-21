@@ -15,9 +15,30 @@ export const SKY = {
   moonDark: '#3b4048',
   moonLit: '#cfd3da',
   pointer: '#4aa3ff',
+  selectRing: '#ffffff',
   note: '#6f8796',
   font: 'Barlow, ui-sans-serif, system-ui, sans-serif',
 } as const
+
+/**
+ * Satellite layer colours: ssa-toolkit `ORBIT_CLASS_COLOR` (utils/orbit-class.ts @84f2ded).
+ * LEO layer = LEO + SSO objects (ssa: LEO 4d9955 muted green; SSO 3d8f8f teal, a LEO sub-type, so
+ * the layer takes the LEO green); MEO 3a6bab muted blue; GEO layer = GEO + HEO (ssa: GEO 7a4faa
+ * muted purple; HEO a07830 amber, folded into the GEO layer, which takes the GEO purple).
+ */
+export const SAT_COLORS = { leo: '#4d9955', meo: '#3a6bab', geo: '#7a4faa' } as const
+
+/** Satellite marker: square side (css px at the reference chart size) and fill alpha (outline is opaque). */
+export const SAT_SQUARE_PX = 5
+export const SAT_FILL_ALPHA = 0.85
+
+/** While an object is selected every other satellite is dimmed to this alpha (ssa `.ov-sat.dim`). */
+export const SAT_FOCUS_DIM = 0.22
+
+/** Orbit-class chip colours (ssa-toolkit ORBIT_CLASS_COLOR, utils/orbit-class.ts @84f2ded). */
+export const SAT_CLASS_COLORS: Record<string, string> = {
+  LEO: '#4d9955', SSO: '#3d8f8f', MEO: '#3a6bab', GEO: '#7a4faa', HEO: '#a07830', UNK: '#888888',
+}
 
 /** Stars between the horizon and Lim EL are dimmed by this factor. */
 export const BELOW_LIM_DIM = 0.35
