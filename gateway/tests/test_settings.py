@@ -195,7 +195,7 @@ def test_api_key_never_in_file_responses_or_logs(tmp_path, caplog):
     with c:
         r = c.put("/api/mount/settings", headers=AUTH, json={**body(), "api_key": KEY})
         assert r.status_code == 200 and r.json()["api_key_set"] is True
-        assert KEY not in r.text and "api_key\"" not in r.text.replace("api_key_set", "")
+        assert KEY not in r.text and 'api_key"' not in r.text.replace("api_key_set", "")
         g = c.get("/api/mount/settings", headers=AUTH)
         assert g.json()["api_key_set"] is True and KEY not in g.text
         assert KEY not in c.get("/api/mount/site-check", headers=AUTH).text

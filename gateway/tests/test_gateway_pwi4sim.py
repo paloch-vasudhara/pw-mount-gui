@@ -102,7 +102,9 @@ def test_goto_stop_state_sequence(pwi):
     async def go():
         p = make_poller()
         seen: list = []
-        # settle at a known start pose
+        # settle at a known start pose; tracking off first: an alt-az goto does not end tracking
+        # (P15), so a sim left tracking by an earlier run would never reach STOPPED here
+        await asyncio.to_thread(pwi.mount_tracking_off)
         await asyncio.to_thread(pwi.mount_goto_alt_az, 45.0, 180.0)
         await pump(p, 40, seen, until=lambda s: s.state == "STOPPED" and len(seen) > 20)
         await pump(p, 1.0, seen)

@@ -10,10 +10,13 @@ import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket
 from fastapi.responses import JSONResponse
 
+from .audit import AuditLog
 from .config import Settings
+from .control import ControlService, Pwi4Writer
 from .ephem import Ephem
 from .hub import Hub
 from .poller import Poller
+from .safety import SafetyEngine, SafetyMonitor
 from .security import (
     HostCheckMiddleware,
     new_token,
@@ -29,6 +32,13 @@ AUTH_TIMEOUT_S = 2.0
 WS_UNAUTHORIZED = 4401
 
 
+def with_control(msg: str, control: dict) -> str:
+    """Add the per-client `control` field to a serialized status envelope's `data` object."""
+    if msg.endswith("}}"):
+        return msg[:-2] + ',"control":' + json.dumps(control) + "}}"
+    return msg
+
+
 def create_app(
     settings: Settings | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
@@ -40,6 +50,20 @@ def create_app(
     ephem = Ephem(settings.ephemeris)
     store = SettingsStore(settings.settings_path, secrets)
     poller = Poller(settings, hub, ephem, transport, store)
+    audit = AuditLog(settings.audit_dir)
+    control = ControlService(Pwi4Writer(settings.pwi4_url, transport), poller, hub, audit)
+    safety = SafetyEngine.from_env(poller, store, ephem, audit)
+    control.check = safety.check  # T3.1b: command gate
+    control.resolved_az = safety.pop_target_az
+    monitor = SafetyMonitor(safety, poller, control)
+    control.motion_cleared = monitor.clear
+
+    def goto_started(cmd) -> None:
+        plan = safety.take_plan(cmd)
+        if plan is not None:
+            monitor.begin(plan)
+
+    control.goto_started = goto_started
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -49,10 +73,17 @@ def create_app(
                 await poller.fetch_once()
             with contextlib.suppress(Exception):
                 store.seed_from_pwi4(site_key(poller.last_good) if poller.last_good else None)
+        audit.cleanup()
         task = asyncio.create_task(poller.run()) if settings.poll_enabled else None
+        # G4 start-up stop: before any command is accepted (the WS only opens after this).
+        control.start()
+        await control.startup()
+        monitor.start()
         try:
             yield
         finally:
+            await monitor.stop()
+            await control.shutdown()  # G4 graceful-exit stop
             if task is not None:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -65,6 +96,10 @@ def create_app(
     app.state.poller = poller
     app.state.ephem = ephem
     app.state.store = store
+    app.state.control = control
+    app.state.safety = safety
+    app.state.monitor = monitor
+    app.state.audit = audit
 
     def require_auth(request: Request) -> None:
         """REST guard: per-launch token header + Origin / Sec-Fetch-Site (Host: middleware)."""
@@ -152,15 +187,32 @@ def create_app(
             "data": {"service": "gateway", "version": VERSION, "poll_hz": settings.poll_hz},
         }
         client = hub.add()
+        send_lock = asyncio.Lock()  # status stream and acks share the socket
+        cmd_tasks: set[asyncio.Task] = set()
+
+        async def send(text: str) -> None:
+            async with send_lock:
+                await websocket.send_text(text)
 
         async def sender() -> None:
-            await websocket.send_text(json.dumps(hello))
+            await send(json.dumps(hello))
             while True:
-                await websocket.send_text(await client.queue.get())
+                msg = await client.queue.get()
+                await send(with_control(msg, control.control_for(client.id)))
+
+        async def run_command(raw: str) -> None:
+            try:
+                ack = await control.handle(client.id, raw)
+                await send(json.dumps(ack))
+            except Exception:
+                pass  # socket gone; the command (if any) was already audited
 
         async def receiver() -> None:
-            while True:  # ignore inbound traffic; detects disconnect
-                await websocket.receive_text()
+            while True:
+                raw = await websocket.receive_text()
+                t = asyncio.create_task(run_command(raw))  # never block the next frame (STOP)
+                cmd_tasks.add(t)
+                t.add_done_callback(cmd_tasks.discard)
 
         tasks = [asyncio.create_task(sender()), asyncio.create_task(receiver())]
         try:
@@ -169,7 +221,8 @@ def create_app(
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            hub.remove(client)
+            hub.remove(client)  # fires the link-loss stop when this was the control holder
+            # Command tasks are left to finish: a STOP in flight must not be cancelled here.
             with contextlib.suppress(Exception):
                 await websocket.close()
 

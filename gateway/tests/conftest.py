@@ -68,9 +68,47 @@ class FakePwi4:
         self.delay = 0.0  # seconds /status hangs before answering
         self.connect_timeout_after: float | None = None  # raise ConnectTimeout after N s
         self.paths: list[str] = []
+        # Write-path model (T3.1a): every request with its query, and a tiny mount state machine.
+        self.calls: list[tuple[str, dict[str, str]]] = []
+        self.stop_ends_tracking = False  # model PWI4 variant where mount/stop also ends tracking
+        self.write_delay = 0.0  # seconds a /mount/* write hangs before answering
+        self.fail_writes: set[str] = set()  # paths answered with HTTP 500
+
+    @property
+    def writes(self) -> list[tuple[str, dict[str, str]]]:
+        return [c for c in self.calls if c[0] != "/status"]
+
+    def _apply_write(self, path: str) -> None:
+        over: dict[str, object] = {}
+        if path == "/mount/stop":
+            over["mount.is_slewing"] = False
+            if self.stop_ends_tracking:
+                over["mount.is_tracking"] = False
+        elif path == "/mount/tracking_off":
+            over["mount.is_tracking"] = False
+        elif path == "/mount/tracking_on":
+            over["mount.is_tracking"] = True
+        elif path.startswith("/mount/goto_"):
+            over["mount.is_slewing"] = True
+        if over:
+            self.set(**{k.replace(".", "__"): v for k, v in over.items()})
+
+    def set(self, **over: object) -> None:
+        """Update the status text, e.g. fake.set(mount__is_tracking=True)."""
+        cur = dict(line.split("=", 1) for line in self.text.strip().splitlines())
+        for k, v in over.items():
+            cur[k.replace("__", ".")] = str(v).lower() if isinstance(v, bool) else str(v)
+        self.text = "\n".join(f"{k}={v}" for k, v in cur.items()) + "\n"
 
     async def handler(self, request: httpx.Request) -> httpx.Response:
         self.paths.append(request.method + " " + request.url.path)
+        self.calls.append((request.url.path, dict(request.url.params)))
+        if request.url.path.startswith("/mount/") and not self.down:
+            if self.write_delay:
+                await asyncio.sleep(self.write_delay)
+            if request.url.path in self.fail_writes:
+                return httpx.Response(500, text="boom")
+            self._apply_write(request.url.path)
         if self.connect_timeout_after is not None:
             await asyncio.sleep(self.connect_timeout_after)
             raise httpx.ConnectTimeout("timed out")
@@ -89,4 +127,7 @@ class FakePwi4:
 def _isolated_settings(tmp_path, monkeypatch):
     """Tests never touch the real %LOCALAPPDATA% settings file or the Credential Manager."""
     monkeypatch.setenv("PW_SETTINGS_PATH", str(tmp_path / "settings.json"))
+    monkeypatch.setenv("PW_AUDIT_DIR", str(tmp_path / "audit"))
+    # Deterministic Sun for tests (T3.1b): far below the horizon unless a test overrides it.
+    monkeypatch.setenv("PW_TEST_SUN_ALTAZ", "-60,0")
     monkeypatch.setattr(settings_mod, "default_secret_store", settings_mod.MemorySecretStore)

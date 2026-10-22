@@ -82,3 +82,33 @@ class Ephem:
         self._cache_key = site
         self._cache_t = time.monotonic()
         return self._cache
+
+    def _observer(self, site: tuple[float, float, float]):
+        from skyfield.api import wgs84
+
+        lat, lon, h = site
+        return self._eph["earth"] + wgs84.latlon(lat, lon, elevation_m=h)
+
+    def sun_altaz(
+        self, site: tuple[float, float, float], when: datetime | None = None
+    ) -> tuple[float, float]:
+        """Apparent topocentric Sun (alt, az) in degrees for `site` (safety maths)."""
+        t = self._ts.from_datetime(when or datetime.now(UTC))
+        alt, az, _ = self._observer(site).at(t).observe(self._eph["sun"]).apparent().altaz()
+        return float(alt.degrees), float(az.degrees)
+
+    def radec_j2000_altaz(
+        self,
+        site: tuple[float, float, float],
+        ra_h: float,
+        dec_deg: float,
+        when: datetime | None = None,
+    ) -> tuple[float, float]:
+        """Apparent topocentric (alt, az) of a J2000 RA/Dec at `when` (precession, nutation,
+        aberration included; no refraction)."""
+        from skyfield.api import Star
+
+        t = self._ts.from_datetime(when or datetime.now(UTC))
+        star = Star(ra_hours=ra_h, dec_degrees=dec_deg)
+        alt, az, _ = self._observer(site).at(t).observe(star).apparent().altaz()
+        return float(alt.degrees), float(az.degrees)

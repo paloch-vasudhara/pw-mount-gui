@@ -721,6 +721,81 @@ _Filled in by the designer at the start of each task (files touched, contract, i
 - Measurements at 1920 × 1080 (unchanged from before), 1280 × 720 @1.5 and 1280 × 600 @1.5: no overflow; Tools bottom inside the panel; no page scroll; font sizes per size.
 - Screenshots at all three sizes.
 
+### T3.1 — Control path core + safety engine v1 (spec, 2026-10-21; user decisions same day)
+
+**User decisions (10-21), all review recommendations accepted:**
+- **O-SITE resolved:** all safety maths uses **PWI4's site** (what PWI4 actually points with). **Motion commands are refused while `site_check.ok == false`** (G7 reason "Station location differs from PWI4's site"); the user aligns PWI4 and Settings once by hand.
+- **Control lock:** one controlling tab. The first tab to send a command takes control; other tabs are view-only with "Take control", and a takeover does not stop anything. **STOP is accepted from any authenticated tab, always.**
+- **Link loss:** detected by gateway-driven WebSocket protocol ping/pong (not JS timers, which background tabs throttle). Silent loss is detected in ≤ 1 s; a socket close immediately. Edge "sleeping tabs" can sleep a background control tab (a correct stop, but unexpected): document "exclude localhost from sleeping tabs"; the standalone window (T6.2) avoids it.
+- **Limit monitor:** a predictive stop (look-ahead about 0.5 s on the measured velocity) so overshoot stays small. Refusing bad targets remains the primary guard. When the mount is already inside a limit, moves heading **away** from it are allowed (recovery).
+- **Sun crossing before D-SUN:** v1 predicts each slew's two-axis path and **refuses** any slew passing within 15° of the Sun (not only targets inside the disc).
+- **Sun shortcut (user):** when the whole Sun disc is below Lim EL, the Sun path check is skipped for every motion. Condition: `sun_alt + 15° < min(Lim EL, current mount alt)`; the `current alt` term keeps it correct for a recovery move starting below Lim EL.
+- **HOME (T3.2):** home is at about 85° elevation. The Sun path check applies; a HOME whose path crosses the disc is **refused until D-SUN (T3.5)** detours it. The shortcut applies.
+- **Azimuth wrap (P8/P9):** before every goto the gateway sets the axis-0 wrap minimum so the nearest representation is taken, which makes the path predictable. Verify on the sim that this is runtime-only (`PWI4.cfg` unchanged; read-only check).
+- **Audit log:** `%LOCALAPPDATA%\pw-mount-control\audit\YYYY-MM-DD.jsonl`, kept for 90 days.
+- **Start-up stop (G4, 10-20):** before accepting any command. Verify whether PWI4 `mount/stop` also ends tracking; if not, also send tracking-off.
+
+**Split:** T3.1a (command core, lock, link-loss, start-up stop, audit), then T3.1b (safety engine v1). Each is gated on **PWI4-sim**; the user launches PWI4 in Simulator mode for the gates.
+
+#### T3.1a — Command core, control lock, link-loss stop, start-up stop, audit (`gateway/`)
+
+- **First PWI4 writes:**
+  - all PWI4 write calls live in **one module** (`gateway/control.py`), the only place allowed to write; I2 grep check (no PWI4 calls outside `gateway/`, writes only in `control.py`).
+  - Never write PWI4 settings; never set the PWI4 site.
+- **Protocol** on the existing authenticated WS:
+  - client sends `{"type":"cmd","id":<uuid>,"cmd":...,"args":{...}}`;
+  - gateway answers `{"type":"ack","id","ok","reason"}`;
+  - pydantic-strict schemas, message size cap, unknown or invalid input → refused with a reason (G7).
+  - **Commands in T3.1:** `take_control`, `release_control`, `stop`, `goto_altaz{alt,az}`, `goto_radec_j2000{ra_h,dec_deg}`, `tracking{on}`. (Connect/home/jog/goto UI come in T3.2–T3.4.)
+- **Execution:**
+  - one serialized command worker (asyncio), so PWI4 writes never overlap and never block the poll/publish loops; time-limited PWI4 calls;
+  - **STOP preempts:** immediate, cancels anything pending.
+  - Every non-STOP command requires the lock (refused otherwise: "Another window has control").
+- **Lock:** the holder is a WS connection. The status broadcast gains `control: {holder: "you"|"other"|"none"}` per client.
+- **Link-loss stop (G4, I3):**
+  - when the lock holder's connection closes or misses pings (≤ 1 s) and motion is active (slewing / tracking / path or TLE follow / offset rate) → stop (+ tracking off if needed), audit, release the lock.
+  - Nothing resumes on reconnect. Non-holder viewers disconnecting never stop anything.
+- **Start-up stop (G4):** at gateway start, before the WS accepts commands: read status; if motion is active → stop, confirm STOPPED, audit. Also stop motion on **graceful gateway shutdown**.
+- **Audit (`gateway/audit.py`):** JSONL per day. Entries: ts, client id (connection), cmd, args, result, reason, plus events (lock taken/released, link-loss stop, start-up stop, shutdown stop). Never secrets. 90-day cleanup at start.
+- **Dev page `web/app/pages/dev/control.vue`** (unlinked, like `/dev/mount`): lock status + Take control, STOP, goto alt/az, goto RA/Dec, tracking on/off, last acks, live state. A store/client API extension in `stores/mount.ts` / `utils/mount-socket.ts` (send cmd, await ack with timeout).
+- **Tests:**
+  - unit tests with FakePwi4 (recorded requests): schema refusals, lock rules, STOP from a non-holder, preemption, link-loss path, start-up stop, audit lines.
+  - `pwi4sim`-marked tests: stop latency; kill the holder socket mid-slew and mid-track → STOPPED within ≤ 1 s and stays STOPPED after reconnect (I3); start-up stop with a slewing/tracking sim; whether `mount/stop` ends tracking.
+
+#### T3.1b — Safety engine v1 (`gateway/safety.py`)
+
+- **Site gate:** motion commands refused while `site_check.ok == false`. All alt/az and Sun maths uses PWI4's site.
+- **Target checks (refuse, G1/G7):**
+  - `goto_altaz`: alt in [Lim EL, 90], az valid.
+  - `goto_radec_j2000`: converted to topocentric alt/az now with skyfield (PWI4 site; J2000 → apparent of date). Refuse when below Lim EL. Refusing below the horizon guards P14.
+  - Sun distance of the target > 15°.
+  - `tracking on`: refused when the current pointing is below Lim EL or within 15° of the Sun.
+- **Slew path prediction:**
+  - axis model from PWI4 status (max velocity, acceleration per axis; slew time constant P13);
+  - axis-0 wrap chosen nearest (decision above), sampled about every 0.1 s;
+  - refuse when any sample is within 15° of the Sun. Skipped under the Sun shortcut.
+  - The same path model is reused by D-SUN (T3.5) and HOME (T3.2).
+- **Continuous monitor (10 Hz, every mode, G2/G3):**
+  - predictive: `alt + v_alt·0.5 s < Lim EL` while descending → stop; predicted Sun distance < 15° while closing → stop. Sun checks skipped under the shortcut.
+  - Covers sidereal tracking drifting down or into the Sun, and any motion started outside the app.
+  - After a limit stop the state is STOPPED and commands that would push further are refused.
+- **Recovery:** when already inside a limit, a goto whose target is outside every limit and whose path does not go deeper is allowed.
+- **G7 reasons:** "Below station limit elevation (Lim EL x°)", "Within 15° of the Sun", "Slew path passes within 15° of the Sun", "Station location differs from PWI4's site", "PWI4 not running / not reachable", "Mount not connected".
+- **Tests:**
+  - unit tests on the pure functions: target checks, path predictor vs recorded sim slews (P13 timing), the Sun shortcut, recovery, predictive monitor.
+  - Forged commands (below Lim EL, inside the Sun disc, path crossing the Sun, site mismatch) → refused (I4).
+  - `pwi4sim`: a sidereal track of a setting target stops at Lim EL; a slew toward the limit stops with overshoot measured; refusals leave no PWI4 write (request log).
+
+**Gate (supervisor, PWI4-sim):**
+- pytest / ruff / web gates.
+- PWI4 request log: writes only from `control.py`, never settings or site.
+- I3 kill-socket runs; I4 forged commands.
+- Start-up stop.
+- Overshoot at Lim EL.
+- Audit entries.
+- `PWI4.cfg` unchanged before/after (wrap min runtime-only).
+- Dev page round trip in a real browser.
+
 ---
 
 ## 7. Progress tracker
@@ -743,7 +818,8 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | T2.2b | ✅ | ✅ 10-21 | ✅ 10-21 | ✅ 10-21 | pending | web: chunk cache (head → 30 min, next at 10 min left), 3 class canvases |
 | T2.3b | ✅ | ✅ 10-21 | ✅ 10-21 | ✅ 10-21 | pending | Labels toggle + FILTERS panel height scaling (user screenshot 1280×600 @1.5 overflow) |
 | T2.3 | ✅ | ✅ 10-21 | ✅ 10-21 | ✅ 10-21 | pending (+ O-FAST recheck) | filters tree, nearest hover + tooltip (TLE age), select/focus, decluttered labels, read-only Track Info card, `/api/sky/state` |
-| T3.1 | ⬜ | | | | | |
+| T3.1a | ✅ | ✅ 10-21 | ✅ 10-21 | ✅ 10-21 | pending (/dev/control) | command core, lock, link-loss + start-up + shutdown stop, audit, /dev/control |
+| T3.1b | ✅ | ✅ 10-21 | ✅ 10-22 | ✅ 10-22 | pending (/dev/control) | safety v1: PWI4-site gate (O-SITE), target + path Sun checks, Sun shortcut, predictive monitor, recovery |
 | T3.2 | ⬜ | | | | | |
 | T3.3 | ⬜ | | | | | |
 | T3.4 | ⬜ | | | | | |
@@ -758,7 +834,10 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | T6.2 | ⬜ | | | | | |
 | T6.3 | ⬜ | | | | | |
 
-**Resume point:** Phase 1 committed (`52a3e3a`). T2.1/T2.1b committed (`053ef61`). **T2.2a + T2.2b verified, UNCOMMITTED**; the user check of the satellite layers is pending, with the markers now 5 px outlined squares. Previously pending: a live check that the pointing circle follows a PWI4-sim goto (PWI4 was not running at the gate). Open item O-SITE is to be resolved before Phase 3. Next: **T2.3** (filters tree, nearest-pointer hover, selection/focus, read-only Track Info cards); write its spec first.
+**Resume point (2026-10-22):** Phase 2 committed `26b18f0`. **T3.1 (a + b) verified on PWI4-sim, UNCOMMITTED.** Next:
+1. The user checks T3.1 via `/dev/control` against PWI4-sim (take control; goto; STOP; refusals with reasons; close the tab mid-slew → stops).
+2. The user commits.
+3. Then **T3.2** (connection sequence A5a with BUSY/FAULT + HOME with HOMING state; HOME refused when its path crosses the Sun until T3.5; the Sun shortcut applies). Write its spec first.
 
 ---
 
@@ -785,6 +864,7 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | 2026-10-20 | T1.1 | Publish ticker decoupled from PWI4 fetch; `pwi4.age_ms`; > 1 s stale → DISCONNECTED "PWI4 not responding"; connect timeout 0.25 s, retry 1 s when unreachable | Windows connect to a closed localhost port waits the full timeout (~0.5 s) → stream fell to ~2 Hz | supervisor |
 | 2026-10-20 | T1.1 | WebSocket can't pass Nitro devProxy (HTTP only) → in dev the page connects straight to the gateway (`runtimeConfig.public.gatewayWs`); token fetch stays proxied; prod = same-origin (gateway serves the app) |
 | 2026-10-20 | A4-i | **Red warnings** (user): Status red on FAULT; Sun Distance red when ≤ 15° (green > 15°). Implemented in T1.4 |
+| 2026-10-21 | T3.1 / O-SITE | User accepted the T3.1 review: PWI4 site for safety maths + refuse motion on site mismatch; single control lock (STOP from anyone); protocol ping/pong link-loss; predictive monitor + recovery; refuse Sun-crossing slews until D-SUN; **Sun shortcut**: skip Sun checks when `sun_alt + 15° < min(Lim EL, mount alt)`; HOME (≈85° el) subject to the Sun path check, refused when crossing until T3.5; nearest-wrap gotos; audit 90 days |
 | 2026-10-20 | G4 / T3.1 | **Start-up stop** (user): on every gateway start, if any motion is active (slewing, tracking, path/TLE follow, offset rate) the gateway stops the mount first — mitigates P1 (no PWI4 watchdog) after a crash/restart |
 | 2026-10-19 | T0.1 | Section title tags reduced (text-lg → 13 px, tighter padding) per user review |
 | 2026-10-19 | UI kit | shadcn-vue **Lyra** style (user; the React preset code can't be applied to shadcn-vue, so the style is set directly); Tailwind Preflight ON |
@@ -817,6 +897,7 @@ Agreement (first 50 satellites × 7 epochs): TEME position diff max 1.4e-7 km; a
 | P11 | `/status` at 10 Hz: mean 18 ms, p95 27 ms, max 30 ms, 0 > 100 ms | 10 Hz poll is comfortable (T1.1) |
 | P12 | Simulator only: `find_home` is a no-op (no motion, no homing field); velocity fields always 0 | HOMING detection and velocity fields must be verified on the real mount (Phase 3 user session); gateway derives velocity from position |
 | P14 | **PWI4 accepts below-horizon targets**: `goto_ra_dec_j2000` to a target ~11.7 h from the meridian drove the sim mount to its −40° mechanical altitude limit and kept slewing/tracking there (2026-10-20, T1.4 gate) | The gateway's G1 Lim EL check (T3.1) is the only guard — validate every goto/track target before sending, and refuse below Lim EL |
+| P15 | **`goto_alt_az` does not end tracking**: a sim left TRACKING stays TRACKING through an alt-az goto (found at the T3.1b gate; made `test_goto_stop_state_sequence` flaky) | Local Az/El goto must end STOPPED (A5c-iv): `goto_altaz` sends `tracking_off` first (T3.1b fix); the flaky test now calls `tracking_off` before settling |
 | P13 | Slews approach exponentially (slew time constant 0.5): 90° ≈ 9.5 s, 180°-ish ≈ 13.8 s | D-SUN slew-time model uses vmax/accel + the approach constant |
 
 Harness note: `08_watchdog.explicit_stop_latency_s` is mis-measured in the supervisor run (includes the silent period); conclusion unaffected — fix opportunistically.
@@ -1045,6 +1126,74 @@ _Differences between the as-built app and the logic sheet / concept renders, wit
     - 1280×600 @1.5: Tools 462–567 inside the panel (204–580); row font 11 px (the floor).
   - **Labels toggle:** 61 → 0 → 65 labels drawn.
   - The worker also checked hover/selected labels while off, persistence across a reload, the fallback scroll at 1280×500, and 1366×768 / 1536×864 / 1440×640 / 1280×560.
+
+### T3.1a log (2026-10-21)
+- **Worker delivered:**
+  - `gateway/control.py`: `Pwi4Writer`, the only PWI4 writer; `ControlService` with a serialized worker, STOP preemption, the lock, link-loss/start-up/shutdown stops, and the `check_command` seam for T3.1b; `nearest_wrap_min`.
+  - `gateway/commands.py`: strict schemas, 2 KiB message cap.
+  - `gateway/audit.py`: JSONL per UTC day, `PW_AUDIT_DIR`, 90-day cleanup, secret keys dropped.
+  - Link loss uses uvicorn protocol pings, `ws_ping_interval` 0.2 s and `ws_ping_timeout` 0.4 s.
+  - `/dev/control` page; `sendCommand` in `mount-socket.ts` / `stores/mount.ts`.
+  - **PWI4 finding:** `mount/stop` also ends tracking, but its HTTP response still shows `is_tracking=true` (stale); a fresh status read is correct. The gateway confirms stopped from position and re-sends tracking-off if needed. Needs a real-mount check.
+  - `goto_radec_j2000` has no wrap and no Lim EL guard until T3.1b (P14 open until then).
+- **Supervisor gate, independent client against a throwaway gateway + PWI4-sim (`sim_guard` checked):**
+  - **Tests:** pytest 168 / 26 skipped; ruff clean; lint 0 errors; typecheck 0; vitest 303/303.
+  - **I2 grep:** no PWI4 mount write endpoints outside `gateway/control.py` (excluding tests and the harness).
+  - **STOP from a non-holder:** accepted (ack 8 ms), STOPPED 0.20 s later. A goto from a non-holder → "Another window has control".
+  - **I3:**
+    - holder TCP abort mid-slew → STOPPED in 0.22 s (seen by a viewer);
+    - silent holder (paused reading, pings unanswered) mid-slew → 0.69 s;
+    - abort mid-sidereal-track → 0.21 s;
+    - still STOPPED 2 s later, lock "none", nothing resumed.
+  - **Start-up stop:** a sim slew started directly in PWI4, then a fresh gateway launched → the mount stopped at az 89° (target 60°) by the time the gateway first answered health (2.5 s, Python start-up time); audit `startup_stop` confirmed in 236 ms.
+  - **Dev page in a real browser:** take control → holder "you" → goto 55/120 SLEWING → STOP → STOPPED; acks listed.
+  - **`PWI4.cfg` SHA-256** B7143218…1A42F0 unchanged before/after (wrap minimum is runtime-only). The sim was left disconnected.
+
+### T3.1b log (2026-10-21 → 22, verified)
+- **Worker delivered:**
+  - `gateway/safety.py` (`SafetyEngine` + `SafetyMonitor`), `ephem.sun_altaz` / `radec_j2000_altaz`, radec nearest-wrap;
+  - `PW_TEST_SUN_ALTAZ` test-only Sun override (inert unless set; audited);
+  - path predictor validated on 12 recorded sim slews: rms 0.17° / max 0.66° without an acceleration limit. The sim ignores the reported 20°/s² (rms 5° with it), so both variants are checked.
+  - Monitor stops in the worker's runs: outside-app slew with Lim EL 30 → stopped at 37.9° (0° overshoot); setting sidereal track → +0.0015° above Lim EL.
+- **Supervisor gate (first pass):**
+  - **Passed:**
+    - pytest 193 / 31 skipped; ruff clean; web gates (vitest 303); I2 clean;
+    - forged goto alt 14.9 and a below-horizon radec refused ("Below station limit elevation (Lim EL 15°)") and audited as `safety_refusal`;
+    - site mismatch (Settings lat +1°) → goto refused "Station location differs from PWI4's site", STOP still accepted, goto accepted again after restore.
+  - **BUG (blocks the gate):** the predictive monitor stops **legal** slews.
+    - A valid goto 85 → 15.5 (Lim EL 15) was stopped at 22.97° (`limit_stop` at alt 24.5, `v` −19.5 → predicted 14.75).
+    - Cause: 0.5 s look-ahead × 20°/s ≈ 10° margin, plus the lagging velocity window. The same flaw applies to the Sun-closing check.
+    - Fix sent to the worker: validated gotos are monitored against actual limits plus a predicted-path corridor; the predictive look-ahead is kept for tracking and unvalidated motion; regression tests and sim runs at Lim EL + 0.5 / + 0.1.
+  - **P15 found:** alt-az gotos keep tracking on. Fixed the flaky Phase-1 sim test (3/3 pass); `goto_altaz` must send `tracking_off` first (sent to the worker).
+  - Supervisor test-client notes: blocking calls or a small `max_queue` in a test client stop pong replies, and the gateway (correctly) drops it as link loss.
+- **PARTIAL at pause (worker report, 10-21 end of day): fix IMPLEMENTED; final sim suite not run.**
+  - **Monitor fix:**
+    - `SafetyEngine.check` builds a `ValidatedGoto` (both predicted paths + the start Sun separation).
+    - `ControlService.goto_started` → `SafetyMonitor.begin`; `motion_cleared` (STOP / link loss / safety stop / shutdown / new command) → `SafetyMonitor.clear`.
+    - While a plan is active: stop if alt < `min(Lim EL, start alt)` − 0.05°, or Sun distance ≤ 15° (or deeper than at start), or the mount is > 2° from the predicted path in axis space ("Mount left the validated slew path"). The recorded sim slews' max deviation is 0.041°.
+    - The plan ends on arrival (0.2°), after 0.8 s with no motion, or at the predicted duration × 1.5 + 10 s; the predictive rules then resume.
+  - **P15:** `goto_altaz` now sends `tracking_off`, then the wrap, then `goto_alt_az`.
+  - **Tests:** default pytest **205 passed / 34 skipped**; ruff clean (re-run by the supervisor at pause: same).
+  - **New sim tests passed when run alone (13477):**
+    - 85 → Lim EL + 0.5 reached 15.5001° and → + 0.1 reached 15.1002°, with no `limit_stop`;
+    - P15: ends STOPPED with tracking false.
+  - **NOT YET DONE:** the full `PWI4_SIM=1` suite twice (control + safety + gateway sim tests), including re-running the earlier monitor sim tests (outside-app slew, setting track) after the fix. Then the supervisor re-gate: repeat 85 → 15.5 with an independent client, plus a slew passing about 17° from a pinned Sun via `PW_TEST_SUN_ALTAZ` on a throwaway gateway.
+  - Sim left disconnected; `PWI4.cfg` hash unchanged (B7143218…A42F0, checked by the supervisor at pause).
+- **Resumed and re-gated 10-22 (supervisor):**
+  - **Full sim suite (control + safety + gateway):** pass 1 23/23, pass 2 15 failed. All 15 failures were the test helper `safe_target`, not the gateway:
+    - it searched only 4 sweep lengths;
+    - it required ≥ 35° from the real Sun from the *start* pose, but the Phase-1 test leaves the sim at az 147.7 / alt 45, 22.8° from the morning Sun (alt 38–40, az 117).
+  - **Supervisor fix (`test_control_pwi4sim.safe_target`):** search sweeps 20–180° in both directions; accept a sweep that never gets closer to the Sun than it started and ends ≥ 35° clear (the same rule as gateway recovery).
+  - **After the fix:** the suite passed **twice, 23/23 each** (4 min 36 s per pass).
+  - **Independent re-gate** (own WS client, throwaway gateway, `PW_TEST_SUN_ALTAZ=40,180`):
+    1. legal goto 85 → 15.5 (Lim EL 15) reached **15.4998°**, no `limit_stop` (the bug is fixed);
+    2. a slew at alt 57 from az 150 to 210 (passing about 17° from the Sun) was accepted and completed;
+    3. the same at alt 54 (about 14°) was **refused** "Slew path passes within 15° of the Sun", 0.000° motion, audited `safety_refusal`;
+    4. PWI4 redirected directly mid-slew → `limit_stop` "Mount left the validated slew path" (deviation 2.59° > 2.0°) after 1.5 s.
+  - **Gates:** pytest 205 / 34 skipped; ruff clean; lint 0 errors; typecheck 0; vitest 303/303.
+  - `PWI4.cfg` hash unchanged; the sim was left disconnected; no throwaway listeners.
+
+
 
 ## 9. Known limitations & risks
 

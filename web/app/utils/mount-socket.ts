@@ -9,6 +9,72 @@ export const SESSION_TIMEOUT_MS = 3_000
 export const OPEN_TIMEOUT_MS = 5_000
 export const MAX_BACKOFF_MS = 5_000
 
+export const ACK_TIMEOUT_MS = 6_000
+
+export type ControlHolder = 'you' | 'other' | 'none'
+
+/** Gateway answer to one `cmd` message (T3.1a). `ok:false` always carries a G7 `reason`. */
+export interface CommandAck {
+  id: string | null
+  cmd: string | null
+  ok: boolean
+  reason: string | null
+  control?: { holder: ControlHolder }
+}
+
+export type CommandName =
+  | 'take_control' | 'release_control' | 'stop'
+  | 'goto_altaz' | 'goto_radec_j2000' | 'tracking'
+
+/**
+ * Pending-command bookkeeping: each sent command gets a promise that settles with the matching
+ * ack, a local timeout, or a "link lost" refusal. It never rejects, so callers can always show
+ * `reason`.
+ */
+export function createAckTracker(timeoutMs = ACK_TIMEOUT_MS) {
+  const pending = new Map<string, { resolve: (a: CommandAck) => void, timer: ReturnType<typeof setTimeout>, cmd: string }>()
+  let counter = 0
+
+  function newId(): string {
+    counter += 1
+    const rnd = typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : Math.random().toString(36).slice(2)
+    return `${counter}-${rnd}`.slice(0, 64)
+  }
+
+  function register(cmd: string, timeout = timeoutMs): { id: string, promise: Promise<CommandAck> } {
+    const id = newId()
+    const promise = new Promise<CommandAck>((resolve) => {
+      const timer = setTimeout(() => {
+        pending.delete(id)
+        resolve({ id, cmd, ok: false, reason: 'No answer from the gateway (timed out)' })
+      }, timeout)
+      pending.set(id, { resolve, timer, cmd })
+    })
+    return { id, promise }
+  }
+
+  function settle(ack: CommandAck): boolean {
+    const p = ack.id ? pending.get(ack.id) : undefined
+    if (!p) return false
+    clearTimeout(p.timer)
+    pending.delete(ack.id as string)
+    p.resolve(ack)
+    return true
+  }
+
+  function failAll(reason: string) {
+    for (const [id, p] of pending) {
+      clearTimeout(p.timer)
+      p.resolve({ id, cmd: p.cmd, ok: false, reason })
+    }
+    pending.clear()
+  }
+
+  return { register, settle, failAll, size: () => pending.size }
+}
+
 export interface MountEnvelope<T = unknown> {
   type: string
   seq: number
@@ -21,6 +87,8 @@ export interface MountSocketHandlers {
   onHello: (data: Record<string, unknown>) => void
   onStatus: (data: Record<string, unknown>) => void
   onError: (msg: string | null) => void
+  /** Every ack that arrives (including ones whose promise already timed out). */
+  onAck?: (ack: CommandAck) => void
 }
 
 export interface MountSocketOptions {
@@ -34,6 +102,7 @@ export function createMountSocket(opts: MountSocketOptions, h: MountSocketHandle
   let openTimer: ReturnType<typeof setTimeout> | null = null
   let attempt = 0
   let stopped = true
+  const acks = createAckTracker()
 
   function scheduleReconnect() {
     if (stopped) return
@@ -83,9 +152,15 @@ export function createMountSocket(opts: MountSocketOptions, h: MountSocketHandle
         else if (msg.type === 'status') {
           h.onStatus(msg.data as Record<string, unknown>)
         }
+        else if (msg.type === 'ack') {
+          const ack = msg as unknown as CommandAck
+          acks.settle(ack)
+          h.onAck?.(ack)
+        }
       }
       sock.onclose = (ev) => {
         if (openTimer) clearTimeout(openTimer)
+        acks.failAll('Gateway link lost')
         if (ws === sock) ws = null
         h.onError(`closed (${ev.code})`)
         scheduleReconnect()
@@ -98,6 +173,20 @@ export function createMountSocket(opts: MountSocketOptions, h: MountSocketHandle
       h.onError(String(e))
       scheduleReconnect()
     }
+  }
+
+  /** Send one command; resolves with the ack (never rejects). */
+  function sendCommand(
+    cmd: CommandName,
+    args: Record<string, unknown> = {},
+    timeoutMs = ACK_TIMEOUT_MS,
+  ): Promise<CommandAck> {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      return Promise.resolve({ id: null, cmd, ok: false, reason: 'Not connected to the gateway' })
+    }
+    const { id, promise } = acks.register(cmd, timeoutMs)
+    ws.send(JSON.stringify({ type: 'cmd', id, cmd, args }))
+    return promise
   }
 
   function start() {
@@ -113,7 +202,8 @@ export function createMountSocket(opts: MountSocketOptions, h: MountSocketHandle
     if (openTimer) clearTimeout(openTimer)
     ws?.close()
     ws = null
+    acks.failAll('Gateway link closed')
   }
 
-  return { start, stop }
+  return { start, stop, sendCommand }
 }

@@ -1,39 +1,37 @@
-# Session handoff — updated 2026-10-20 (end of day, Phase 1 checkpoint)
+# Session handoff — updated 2026-10-22 (T3.1 verified)
 
 Read this first, then `docs/BUILD_PLAN.md` (§7 tracker + **resume point**, §6 task specs, §8 logs/findings), then `docs/logic_sheet.txt` as needed.
 
 ## Where we are
 
-- **Phase 0 COMPLETE** (commit `7d0bbdb`).
-- **Phase 1 COMPLETE, accepted by the user 2026-10-20.** The user commits it as the Phase 1 checkpoint; check `git log`, and if `7d0bbdb` is still on top the commit is pending.
-  - **T1.1 Gateway core**: read-only PWI4 poller (`GET /status` only), G8 state machine, Sun/Moon (skyfield, local `de421.bsp`), 10 Hz publish ticker decoupled from fetching, `pwi4.age_ms` staleness, gateway-computed time, pointing null when disconnected, hardened WS (Origin allowlist + first-message token, 4401) and Host check.
-  - **T1.2 Station Settings**: `%LOCALAPPDATA%\pw-mount-control\settings.json` (`PW_SETTINGS_PATH`), API key in Windows Credential Manager (`PW_SECRET_STORE=memory` for tests), REST settings + site-check (`X-Mount-Token`), first-run `timezone: null` = PC zone, site mismatch warning.
-  - **T1.3 Mount Status panel**: Pinia store + single socket with auto-reconnect after gateway restarts (time-limited fetch/open, 5 s backoff cap), stale display, palette pass.
-  - **T1.4 3D view + Details modal**: scope-pointer port (three 0.169.0), render-on-demand, full WebGL disposal, red rules (FAULT, Sun ≤ 15°).
-  - **T1.5 UI polish** (the user's review): Settings row grid via CSS vars `--ss-label 100 / --ss-fmt 60 / --ss-field 162`, separator 2│1│2, span 227, Lim EL 90, modal 788, Providers rows on the Location pitch ("clear key" inside the API key box); dropdown values ellipsize before the triangle (`.fmt-select-text`); Mount Status panel text scales with panel width (container query + clamp, unchanged at 1920, floors on the 150 % laptop).
-- **Open item O-SITE (resolve before Phase 3):** Details-modal LST/HA differ from PWI4 by 3 m 36 s. The cause is that the Settings longitude (E 101.4639°) differs from PWI4's site (E 100.5656°); it is not J2000 drift (HA uses apparent RA). See BUILD_PLAN §8 T1.5 log for the options.
-- **Phase 1 committed `52a3e3a`.**
-- **T2.1 Sky Viewer chart ✅ (verified 10-21, UNCOMMITTED):**
-  - stars from `web/public/data/stars.json` (re-generate with `tools/build_star_data.py --vmag X`);
-  - `components/sky/{SkyChart,SkyClock}.vue` with three render-on-demand canvases (base / stars 1 Hz / overlay), `data-geom` + `data-frames-*` test hooks;
-  - gateway `site.timezone` in the snapshot.
-  - **T2.1b ✅:** sky colour follows the Sun (test hook `window.__skyTestSunAlt` + `sky-test-refresh` event), broken-ring marker, Settings save flow (disabled when unchanged; mismatch warns first, second SAVE accepts; new read-only `POST /api/mount/site-check`).
-  - The user check of T2.1b is pending; the live sim goto follow was confirmed clean by the user.
-- T2.1/T2.1b committed `053ef61`.
-- **T2.2 satellite layers ✅ (verified 10-21, UNCOMMITTED):**
-  - analysis `catalog/chunks/service/db/priority.py`: DB via `POSTGRESQL_DSN` in `.env`, read-only; active payloads only; binary chunks; process pool at BelowNormal priority;
-  - web `stores/sky.ts` + `utils/sky-chunks.ts` + 3 layer canvases.
-  - The user check is pending; LEO/MEO colours may need to be brighter.
-- **T2.3 ✅ (verified 10-21, UNCOMMITTED):**
-  - filters tree, nearest-pick hover + tooltip (TLE age), selection/focus, decluttered labels, read-only Track Info card, `POST /api/sky/state`;
-  - live set excludes TLE age > 30 d (O-FAST cause).
-  - Supervisor fixed a 27 s leap-second bug in the state endpoint; regression-tested.
-  - **T2.3b ✅:** Labels toggle; FILTERS panel scales with height (fits down to 1280×560, Visibility scrolls internally below that). Plus local flags (`web/public/flags`, flag-icons 7.2.3 MIT) and icons (`web/public/icons`); Track card rows aligned under the name.
-  - The user's Phase 2 check is pending (incl. the O-FAST recheck).
-- **Next:** Phase 2 user check → commit → Phase 3 (control path; resolve O-SITE first).
-- **The DB is real and local:** `analysis` reads it on start. Never print or read `.env`; gate scripts use `analysis.db.make_engine()` (read-only session) and print counts only.
-- Gate tooling: `tools/browser_gate/cdp.mjs` (`size` takes an optional DPR: `[w, h, 1.5]`) + `tools/pwi4_harness/simdrv.py` (sim-guarded driver). Only drive the sim to above-horizon targets (P14).
-- Decisions logged 10-20: G4 **start-up stop** (implement in T3.1); A4 **red warnings**; Lim EL field stays 90 px.
+- **Phases 0–2 COMPLETE and committed:** Phase 1 `52a3e3a`; T2.1 `053ef61`; Phase 2 `26b18f0`.
+  - Phase 2 delivered: Sky Viewer stars, sky colour, satellites (analysis chunks), filters + Labels toggle, nearest-pick, selection + Track Info card, 30-day stale-TLE cutoff, local flags/icons, panel scaling.
+- **Phase 3, UNCOMMITTED:**
+  - **T3.1a ✅ (verified 10-21):**
+    - `gateway/control.py`: the only PWI4 writer; serialized commands, STOP preempts and comes from any tab; single control lock.
+    - `gateway/commands.py`: strict schemas.
+    - `gateway/audit.py`: JSONL in `%LOCALAPPDATA%\pw-mount-controludit`, `PW_AUDIT_DIR`, 90 days.
+    - Link-loss via uvicorn protocol pings (0.2/0.4 s): abort 0.21–0.22 s, silent loss 0.69 s.
+    - Start-up and shutdown stops.
+    - `/dev/control` page.
+  - **T3.1b ✅ (verified 10-22):**
+    - `gateway/safety.py`: site gate on PWI4's site (O-SITE resolved); Lim EL / Sun target checks (closes P14); Sun path check; the user's Sun shortcut; monitor; recovery.
+    - Monitor false-stop bug fixed (validated gotos are watched by a 2° path corridor + actual limits; the predictive look-ahead only for tracking and unvalidated motion).
+    - P15: `goto_altaz` sends `tracking_off` first.
+    - Sim suite 23/23 twice; independent re-gate passed (BUILD_PLAN §8).
+    - Next: user check via `/dev/control` → commit → T3.2.
+  - **The resume point is in BUILD_PLAN §7.**
+- **User decisions (10-21) for Phase 3:**
+  - PWI4 site for safety maths + refuse motion on site mismatch;
+  - single control lock (STOP from anyone);
+  - protocol ping link-loss;
+  - refuse Sun-crossing slews until D-SUN;
+  - **Sun shortcut:** skip Sun checks when `sun_alt + 15 < min(Lim EL, mount alt)`;
+  - HOME (≈85° el) refused when its path crosses the Sun until T3.5;
+  - audit kept 90 days;
+  - stale-TLE badge → T4.3.
+- **Satellite DB:** `POSTGRESQL_DSN` in the repo-root `.env` (git-ignored). **Never read or print `.env`.** Gate scripts use `analysis.db.make_engine()` (read-only session) and print counts only.
+- **PWI4 is in Simulator mode** (sim_guard OK on 10-21). The sim was left **disconnected**. `PWI4.cfg` SHA-256 `B714321830FB166AC4DB38BEE51CB7AC18560A63E6C1782AAA9F09F15A1A42F0`; check it is unchanged after every sim session.
 
 ## Gotchas learned this phase
 
@@ -48,6 +46,9 @@ Read this first, then `docs/BUILD_PLAN.md` (§7 tracker + **resume point**, §6 
 - This PC's system time zone is **UTC**, so "Local Time" with a null timezone equals UTC here. Test local time with an explicit zone.
 - Browser-gate `eval` strings: never use regex literals (they break in the JSON step file); use `JSON.stringify(innerText)`.
 - Skyfield + Unix time: never `ts.utc(1970,1,1,0,0,t_unix)` (it counts leap seconds → 27 s off); use `ts.from_datetime(datetime.fromtimestamp(t, timezone.utc))`.
+- Sim/WS test clients: never block the event loop (wrap REST calls in `asyncio.to_thread`) and use `max_queue=None`. Otherwise the client stops answering pings and the gateway (correctly) drops it as link loss.
+- PWI4 `goto_alt_az` keeps tracking on (P15); `mount/stop` ends tracking, but its own HTTP response still says tracking (stale).
+- Sim tests that keep clear of the REAL Sun depend on the time of day and the sim's start pose: use the "never closer than the start, end ≥ 35° clear" rule (`safe_target`). The Phase-1 test can leave the sim near the morning Sun.
 - Python on this Windows box can't see Git Bash `/tmp` — use the session scratchpad or repo-relative paths.
 
 ## What exists (repo map)

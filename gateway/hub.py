@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import Callable
 
 
 class Client:
     def __init__(self) -> None:
+        self.id = uuid.uuid4().hex[:8]  # connection id (control lock, audit)
         self.queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1)
         self.dropped = 0
 
@@ -25,7 +27,7 @@ class Hub:
     def __init__(self) -> None:
         self.clients: set[Client] = set()
         self.latest: str | None = None
-        # T3.1 attaches the link-loss stop here.
+        # The control service attaches the link-loss stop to on_disconnect.
         self.on_connect: list[Callable[[Client], None]] = []
         self.on_disconnect: list[Callable[[Client], None]] = []
 
@@ -49,3 +51,9 @@ class Hub:
         self.latest = msg
         for c in self.clients:
             c.offer(msg)
+
+    def republish_latest(self) -> None:
+        """Re-offer the latest message to every client (e.g. the control holder changed)."""
+        if self.latest is not None:
+            for c in self.clients:
+                c.offer(self.latest)

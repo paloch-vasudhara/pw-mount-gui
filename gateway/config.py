@@ -10,7 +10,21 @@ from .settings import default_settings_path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PORT = 8400
+# Link-loss detection (G4/I3): server-driven WebSocket protocol ping/pong (answered by the
+# browser's network stack, not JS timers, so background tabs still reply). A silent peer is
+# dropped at most interval + timeout after its last pong.
+WS_PING_INTERVAL_S = 0.2
+WS_PING_TIMEOUT_S = 0.4
+WS_MAX_MESSAGE_BYTES = 16 * 1024  # inbound frame cap (auth + commands are tiny)
 DEFAULT_WEB_ORIGINS = ("http://127.0.0.1:3200", "http://localhost:3200")
+
+
+def default_audit_dir() -> Path:
+    env = os.environ.get("PW_AUDIT_DIR")
+    if env:
+        return Path(env)
+    base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+    return Path(base) / "pw-mount-control" / "audit"
 
 
 def _csv(value: str) -> list[str]:
@@ -25,6 +39,7 @@ class Settings:
     web_origins: list[str] = field(default_factory=lambda: list(DEFAULT_WEB_ORIGINS))
     ephemeris: Path = REPO_ROOT / "data" / "ephemeris" / "de421.bsp"
     settings_path: Path = field(default_factory=default_settings_path)
+    audit_dir: Path = field(default_factory=lambda: default_audit_dir())
     poll_enabled: bool = True
     token: str | None = None  # None -> generated per process start
 
@@ -46,6 +61,7 @@ class Settings:
             web_origins=origins,
             ephemeris=eph,
             settings_path=default_settings_path(),
+            audit_dir=default_audit_dir(),
         )
 
     @property

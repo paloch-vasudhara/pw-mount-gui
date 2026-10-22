@@ -79,9 +79,7 @@ def test_stale_gap_is_not_motion():
         p, _ = make(fake)
         p.stale_s = 1.0
         await p.poll_once(now_mono=0.0)
-        fake.text = status_text(
-            {"mount.axis0.position_degs": 90.0, "mount.is_slewing": True}
-        )
+        fake.text = status_text({"mount.axis0.position_degs": 90.0, "mount.is_slewing": True})
         stale = p.publish_once(now_mono=2.0)  # fetch outstanding, last good 2 s old
         await p.fetch_once(now_mono=2.1)  # big position jump after the gap
         back = p.publish_once(now_mono=2.1)
