@@ -55,7 +55,8 @@ _override: tuple[str, str | None] | None = None
 
 
 def set_override(state: str, reason: str | None = None) -> None:
-    """Command-layer (Phase 3) hook for HOMING / BUSY. Unused in T1.1."""
+    """Command-layer hook (T3.2): BUSY = connect/disconnect sequence (wins over everything, the
+    mount may not even be connected yet); HOMING = a home run (needs a live, enabled mount)."""
     global _override
     _override = (state, reason)
 
@@ -75,6 +76,10 @@ def compute_state(
     moving: bool,
     unreachable_reason: str = "PWI4 not running / not reachable",
 ) -> tuple[str, str | None]:
+    # BUSY (connect/disconnect sequence, A5a) covers the whole sequence, including the steps where
+    # PWI4 is not running yet, the mount is not connected or the axes are disabled.
+    if _override is not None and _override[0] == "BUSY":
+        return _override
     if not reachable:
         return "DISCONNECTED", unreachable_reason
     if not mount_connected:

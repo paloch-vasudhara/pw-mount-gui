@@ -24,10 +24,16 @@ from typing import Any
 
 from .audit import AuditLog
 from .commands import Command
-from .control import CommandContext, ControlService
+from .control import CommandContext, ControlService, HomeVerdict
 from .ephem import Ephem, angular_sep_deg
 from .poller import Poller
-from .settings import SUN_KEEPOUT_DEG, SettingsStore
+from .settings import (
+    DEFAULT_HOME_ALT,
+    DEFAULT_HOME_AZ,
+    SUN_KEEPOUT_DEG,
+    SettingsStore,
+    compute_site_check,
+)
 
 KEEPOUT_DEG = SUN_KEEPOUT_DEG  # 15 deg
 LOOKAHEAD_S = 0.5  # monitor look-ahead on the measured velocity
@@ -199,6 +205,41 @@ class ValidatedGoto:
     last_move_t: float = 0.0
 
 
+def actual_limit_decision(
+    alt: float,
+    az: float,
+    lim_el: float,
+    sun: tuple[float, float] | None,
+    floor_alt: float,
+    start_sun_sep: float | None,
+) -> tuple[str, dict[str, float]] | None:
+    """Actual-state limits shared by validated gotos and HOME (no extrapolation):
+    - altitude more than LIMIT_MARGIN_DEG below min(Lim EL, start altitude);
+    - Sun separation <= 15 deg (or deeper than at the start when it started inside).
+    """
+    floor = min(lim_el, floor_alt)
+    if alt < floor - LIMIT_MARGIN_DEG:
+        return r_below(lim_el), {"alt": alt, "floor": floor}
+    if sun is not None:
+        sep = sun_sep(az, alt, sun)
+        limit = (
+            KEEPOUT_DEG
+            if start_sun_sep is None or start_sun_sep > KEEPOUT_DEG
+            else start_sun_sep - 0.05
+        )
+        if sep <= limit:
+            return R_SUN, {"sun_sep": sep}
+    return None
+
+
+@dataclass
+class HomingWatch:
+    """While HOME runs the real path is unknown (P12): only the ACTUAL limits are watched."""
+
+    start_alt: float
+    start_sun_sep: float | None = None  # None: Sun checks do not apply (shortcut / no Sun)
+
+
 def validated_decision(
     alt: float,
     axes: tuple[float, float],
@@ -215,15 +256,9 @@ def validated_decision(
     - actual Sun separation <= 15 deg (or deeper than the start when it started inside);
     - position further than `corridor_tol` from the validated predicted path.
     """
-    floor = min(lim_el, plan.start[1])
-    if alt < floor - LIMIT_MARGIN_DEG:
-        return r_below(lim_el), {"alt": alt, "floor": floor}
-    if sun is not None:
-        sep = sun_sep(az, alt, sun)
-        ss = plan.start_sun_sep
-        limit = KEEPOUT_DEG if ss is None or ss > KEEPOUT_DEG else ss - 0.05
-        if sep <= limit:
-            return R_SUN, {"sun_sep": sep}
+    hit = actual_limit_decision(alt, az, lim_el, sun, plan.start[1], plan.start_sun_sep)
+    if hit is not None:
+        return hit
     dev = corridor_distance(axes, plan.paths)
     if dev > corridor_tol:
         return R_CORRIDOR, {"deviation_deg": dev, "tolerance_deg": corridor_tol}
@@ -322,6 +357,64 @@ class SafetyEngine:
         pos = self.ephem.sun_altaz(site)
         self._sun_cache = (now, site, pos)
         return pos
+
+    def home_pose(self) -> tuple[float, float]:
+        """(alt, az) of the home pose used for the Sun path check (settings, hand-editable)."""
+        if self.store is not None:
+            hw = self.store.current.hardware
+            return float(hw.home_alt_deg), float(hw.home_az_deg)
+        return DEFAULT_HOME_ALT, DEFAULT_HOME_AZ
+
+    def check_home(self, st: Any) -> HomeVerdict:
+        """HOME gate (T3.2). Refuses when the site differs from PWI4's, the home pose is below
+        Lim EL or inside the Sun disc, or the predicted path (both predictor variants) from the
+        current pose to the home pose passes within 15 deg of the Sun. The Sun shortcut and the
+        recovery rule are the same as for gotos. Home is blocked until D-SUN (T3.5) detours it.
+        """
+        site = self.pwi4_site(st)
+        m = st.mount
+        if site is None or m.altitude_degs is None or m.azimuth_degs is None:
+            return HomeVerdict("PWI4 not running / not reachable")
+        if self.store is not None:
+            sc = compute_site_check(self.store.current.location, site)
+            if sc["ok"] is False:
+                return HomeVerdict(R_SITE)
+        lim = self.lim_el()
+        h_alt, h_az = self.home_pose()
+        if h_alt < lim:
+            return HomeVerdict(f"Home elevation {h_alt:g}° is below the station limit ({lim:g}°)")
+        sun = self.sun_altaz(site)
+        use_sun = sun is not None and not sun_shortcut(sun[0], lim, m.altitude_degs)
+        if use_sun and sun_sep(h_az, h_alt, sun) <= KEEPOUT_DEG:
+            return HomeVerdict(R_SUN, sun_blocked=True)
+        a0, a1 = m.axis0, m.axis1
+        if None in (
+            a0.position_degs,
+            a1.position_degs,
+            a0.min_mech_position_degs,
+            a0.max_mech_position_degs,
+        ):
+            return HomeVerdict("Mount position unavailable (cannot verify the home path)")
+        tgt0 = axis0_target(
+            a0.position_degs, h_az, a0.min_mech_position_degs, a0.max_mech_position_degs
+        )
+        if tgt0 is None:
+            return HomeVerdict(R_NO_AZ)
+        start_sep = None
+        if use_sun:
+            tau = getattr(m, "slew_time_constant", None) or SLEW_TAU_DEFAULT_S
+            p0 = AxisParams(
+                a0.max_velocity_degs_per_sec or 20.0, a0.acceleration_degs_per_sec_sqr or 20.0
+            )
+            p1 = AxisParams(
+                a1.max_velocity_degs_per_sec or 20.0, a1.acceleration_degs_per_sec_sqr or 20.0
+            )
+            paths = predict_paths((a0.position_degs, a1.position_degs), (tgt0, h_alt), p0, p1, tau)
+            low, start_sep = path_min_sun_sep(paths, sun)
+            limit = KEEPOUT_DEG if start_sep > KEEPOUT_DEG else start_sep - 0.05
+            if low <= limit:
+                return HomeVerdict(R_PATH_SUN, sun_blocked=True, start_sun_sep=start_sep)
+        return HomeVerdict(None, False, start_sep)
 
     # -- command gate (ControlService.check)
 
@@ -437,7 +530,18 @@ class SafetyMonitor:
         self._last_stop = -1e9
         self.stops = 0
         self.plan: ValidatedGoto | None = None
+        self.homing: HomingWatch | None = None
         self._task: asyncio.Task | None = None
+
+    def begin_homing(self, verdict: HomeVerdict) -> None:
+        """HOME is about to run: watch the actual limits only (the real path is unknown)."""
+        st = self.control.fresh_status()
+        alt = st.mount.altitude_degs if st is not None else None
+        self.homing = HomingWatch(start_alt=alt if alt is not None else 0.0)
+        self.homing.start_sun_sep = verdict.start_sun_sep
+
+    def end_homing(self) -> None:
+        self.homing = None
 
     def begin(self, plan: ValidatedGoto) -> None:
         """A goto the gateway validated has been sent: switch to the actual-state rules."""
@@ -447,6 +551,7 @@ class SafetyMonitor:
     def clear(self) -> None:
         """New command / STOP / link loss: back to the predictive rules."""
         self.plan = None
+        self.homing = None
 
     def start(self) -> None:
         if self._task is None:
@@ -501,6 +606,11 @@ class SafetyMonitor:
         sun = eng.sun_altaz(site) if site is not None else None
         if sun is not None and sun_shortcut(sun[0], lim, m.altitude_degs):
             sun = None
+        watch = self.homing
+        if watch is not None:  # HOME: actual limits only, no corridor / no extrapolation
+            return actual_limit_decision(
+                m.altitude_degs, m.azimuth_degs, lim, sun, watch.start_alt, watch.start_sun_sep
+            )
         plan = self.plan
         if plan is not None:
             axes = (m.axis0.position_degs, m.axis1.position_degs)

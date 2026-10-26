@@ -28,6 +28,8 @@ DEFAULT_LAT = 13.7862
 DEFAULT_LON = 101.4639
 DEFAULT_ALT_M = 40.8
 DEFAULT_LIM_EL = 15.0
+DEFAULT_HOME_ALT = 85.0  # T3.2: home pose used for the Sun path check (hand-editable)
+DEFAULT_HOME_AZ = 180.0
 SUN_KEEPOUT_DEG = 15.0
 TOL_LAT_LON_DEG = 0.01
 TOL_ALT_M = 100.0
@@ -125,6 +127,10 @@ class Hardware(BaseModel):
     mount: str = "PW L-350"
     ota: str = "Celestron RASA11"
     lim_el_deg: float = Field(DEFAULT_LIM_EL, ge=0, le=90)
+    # Home pose (T3.2): only used to predict the HOME path for the Sun check. Not on the Settings
+    # screen; edit settings.json by hand. Absent in older files -> defaults.
+    home_alt_deg: float = Field(DEFAULT_HOME_ALT, ge=0, le=90)
+    home_az_deg: float = Field(DEFAULT_HOME_AZ, ge=0, lt=360)
 
 
 class Providers(BaseModel):
@@ -258,6 +264,12 @@ class SettingsStore:
         """Persist settings; api_key: str = set, empty = clear, None = keep."""
         with self._lock:
             clean = StationSettings.model_validate(new.model_dump())
+            # The Settings screen does not carry the home pose: a PUT that omits it must keep the
+            # (possibly hand-edited) stored values instead of resetting them to the defaults.
+            fs = new.hardware.model_fields_set
+            for name in ("home_alt_deg", "home_az_deg"):
+                if name not in fs:
+                    setattr(clean.hardware, name, getattr(self.current.hardware, name))
             if api_key is not None:
                 if api_key == "":
                     self.secrets.clear()

@@ -796,6 +796,177 @@ _Filled in by the designer at the start of each task (files touched, contract, i
 - `PWI4.cfg` unchanged before/after (wrap min runtime-only).
 - Dev page round trip in a real browser.
 
+### T3.2 — Connection sequence (A5a) + HOME + MOUNT CONTROL panel (spec, 2026-10-22; user decisions same day)
+
+**User decisions (10-22):**
+- **Home pose for the Sun path check:** alt **85°**, az **180°**. Stored in the settings file (`hardware.home_alt_deg` / `home_az_deg`, defaults 85 / 180, editable by hand afterwards). Not on the Settings screen.
+- **HOME is blocked when its path crosses the 15° Sun disc** (until D-SUN, T3.5). The Sun shortcut applies (`sun_alt + 15 < min(Lim EL, mount alt)` → no Sun check).
+  - **During CONNECT:** finish connected **without homing**, axes enabled, STOPPED. Warning "Home skipped: path passes within 15° of the Sun". The user can press HOME MOUNT later.
+  - **During DISCONNECT:** ask once, "Home is blocked by the Sun; disconnect without homing?". Yes → disable the axes and disconnect; No → nothing changes.
+- **PWI4 start timeout:** 60 s (may be lowered to 30 s later). PWI4 path auto-detected (`C:\Program Files (x86)\PlaneWave Instruments\PlaneWave Interface 4\PWI4.exe`, then `C:\Program Files\...`); override with `PW_PWI4_EXE`.
+
+**Gateway (`control.py` sequences + `safety.py` home check):**
+- **New commands** (all require the lock; STOP is always accepted and **cancels a running sequence**):
+  - `connect`:
+    1. start PWI4 if `/status` is unreachable (detached `Popen`; never kill PWI4), then poll until it answers, ≤ 60 s;
+    2. `mount/connect`;
+    3. `mount/enable` axes 0 and 1;
+    4. HOME (Sun-checked; skipped with the warning when blocked).
+  - `disconnect`:
+    1. stop any motion;
+    2. HOME (Sun-checked; when blocked the client must confirm, via `args.skip_home=true` on a second command; the first returns `ok:false` with reason code `home_blocked_confirm`);
+    3. `mount/disable` axes 0 and 1;
+    4. `mount/disconnect`.
+    - PWI4 stays open.
+  - `home`: the Sun path check, then `mount/find_home`.
+  - Steps already satisfied (PWI4 running, mount already connected, axes already enabled) are passed through, not repeated.
+- **State:**
+  - **BUSY** (`state.set_override`) for the whole connect/disconnect sequence, with `state_reason` = the current step;
+  - **HOMING** while a home runs. Completion = motion seen and then stationary for 1 s, or no motion within 3 s (the simulator's `find_home` is a no-op, P12), or a 180 s timeout → failure.
+  - The snapshot gains `sequence: {name, step, step_index, steps, status: running|done|failed|cancelled, error, warning}`.
+- **Failure rule (A5a):**
+  - stop at the failing step; report "<step> failed: <reason>";
+  - leave the mount safe: stop motion, **disable both axes** if connected;
+  - no rollback of earlier steps.
+  - Time-limited PWI4 calls (a failed or timed-out call = a failed step).
+- **Safety during HOME:** refuse when the predicted path (both predictor variants) from the current pose to the home pose passes ≤ 15° from the Sun. While HOMING, the monitor checks actual limits only (actual Sun distance ≤ 15° → stop), not the corridor, because the real homing path is unknown until the real-mount session.
+- **Audit:** sequence start, each step, done/failed/cancelled, the skipped-home warning, the disconnect-without-home confirmation.
+- **Tests:**
+  - FakePwi4 unit tests: the full success path for both sequences; a failure injected at each step (axes left disabled, no rollback, the reason names the step); STOP mid-sequence; the PWI4-start step with a fake launcher and an unreachable → reachable transition, and the 60 s timeout (clock injected); home Sun-blocked in connect (skip + warning) and in disconnect (confirm flow); idempotent steps; lock rules.
+  - `pwi4sim` tests (`sim_guard`): connect from disconnected → connected, enabled, STOPPED; disconnect → disconnected with axes disabled; home (no-op on the sim) completes; BUSY seen during the sequences.
+
+**Web — MOUNT CONTROL panel (`components/mount/MountControlPanel.vue`, concept/Main Dashboard 1.png):**
+- **Connection group:** segmented `[|DISCONNECTED|][ CONNECT ]` / `[ DISCONNECT ][|CONNECTED|]` (A5a).
+  - A status line under it: the current step while BUSY ("Connecting: enable axes…"), the failed step in red, the warning in amber.
+  - DISCONNECT asks for confirmation once (dialog); the Sun-blocked home asks the second question.
+- **Pointing Mode group** (`STOP` / `TRACK`): laid out per the render, disabled until T3.3 (tooltip).
+- **Commands group:** **HOME MOUNT** enabled (only when connected and not BUSY); TRACK TARGET, JOG and GOTO disabled with "Arrives in T3.3/T3.4/T4".
+- **Control lock:** when another window holds control, show "Controlled by another window" + **Take control**; when no one holds it, the first command takes it. Refusal reasons (acks) show on the status line (G7).
+- **Sizing:** follows the dashboard scaling approach (container-relative, max = 1920 sizes), no overflow at 1280×600 @1.5.
+
+**Must not touch:** `pwi4/`, ssa-toolkit, `docs/`, `analysis/`. Never write PWI4 settings or site; the PWI4 executable is only ever *started*, never stopped. No commits.
+
+**Gate (supervisor, PWI4-sim):**
+- pytest / ruff / web gates.
+- Sim: connect → disconnect → connect sequence with BUSY/step updates; home on the sim; Sun-blocked home with a pinned test Sun (skip on connect; confirm on disconnect); STOP mid-sequence.
+- Failure handling: unit evidence.
+- Real browser: the MOUNT CONTROL panel at 1920 and 1280×600 @1.5.
+- I2 grep (writes only in `control.py`); `PWI4.cfg` hash unchanged.
+- **User check:** close PWI4 → CONNECT starts it.
+
+### T3.3 — Pointing mode STOP/TRACK (A5b) + H4 transform helper (spec, 2026-10-22; user decisions Q1–Q3 same day, Q4 confirmed)
+
+**Already in place from T3.1:**
+- the `tracking {on}` command, gated by G1/G3 (current alt ≥ Lim EL, outside the Sun disc unless the Sun shortcut applies);
+- `stop` (`mount/stop` + `_confirm_stopped`, which sends `tracking_off` when tracking persists);
+- the monitor's predictive look-ahead for tracking (a sidereal track drifting into the Sun disc or below Lim EL is stopped).
+
+T3.3 turns this into the A5b user feature and adds H4.
+
+**User decisions (10-22):**
+- **Q1, TRACK = parity with PWI4's Track:** TRACK sends `mount/tracking_on`.
+  - The user tested on PWI4: after a satellite track, a coordinate goto or a star/object goto stopped mid-slew, Track tracks the RA/Dec of the current pointing.
+  - The sim gate re-confirms this (after each kind of stopped goto, `tracking_on` holds the current RA/Dec and does not return to the old target).
+- **Q2, H4 lives in the gateway** (skyfield) + `POST /api/transform`, because the app is heading to a standalone build. No browser-side port.
+- **Q3, the not-homed guard (the "homed" flag belongs to one connect session):**
+  - **Set** when a connect session starts: the gateway's CONNECT, or the gateway finding a mount already connected (default, Q4).
+  - **Cleared** by a completed home (the sim's no-op home completes too, so the sim is NOT exempt and the guard is testable there) or by the user's **Proceed anyway** override.
+  - **Stays cleared** until the next connect session; DISCONNECT ends the session. A failed, timed-out or cancelled home leaves the guard on.
+  - **Warning:** shown after a successful CONNECT that ended without a home (Sun-blocked skip). It is a dialog: "Mount not homed; positions may be wrong. [Home mount] [Proceed anyway]".
+    - Home mount = the normal HOME, which can still be Sun-blocked (same reason text).
+    - Proceed anyway = override, audited `homed_override`.
+    - Closing the dialog leaves the guard on: the panel shows a **NOT HOMED** chip, and the status line offers the same two actions.
+  - **While on:** GOTO / TRACK / JOG are refused with reason `Mount not homed`. HOME, STOP and DISCONNECT are always allowed.
+  - In the snapshot as `homed: {state: "homed"|"not_homed"|"overridden", since}`.
+- **Q4 (user-confirmed 10-22):** when the gateway starts, or reconnects to PWI4, and finds the mount already connected without its own CONNECT, the gateway cannot know whether the mount was homed. Default: treat it as a new connect session → **not homed** + the warning.
+
+**H4 (`gateway/transforms.py`):**
+- `altaz_to_radec_j2000(alt, az, t, site)` and `radec_j2000_to_altaz(ra_h, dec, t, site)`.
+- `t` is **explicit** (UTC datetime, no default "now" inside the helper). The site is passed in: the PWI4 site, per O-SITE.
+- Convention (P17): J2000 ↔ topocentric apparent alt/az with precession, nutation and aberration, **no refraction**. This matches the existing `Ephem.radec_j2000_altaz`, which is refactored to call H4.
+- The inverse must undo aberration correctly (a plain `from_altaz(...).radec()` can leave up to ~20″). Round-trip ≤ 0.1″ is a test.
+- **Endpoint:** `POST /api/transform` `{dir: "altaz_to_radec"|"radec_to_altaz", t_utc, values}` → result. Read-only, no lock, token required (like the other REST calls), validated input (alt −90…90, az 0…360, ra 0…24, dec −90…90, t within ±50 years).
+- **Tests:**
+  - against **astropy** (dev-only dependency in `requirements-dev.txt`; never imported by runtime code): ≤ 1″ on a grid of sites (lat −60…+70), times (2000…2040), directions (alt 5…89, all az, both directions);
+  - round-trip ≤ 0.1″;
+  - a PWI4-sim cross-check (`sim_guard`): PWI4's reported alt/az vs H4 of PWI4's reported J2000 at the status timestamp. Record the difference only; the sim has no pointing model.
+
+**TRACK / STOP (A5b), gateway:**
+- **TRACK** = `tracking {on}` → `mount/tracking_on` (Q1).
+  - Uses the same G1/G3 gate as T3.1.
+  - Refused while BUSY / HOMING / SLEWING, or while an object track is running (T4; not reachable yet).
+  - Ends TRACKING; the monitor takes over with its look-ahead.
+- **STOP:** unchanged (it already holds the az/el of the moment and ends tracking).
+  - Add a pwi4sim assertion: after STOP from TRACKING, `is_tracking` is false within 1 s **and the az/el stays put** (drift ≤ 0.01° over 3 s). This closes the "`mount/stop` stale `is_tracking`" item for the sim.
+- **Sidereal accuracy on the sim:** TRACK for 60 s; RA/Dec J2000 drift ≤ 1″ and alt/az changing at the sidereal rate (vs H4).
+- **Audit:** `track_start` (ra, dec, alt, az), `track_refused` (reason), and the existing stop entries.
+
+**Web, MOUNT CONTROL panel Pointing Mode group:**
+- Segmented control: `[|STOPPED|][ TRACK ]` / `[ STOP ][|TRACKING|]`.
+  - TRACKING shows for any tracking state (sidereal now, object tracks later).
+  - SLEWING: STOP is enabled and TRACK disabled ("Slewing").
+- **TRACK disabled reasons** (G7, shown as a tooltip and on the status line): not connected; axes disabled; BUSY / HOMING; slewing; `Below Lim EL (x°)`; `Inside the Sun disc (x° from the Sun)`; `Mount not homed` (Q3); another window has control.
+  - The client pre-check uses the snapshot (alt, `sun_distance_deg`, Sun shortcut); the gateway's refusal stays authoritative.
+- **STOP is always enabled** whenever PWI4 is reachable; it takes control if no one holds it, as today.
+- The Details modal gets this for free (the same `MountControlPanel`).
+
+**Must not touch:** `pwi4/`, ssa-toolkit, `docs/`, `analysis/`. Never write PWI4 settings or site. No commits.
+
+**Gate (supervisor):**
+- pytest / ruff / web gates; H4 vs astropy ≤ 1″ (independent spot check by the supervisor).
+- Sim:
+  - TRACK from STOPPED → TRACKING, drift ≤ 1″ over 60 s;
+  - STOP holds az/el;
+  - TRACK refused below Lim EL and inside the Sun disc (pinned test Sun) with the right reasons;
+  - the Q1 measurement (`tracking_on` after a goto + STOP: does it return to the old target?).
+- Real browser: the Pointing Mode group at 1920 and 1280×600 @1.5, the disabled-reason tooltips, and the dashboard + Details modal in step.
+- I2 grep (writes only in `control.py`).
+
+### T3.3b — Refraction parity, PWI4's wrap turn kept, stall guard (spec, 2026-10-22, user decisions on P18/P19/P19a/Q5)
+
+Runs after the user commits T3.2 + T3.3, before T3.4.
+
+**User decisions (10-22):**
+- **P18, refraction parity:** H4 and every local alt/az the app uses or sends must be in the same frame as PWI4's: refracted (observed) alt/az. A Go To Az/El must equal what the user would type into PWI4 directly.
+- **P19, PWI4's unwinding turn is intended:** PWI4 normalises axis 0 into its wrap window to keep the mount's turning room, so further motion does not run it into a physical limit. That turn is correct on a homed mount, and is fine as long as it lands on the right RA/Dec.
+  - **Revert the T3.3 wrap centring before `tracking_on`.** TRACK sends `tracking_on` as is.
+  - The sim test changes from "holds the pose" to "after any turn, settles TRACKING on the RA/Dec of the stop moment (≤ 5″)".
+  - The T3.1 wrap handling for gotos (`_prepare_wrap`, P8/P9) is untouched.
+- **P19a, stall guard (new safety rule):** the mount is commanded to move (slewing, tracking or homing; or a high axis error / RMS) but an axis position does not change for 2–3 s → the mount has run into a physical limit.
+  - The gateway **stops the mount automatically**.
+  - It warns: "Mount stalled (axis N not moving); it may be at a physical limit. Home the mount before further use."
+  - It audits `stall_stop`.
+
+**Supervisor reading (the user may correct):**
+- **Both axes** are watched (user-confirmed), with the per-axis rule below.
+- After a stall stop the not-homed guard is set with reason `stalled` → GOTO / TRACK / JOG are refused until a **completed home**. **Proceed anyway is not offered** for a stall (the user said home before further use); a DISCONNECT + CONNECT starts a normal session (not homed + the usual dialog).
+- **Detection:** expected motion is
+  - (a) SLEWING / HOMING, or
+  - (b) TRACKING with the axis's commanded rate above a threshold, or
+  - (c) the axis error / RMS above a threshold,
+  - and in each case the position is unchanged (≤ 1″) for 2.5 s.
+  - Thresholds come from the sim and are re-tuned in the real-mount session.
+  - It must not fire on a slow sidereal track near the pole of an axis: compare against the commanded rate, not a fixed speed.
+- **Test on the sim:** P14 showed the sim drives to its −40° mechanical altitude limit and keeps "slewing / tracking" there. The test drives it there with its own client (`sim_guard`) and expects the gateway to stop it and set the guard. Plus FakePwi4 unit tests for both axes, a sidereal track (no false positive) and the thresholds.
+
+**Q5 (user, 10-22): same model as PWI4.** Fit PWI4's own correction on the sim (reported alt vs unrefracted H4 over 5…89° alt) and use the same formula and constants, target ≤ 2″ vs PWI4. No temperature / pressure fields. Re-check in the real-mount session.
+
+**P19a detail (user, 10-22):**
+- Altitude is monitored too, "just in case". It rarely matters (the Lim EL guard; the mount practically never over-pitches).
+- **The altitude axis usually reaches its target first and then stays still for the rest of the slew.** A still axis is only a stall when its **own distance to its target point is still large** (per-axis target difference), not just because the mount is SLEWING.
+- So the per-axis rule is: the axis is commanded (its target difference > threshold, or its commanded rate > threshold), its position is unchanged (≤ 1″) for 2.5 s → stall.
+- The worker must find the per-axis target-difference fields in `/status` and use them.
+
+**H4 / safety changes (P18):**
+- `radec_j2000_to_altaz` returns **refracted** alt/az, and `altaz_to_radec_j2000` takes refracted input.
+- An `unrefracted` flag is kept for internal use.
+- Safety compares Lim EL and the Sun disc in the same refracted frame as the mount's reported alt/az: the Sun is refracted too.
+- `/api/transform` documents the frame.
+- Tests:
+  - vs astropy with the matching refraction model;
+  - round trip ≤ 0.1″;
+  - the PWI4-sim cross-check tightened from ≤ 90″ to ≤ 2–5″.
+
 ---
 
 ## 7. Progress tracker
@@ -820,8 +991,9 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | T2.3 | ✅ | ✅ 10-21 | ✅ 10-21 | ✅ 10-21 | pending (+ O-FAST recheck) | filters tree, nearest hover + tooltip (TLE age), select/focus, decluttered labels, read-only Track Info card, `/api/sky/state` |
 | T3.1a | ✅ | ✅ 10-21 | ✅ 10-21 | ✅ 10-21 | pending (/dev/control) | command core, lock, link-loss + start-up + shutdown stop, audit, /dev/control |
 | T3.1b | ✅ | ✅ 10-21 | ✅ 10-22 | ✅ 10-22 | pending (/dev/control) | safety v1: PWI4-site gate (O-SITE), target + path Sun checks, Sun shortcut, predictive monitor, recovery |
-| T3.2 | ⬜ | | | | | |
-| T3.3 | ⬜ | | | | | |
+| T3.2 | ✅ | ✅ 10-22 | ✅ 10-22 | ✅ 10-22 | pending (incl. close PWI4 → CONNECT starts it) | connect/disconnect sequences (BUSY, failed step, PWI4 start 60 s), HOME (85/180 in settings, Sun-blocked → skip/confirm), MOUNT CONTROL panel |
+| T3.3 | ✅ | ✅ 10-22 | ✅ 10-22 | ✅ 10-22 | pending (with T3.2; commit together) | TRACK = tracking_on (+ wrap centring, P19); H4 in gateway + `/api/transform` (0.47–0.53″ vs astropy); not-homed guard per connect session + dialog/chip; Pointing Mode STOP/TRACK |
+| T3.3b | ⬜ | | | | | refraction parity (P18), keep PWI4 wrap turn (P19 revert), stall guard (P19a); spec ready (Q5 = PWI4's model) |
 | T3.4 | ⬜ | | | | | |
 | T3.5 | ⬜ | | | | | D-SUN |
 | T4.1 | ⬜ | | | | | |
@@ -834,10 +1006,25 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | T6.2 | ⬜ | | | | | |
 | T6.3 | ⬜ | | | | | |
 
-**Resume point (2026-10-22):** Phase 2 committed `26b18f0`. **T3.1 (a + b) verified on PWI4-sim, UNCOMMITTED.** Next:
-1. The user checks T3.1 via `/dev/control` against PWI4-sim (take control; goto; STOP; refusals with reasons; close the tab mid-slew → stops).
-2. The user commits.
-3. Then **T3.2** (connection sequence A5a with BUSY/FAULT + HOME with HOMING state; HOME refused when its path crosses the Sun until T3.5; the Sun shortcut applies). Write its spec first.
+**Resume point (2026-10-22, T3.3 verified; session handed off, user testing):** Phases 0–2 committed (Phase 2 `26b18f0`); T3.1 committed `92bd389`. **T3.2 + T3.3 verified, UNCOMMITTED: the user commits them together after the user check.** The user's gateway on 8400 must be restarted to load the T3.3 code. Next:
+1. User check of T3.3:
+   - connect (with a Sun-blocked home, or a gateway restart, the dialog appears);
+   - Proceed anyway / Home mount;
+   - TRACK / STOP from the dashboard and the Details modal;
+   - the TRACK disabled reasons.
+2. The user commits T3.2 + T3.3.
+3. **T3.3b** (spec in §6): refraction parity (P18), revert the wrap centring (P19), stall guard (P19a, per-axis target difference); Q5 = PWI4's refraction model.
+4. **T3.4:** Go To modal (A5c-iv; H4 via `/api/transform`; decide refracted vs unrefracted local display, P18) + Jog modal (A5c-iii; P10: offsets only move a tracking mount; jog max 10°/s; serialized steps; arrow keys). Write the spec first.
+5. Then T3.5 (D-SUN).
+- **Real-mount session checklist** (the user's first session on the real L-350):
+  - Stall-guard thresholds (P19a).
+  - HOMING detection + motion: record the actual path (region sensor ≈ 60° alt → index, P16) and the homing altitude floor `min(Lim EL, start alt)`;
+  - what PWI4 reports before the first home, and whether `/status` has a homed flag;
+  - whether `mount/stop` ends tracking;
+  - real acceleration (the sim ignores 20°/s²);
+  - refraction in the reported alt/az (P18);
+  - `tracking_on` after a wrap change (P19);
+  - `PWI4.cfg` behaviour.
 
 ---
 
@@ -864,6 +1051,9 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | 2026-10-20 | T1.1 | Publish ticker decoupled from PWI4 fetch; `pwi4.age_ms`; > 1 s stale → DISCONNECTED "PWI4 not responding"; connect timeout 0.25 s, retry 1 s when unreachable | Windows connect to a closed localhost port waits the full timeout (~0.5 s) → stream fell to ~2 Hz | supervisor |
 | 2026-10-20 | T1.1 | WebSocket can't pass Nitro devProxy (HTTP only) → in dev the page connects straight to the gateway (`runtimeConfig.public.gatewayWs`); token fetch stays proxied; prod = same-origin (gateway serves the app) |
 | 2026-10-20 | A4-i | **Red warnings** (user): Status red on FAULT; Sun Distance red when ≤ 15° (green > 15°). Implemented in T1.4 |
+| 2026-10-22 | T3.3 review | P18: local alt/az refracted like PWI4 (Go To must equal typing into PWI4). P19: PWI4's unwinding turn on tracking_on is intended (keeps turning room); revert the wrap centring. P19a: new stall guard (axis not moving 2–3 s while commanded → auto STOP + "home before further use"). PWI4 cfg + app settings were changed by the user to move the test Sun; kept for now | user |
+| 2026-10-22 | T3.2 re-check | User re-checked the Details-modal controls: OK. PWI4 manual supplied: the Simulator has no Home commands; L-Series must home after every power cycle (P16) | user |
+| 2026-10-22 | T3.2 | Home pose 85°/180° stored in the settings file (correctable); HOME blocked when its path crosses the Sun disc: on CONNECT skip home with a warning, on DISCONNECT ask "disconnect without homing?"; PWI4 start timeout 60 s (maybe 30 s later) |
 | 2026-10-21 | T3.1 / O-SITE | User accepted the T3.1 review: PWI4 site for safety maths + refuse motion on site mismatch; single control lock (STOP from anyone); protocol ping/pong link-loss; predictive monitor + recovery; refuse Sun-crossing slews until D-SUN; **Sun shortcut**: skip Sun checks when `sun_alt + 15° < min(Lim EL, mount alt)`; HOME (≈85° el) subject to the Sun path check, refused when crossing until T3.5; nearest-wrap gotos; audit 90 days |
 | 2026-10-20 | G4 / T3.1 | **Start-up stop** (user): on every gateway start, if any motion is active (slewing, tracking, path/TLE follow, offset rate) the gateway stops the mount first — mitigates P1 (no PWI4 watchdog) after a crash/restart |
 | 2026-10-19 | T0.1 | Section title tags reduced (text-lg → 13 px, tighter padding) per user review |
@@ -899,6 +1089,10 @@ Agreement (first 50 satellites × 7 epochs): TEME position diff max 1.4e-7 km; a
 | P14 | **PWI4 accepts below-horizon targets**: `goto_ra_dec_j2000` to a target ~11.7 h from the meridian drove the sim mount to its −40° mechanical altitude limit and kept slewing/tracking there (2026-10-20, T1.4 gate) | The gateway's G1 Lim EL check (T3.1) is the only guard — validate every goto/track target before sending, and refuse below Lim EL |
 | P15 | **`goto_alt_az` does not end tracking**: a sim left TRACKING stays TRACKING through an alt-az goto (found at the T3.1b gate; made `test_goto_stop_state_sequence` flaky) | Local Az/El goto must end STOPPED (A5c-iv): `goto_altaz` sends `tracking_off` first (T3.1b fix); the flaky test now calls `tracking_off` before settling |
 | P13 | Slews approach exponentially (slew time constant 0.5): 90° ≈ 9.5 s, 180°-ish ≈ 13.8 s | D-SUN slew-time model uses vmax/accel + the approach constant |
+| P16 | **PWI4 User Manual (MAN7034 rev A, PWI4 4.1.5; user-supplied 10-22):** the Simulator mount has **no Home mount / Home axis** commands (its `find_home` is a no-op, P12). **L-Series and CDK700 mounts use incremental encoders and must be homed after every power cycle**. Homing drives to the **region sensor (≈ 60° altitude)** to find the direction, then on to the index mark | (a) HOME on the real L-350 is required, not optional. (b) The HOME Sun check predicts current pose → home pose (85/180); the real path goes via ≈ 60° alt, so the check is an approximation until measured. (c) Before the first home after power-up the reported alt/az may not be trustworthy, and every Lim EL / Sun check relies on it (decision Q3 in the T3.3 spec). (d) Real-mount checklist: record the homing path, what PWI4 reports before homing, and whether `/status` exposes a homed flag |
+| P17 | Manual, other facts used by later tasks: Jog max **10°/s** (A5c-iii max matches); **mount offsets reset when slewing to a new target**; apparent RA/Dec = precession + nutation + annual aberration, **no refraction**; PWI4 **changes the Azm wrap region by itself when tracking a satellite** (cf. P8); slew time constant default 0.5 s (P13); extra PWI4 instances use ports 8220+N; PWI4 has no ASCOM MoveAxis; warranty excludes damage from software that does not implement mechanical motion limits (reinforces G1) | H4 convention = no refraction (T3.3); T3.4 jog speeds; T4.2 wrap handling (after `follow_tle` re-read the wrap range) |
+| P18 | **PWI4's reported alt/az include atmospheric refraction** (T3.3 sim cross-check: PWI4 alt/az vs H4 of PWI4's own J2000 RA/Dec differ by 13–77″, matching Bennett refraction within 30″ in altitude; azimuth part < 20″). H4 and PWI4's apparent RA/Dec carry no refraction | The safety Lim EL check of an RA/Dec target (H4, unrefracted) is slightly stricter than PWI4's reported altitude (≈ 3.5′ at 15°): safe direction. T3.4 Go To modal: decide whether the computed local pair is shown refracted (as PWI4 reports) or not; real-mount check |
+| P19 | **`tracking_on` after a goto that changed the axis-0 wrap window and was stopped mid-slew slews the axis back into the window (~20°/s, up to 360°)** (T3.3 sim, full suite only; reproduced with direct sim calls) | Fixed: before `tracking_on` the gateway centres the wrap window on the current azimuth (`_prepare_wrap`), so TRACK holds the current pointing (Q1 parity). Real-mount check: the same behaviour with cable wrap |
 
 Harness note: `08_watchdog.explicit_stop_latency_s` is mis-measured in the supervisor run (includes the silent period); conclusion unaffected — fix opportunistically.
 
@@ -1194,6 +1388,90 @@ _Differences between the as-built app and the logic sheet / concept renders, wit
   - `PWI4.cfg` hash unchanged; the sim was left disconnected; no throwaway listeners.
 
 
+
+### T3.2 log (2026-10-22)
+- **Worker delivered:**
+  - `gateway/sequences.py`: `Sequencer` for connect/disconnect/home; detached PWI4 launcher (only when `/status` is unreachable and no PWI4.exe runs; never kills); home wait.
+  - `Pwi4Writer`: connect/disconnect/enable/disable/find_home.
+  - `safety.check_home` + `HomingWatch` (actual limits only while homing).
+  - Snapshot `sequence`; BUSY / HOMING overrides; audit sequence events.
+  - `settings.hardware.home_alt_deg` / `home_az_deg` (85/180, preserved across PUTs).
+  - `components/mount/MountControlPanel.vue` + `utils/mount-control.ts`.
+- **Deviations accepted by the supervisor (shown to the user):**
+  - STOP in Pointing Mode is live (to cancel a home); TRACK is disabled until T3.3.
+  - "CONNECTED" = mount connected AND both axes enabled; otherwise CONNECT is offered again ("Axes disabled: CONNECT enables them").
+  - The skip/confirm home flows also apply to site mismatch / home pose below Lim EL.
+  - The homing watch also has an actual-altitude floor `min(Lim EL, start alt)`. **To verify in the real-mount session:** it could false-stop a real home that dips low.
+  - The worker's first browser runs proxied read-only satellite-chunk GETs to the user's analysis service on 8410 (Nuxt `/api` default). It switched to a closed port afterwards; nothing was started or stopped.
+- **Supervisor gate:**
+  - **Tests:** pytest 267 / 39 skipped; ruff clean; lint 0 errors; typecheck 0; vitest 318/318. The worker's full sim suite ran 28/28 twice.
+  - **I2:** `/mount/` writes only in `control.py`; the launcher has no kill/terminate code. `PWI4.cfg` hash unchanged.
+  - **Independent client on throwaway gateways + PWI4-sim:**
+    - **A, real Sun:** connect → BUSY "Connecting: connect mount… / enable axes… / home mount…" → STOPPED (3.3 s); home → HOMING → STOPPED; disconnect → BUSY stop / home / disable / disconnect → **DISCONNECTED**, PWI4 reports disconnected with axes disabled (4.1 s).
+    - **B, Sun pinned 75/180:** connect done with warning "Home skipped: path passes within 15° of the Sun"; home refused "Within 15° of the Sun"; disconnect → `home_blocked_confirm`; `skip_home` → stop / disable / disconnect → DISCONNECTED.
+    - **C:** STOP 0.15 s after connect → sequence "Cancelled by STOP", STOPPED, no rollback.
+    - Closing the holder connection mid-sequence → audited `sequence_cancelled` "Cancelled: control link lost" + `link_loss_stop`.
+  - **Browser screenshots** (worker, reviewed): panel matches Main Dashboard 1 at 1920 and 1280×600 @1.5, no overflow.
+  - The sim was left disconnected.
+
+- **User check 10-22 + supervisor follow-ups:**
+  - **"HOME never actuated" (user):** expected. The user's audit shows `find_home` sent and `home_finished how=no_motion` after 3 s. **The PWI4 simulator's `find_home` is a no-op (P12).** Real motion + HOMING detection wait for the real-mount session.
+  - Sun-crossing slews were blocked and slews toward the disc were stopped (user confirmed).
+  - **FIXED (supervisor):** the Detailed Mount Status modal's Connection / Pointing / Commands groups were still the disabled T1.4 placeholders.
+    - Replaced with the live `MountControlPanel` in a fixed-height wrapper (`.md-control`, 380 px; 300 px when the viewport height is ≤ 900). One component, so the dashboard and the modal can never disagree.
+    - Verified in a real browser: HOME → HOMING → STOPPED; DISCONNECT → confirm dialog stacked over the modal → DISCONNECTED; no overflow at 1920 and 1280×600 @1.5; lint / typecheck / vitest 318.
+  - **`PWI4.cfg` hash changed** B7143218… → **4D752D34…** at 05:54:29 UTC, with all PWI4 config files rewritten at the same instant (`GUI.cfg`, `Simulator.Mount.cfg`, `Telemetry.cfg`, …).
+    - Cause: PWI4 saving its own configuration; it was started at 05:34:55 by the user's CONNECT test.
+    - The user's audit shows **no gateway command** at that moment (05:53:26 … 05:54:59), and `Pwi4Writer` only allows mount endpoints. Still `Devices.Mount = Simulator.Mount`.
+    - **New baseline 4D752D34…**
+    - **Rule update:** the hash only proves no-writes for unattended sim runs. When PWI4 is used by hand (GUI changes, restarts), PWI4 rewrites its own cfg. The guarantees are the `Pwi4Writer` endpoint whitelist test + the audit log.
+
+### T3.3 log (2026-10-22)
+- **Workers:** gateway (Sonnet) + web (Sonnet), in parallel against a fixed contract (snapshot `homed`, command `homed_override`, refusal strings).
+- **Gateway delivered:**
+  - `gateway/transforms.py` (H4; inverse iterates on the aberration offset) + `POST /api/transform` (token + Origin, strict validation, PWI4 site by default, 503 when unavailable);
+  - `gateway/homed.py` (guard; session start causes: connect_sequence / already_connected / gateway_start / mount_connected_externally / pwi4_reconnect; ends on disconnect or PWI4 unreachable ≥ 3 s);
+  - `homed_override`; refusals `Mount not homed` and `Mount is slewing; press STOP first`;
+  - `track_start` audit; wrap centring before `tracking_on` (P19);
+  - astropy added to `requirements-dev.txt` (dev only).
+- **Web delivered:**
+  - live Pointing Mode segments;
+  - `trackDisabledReason` (priority: gateway → connected → other window → busy → axes → slewing → not homed → Lim EL → Sun with shortcut);
+  - NOT HOMED chip + inline HOME / PROCEED;
+  - the "Mount not homed" dialog (dashboard panel only; once per `homed.since` per window).
+- **Worker gates:**
+  - pytest 318 pass / 48 skip;
+  - `PWI4_SIM=1` 366 pass ×2;
+  - ruff clean;
+  - vitest 329;
+  - typecheck 0;
+  - lint 0 errors.
+  - Two pre-existing timing tests were flaky once under load (`test_monitor_lets_validated_goto_reach_lim_el_plus_margin[0.1]`, `test_goto_stop_state_sequence`); both passed on re-run.
+- **Supervisor re-gate (independent scripts, own gateway on throwaway port 18733, Sun pinned):**
+  - gates re-run green (pytest 318/48, ruff, typecheck, lint 0 errors, vitest 329);
+  - H4 vs astropy spot check (60 random cases, 2010–2023) max 0.47″; round trip 0.0000″. Future dates showed 4.4″ = astropy's offline UT1 = UTC extrapolation, not H4.
+  - Sim:
+    - CONNECT → `homed` (sim home `no_motion`).
+    - TRACK from STOPPED: J2000 drift 0.12″ over 30 s.
+    - STOP: `is_tracking` false after 0.03 s, 0 drift over 3 s.
+    - Parity: radec goto stopped mid-slew → TRACK held (0.20″ in 6 s; 58° from the old target).
+    - `/api/transform` 200 / 422 / 401.
+    - Gateway restart with the mount connected → `not_homed` (Q4); goto and TRACK refused `Mount not homed`; override → `overridden`; a second override refused.
+    - Sun-blocked connect → warning + `not_homed`; HOME refused (Sun); override → TRACK refused `Within 15° of the Sun`; disconnect confirm flow.
+  - Audit events present (`homed_session_start/end`, `homed`, `homed_override`, `track_start`). I2 grep clean.
+  - `PWI4.cfg` unchanged across the gate.
+  - **Real browser (1920 and 1280×600 @1.5):** found **one bug: the dashboard passed `home-dialog` instead of `homed-dialog`, so the not-homed dialog never opened** (unit tests covered the logic, not the page wiring). Fixed by the supervisor in `pages/index.vue`; re-run:
+    - dialog after a Sun-blocked CONNECT (also at 1280×600);
+    - Proceed anyway → guard cleared, TRACK enabled;
+    - dialog again on the next session;
+    - Escape → chip + inline HOME / PROCEED; inline override works;
+    - TRACK → TRACKING → STOP on the dashboard and in the Details modal, in step;
+    - no overflow (panel, page, modal wrapper 380 / 300);
+    - no console errors.
+  - The browser's Sun reason did not show with the test-pinned Sun because the snapshot carries the real Sun (the override is safety-only); in normal use they are the same Sun. The gateway refusal was verified on the sim.
+  - Supervisor tweaks: web Sun comparison `<=` (as the gateway); `TIP_GOTO` → "Arrives in T3.4".
+- **`PWI4.cfg`:** changed since the 10-22 morning baseline. PWI4's own files were rewritten 07:00–07:25 (incl. `Elmo.L350.Mount.cfg` at 07:00:58), consistent with the user looking at the L-350 device settings for the manual check; still `Devices.Mount = Simulator.Mount`. New baseline `40A4C3F4BF1168E7A7D5EFE6A8782FD2462A0B80F369A5A425C162A9D6A5578C`.
+- **Known:** a window opening right after another may see a stale `not_homed` and get `Mount is not in the not-homed state` on override (harmless).
 
 ## 9. Known limitations & risks
 

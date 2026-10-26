@@ -22,6 +22,8 @@ export const useMountStore = defineStore('mount', () => {
   // Control path (T3.1a): last acks (newest first), for the dev control page and later UI.
   const acks = ref<CommandAck[]>([])
   const ACK_HISTORY = 10
+  // "Mount not homed" dialog (T3.3): the `homed.since` it was dismissed for, in memory per window.
+  const homedDialogDismissedSince = ref<string | null>(null)
   // Wall-clock "now", ticked so staleness is reactive even when no messages arrive.
   const now = ref(Date.now())
 
@@ -103,7 +105,7 @@ export const useMountStore = defineStore('mount', () => {
   }
 
   return {
-    snapshot, hello, connection, messageCount, lastError, lastStatusAt, acks, controlHolder,
-    linkStale, display, sendCommand, ingestStatus, setConnection, startClock, stopClock, start, stop,
+    snapshot, hello, connection, messageCount, lastError, lastStatusAt, acks, controlHolder, homedDialogDismissedSince,
+    linkStale, now, display, sendCommand, ingestStatus, setConnection, startClock, stopClock, start, stop,
   }
 })

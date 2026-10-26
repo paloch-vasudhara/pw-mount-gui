@@ -19,12 +19,15 @@ export interface CommandAck {
   cmd: string | null
   ok: boolean
   reason: string | null
+  /** Machine-readable refusal kind, e.g. `home_blocked_confirm` (disconnect, T3.2). */
+  code?: string
   control?: { holder: ControlHolder }
 }
 
 export type CommandName =
   | 'take_control' | 'release_control' | 'stop'
   | 'goto_altaz' | 'goto_radec_j2000' | 'tracking'
+  | 'connect' | 'disconnect' | 'home' | 'homed_override'
 
 /**
  * Pending-command bookkeeping: each sent command gets a promise that settles with the matching

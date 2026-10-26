@@ -119,6 +119,10 @@ def test_goto_stop_state_sequence(pwi):
         await asyncio.to_thread(pwi.mount_stop)
         t_ack = time.monotonic()
         await pump(p, 5.0, log, until=lambda s: s.state == "STOPPED")
+        # A few more samples: the first STOPPED sample can still carry a position-derived speed
+        # (is_slewing drops before the last position step is read), and the checks below need a
+        # STOPPED sample AFTER the last moving one (T3.2 gate: StopIteration seen once in ~8 runs).
+        await pump(p, 0.6, log)
         return log, t_stop, t_ack
 
     log, t_stop, t_ack = asyncio.run(go())

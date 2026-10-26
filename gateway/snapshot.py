@@ -89,6 +89,27 @@ class MoonInfo(AltAz):
     illumination: float | None = None
 
 
+class SequenceInfo(BaseModel):
+    """Progress of a connect / disconnect / home sequence (T3.2). Kept after it ends (done /
+    failed / cancelled) until the next sequence starts, so every window can show the outcome."""
+
+    name: str  # connect | disconnect | home
+    step: str | None = None  # human label of the current (or failing) step
+    step_index: int = -1
+    steps: list[str] = Field(default_factory=list)
+    status: str = "running"  # running | done | failed | cancelled
+    error: str | None = None  # "<step> failed: <reason>" / the cancel reason
+    warning: str | None = None  # e.g. "Home skipped: path passes within 15° of the Sun"
+
+
+class HomedInfo(BaseModel):
+    """Not-homed guard (T3.3, Q3/Q4) for the current connect session. The whole field is null
+    when the mount is not connected. `since` = UTC time the current state began."""
+
+    state: str  # homed | not_homed | overridden
+    since: str  # ISO 8601 UTC
+
+
 class MountSnapshot(BaseModel):
     seq: int
     ts_utc: str
@@ -105,6 +126,8 @@ class MountSnapshot(BaseModel):
     hour_angle_h: float | None = None
     limits: Limits = Field(default_factory=Limits)
     site_check: SiteCheck | None = None  # only when the site comes from Settings
+    sequence: SequenceInfo | None = None
+    homed: HomedInfo | None = None
 
 
 def site_key(result: PollResult) -> tuple[float, float, float] | None:
@@ -128,10 +151,7 @@ def lmst_hours_from(jd: float, lon_deg_east: float) -> float:
     """Local mean sidereal time (hours) from JD (UTC ~ UT1) via the IAU 1982 GMST polynomial."""
     t = (jd - 2451545.0) / 36525.0
     gmst = (
-        280.46061837
-        + 360.98564736629 * (jd - 2451545.0)
-        + 0.000387933 * t * t
-        - t**3 / 38710000.0
+        280.46061837 + 360.98564736629 * (jd - 2451545.0) + 0.000387933 * t * t - t**3 / 38710000.0
     )
     return ((gmst + lon_deg_east) % 360.0) / 15.0
 
@@ -167,6 +187,8 @@ def build_snapshot(
     site: Site | None = None,
     site_check: SiteCheck | None = None,
     limits: Limits | None = None,
+    sequence: SequenceInfo | None = None,
+    homed: HomedInfo | None = None,
 ) -> MountSnapshot:
     """result = last good fetch (or the failed one). down_reason forces DISCONNECTED.
 
@@ -212,6 +234,7 @@ def build_snapshot(
             else MoonInfo(),
             limits=limits or Limits(),
             site_check=site_check,
+            sequence=sequence,
         )
 
     st = result.status
@@ -298,4 +321,6 @@ def build_snapshot(
         hour_angle_h=ha,
         limits=limits or Limits(),
         site_check=site_check,
+        sequence=sequence,
+        homed=homed if connected else None,
     )

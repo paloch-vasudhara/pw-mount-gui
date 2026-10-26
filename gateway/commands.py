@@ -44,6 +44,11 @@ class Tracking(_Args):
     on: bool
 
 
+class Disconnect(_Args):
+    # Second send of a blocked disconnect: the user confirmed "disconnect without homing".
+    skip_home: bool = False
+
+
 ARG_MODELS: dict[str, type[_Args]] = {
     "take_control": NoArgs,
     "release_control": NoArgs,
@@ -51,11 +56,26 @@ ARG_MODELS: dict[str, type[_Args]] = {
     "goto_altaz": GotoAltAz,
     "goto_radec_j2000": GotoRaDecJ2000,
     "tracking": Tracking,
+    "connect": NoArgs,
+    "disconnect": Disconnect,
+    "home": NoArgs,
+    "homed_override": NoArgs,  # T3.3: proceed without homing (only while not homed)
 }
 # Commands that move or start the mount (need the lock, ready gateway, a connected mount).
 MOTION_COMMANDS = frozenset({"goto_altaz", "goto_radec_j2000", "tracking"})
+# Long-running sequences (T3.2): acked when started, progress is in the snapshot's `sequence`.
+SEQUENCE_COMMANDS = frozenset({"connect", "disconnect", "home"})
 CmdName = Literal[
-    "take_control", "release_control", "stop", "goto_altaz", "goto_radec_j2000", "tracking"
+    "take_control",
+    "release_control",
+    "stop",
+    "goto_altaz",
+    "goto_radec_j2000",
+    "tracking",
+    "connect",
+    "disconnect",
+    "home",
+    "homed_override",
 ]
 
 

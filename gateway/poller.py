@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
+from collections.abc import Callable
 
 import httpx
 
@@ -18,7 +19,16 @@ from .ephem import Ephem
 from .hub import Hub
 from .pwi4_io import PollResult, fetch_status, new_client
 from .settings import SettingsStore, compute_site_check
-from .snapshot import Limits, MountSnapshot, Site, SiteCheck, build_snapshot, site_key
+from .snapshot import (
+    HomedInfo,
+    Limits,
+    MountSnapshot,
+    SequenceInfo,
+    Site,
+    SiteCheck,
+    build_snapshot,
+    site_key,
+)
 from .state import MotionTracker
 
 STALE_S = 1.0
@@ -58,6 +68,11 @@ class Poller:
         self.last_good_t = 0.0
         self.last_result: PollResult | None = None
         self.vel = (0.0, 0.0)
+        # T3.2: the control service's sequence progress (None = no sequence yet).
+        self.sequence_provider: Callable[[], SequenceInfo | None] = lambda: None
+        # T3.3: the not-homed guard sees every fetch result and supplies the snapshot field.
+        self.homed_observer: Callable[[PollResult, float], None] = lambda result, now: None
+        self.homed_provider: Callable[[], HomedInfo | None] = lambda: None
 
     async def fetch_once(self, now_mono: float | None = None) -> PollResult:
         if self._client is None:
@@ -73,6 +88,7 @@ class Poller:
         elif result.kind == "unreachable":
             self.tracker.reset()
             self.vel = (0.0, 0.0)
+        self.homed_observer(result, now)
         await self.refresh_ephem()
         return result
 
@@ -141,6 +157,8 @@ class Poller:
             site=site,
             site_check=site_check,
             limits=limits,
+            sequence=self.sequence_provider(),
+            homed=self.homed_provider() if live else None,
         )
         self.latest = snap
         self.hub.publish(envelope(snap))

@@ -26,6 +26,7 @@ from .security import (
 )
 from .settings import Location, SecretStore, SettingsStore, SettingsUpdate, compute_site_check
 from .snapshot import site_key
+from .transforms import AltAzValues, TransformRequest
 
 VERSION = "0.1.0"
 AUTH_TIMEOUT_S = 2.0
@@ -57,6 +58,14 @@ def create_app(
     control.resolved_az = safety.pop_target_az
     monitor = SafetyMonitor(safety, poller, control)
     control.motion_cleared = monitor.clear
+    control.home_check = safety.check_home  # T3.2: HOME gate (Sun path, site, Lim EL)
+    control.homing_begin = monitor.begin_homing
+    control.homing_end = monitor.end_homing
+    control.seq.exe = settings.pwi4_exe
+    control.seq.start_timeout = settings.pwi4_start_timeout_s
+    poller.sequence_provider = control.seq.snapshot_info
+    poller.homed_observer = control.homed.observe  # T3.3 not-homed guard
+    poller.homed_provider = control.homed.info
 
     def goto_started(cmd) -> None:
         plan = safety.take_plan(cmd)
@@ -158,6 +167,34 @@ def create_app(
     def site_check_proposed(loc: Location) -> JSONResponse:
         """Check a PROPOSED location against PWI4's cached site. Read-only: nothing is saved."""
         return JSONResponse(compute_site_check(loc, poller.pwi4_site()))
+
+    @app.post("/api/transform", dependencies=[Depends(require_auth)])
+    def transform(req: TransformRequest) -> JSONResponse:
+        """H4 (T3.3): J2000 RA/Dec <-> apparent topocentric alt/az at an explicit time, no
+        refraction. Read-only (no control lock). Default site = PWI4's own site."""
+        if not ephem.available:
+            raise HTTPException(status_code=503, detail="ephemeris unavailable")
+        if req.site is not None:
+            site = (req.site.lat, req.site.lon, req.site.height_m)
+        else:
+            site = poller.pwi4_site()
+            if site is None:
+                raise HTTPException(status_code=503, detail="PWI4 site unavailable")
+        t = req.time()
+        v = req.values
+        if isinstance(v, AltAzValues):
+            ra_h, dec = ephem.altaz_radec_j2000(site, v.alt, v.az, t)
+            result = {"ra_h": ra_h, "dec_deg": dec}
+        else:
+            alt, az = ephem.radec_j2000_altaz(site, v.ra_h, v.dec_deg, t)
+            result = {"alt": alt, "az": az}
+        body = {
+            "dir": req.dir,
+            "t_utc": t.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "site": {"lat": site[0], "lon": site[1], "height_m": site[2]},
+            "result": result,
+        }
+        return JSONResponse(body, headers={"Cache-Control": "no-store"})
 
     @app.websocket("/api/mount/ws")
     async def ws(websocket: WebSocket) -> None:

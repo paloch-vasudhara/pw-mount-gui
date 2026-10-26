@@ -25,10 +25,11 @@ from typing import Any
 import httpx
 
 from .audit import AuditLog
-from .commands import MOTION_COMMANDS, Command, CommandError, parse_command
+from .commands import MOTION_COMMANDS, SEQUENCE_COMMANDS, Command, CommandError, parse_command
+from .homed import R_NOT_HOMED, HomedGuard
 from .hub import Hub
 from .poller import Poller
-from .pwi4_io import PollResult, fetch_status, new_client, parse
+from .pwi4_io import CONNECT_TIMEOUT_S, PollResult, fetch_status, new_client, parse
 
 WRITE_TIMEOUT_S = 1.0  # hard cap on one PWI4 write
 ACK_TIMEOUT_S = 5.0  # a queued command that is not done by then is answered "timed out"
@@ -37,6 +38,7 @@ MOVE_V_DEG_S = 0.05  # stopped = axis speed below this (P2: is_slewing lags, jud
 CONFIRM_POLL_S = 0.1
 CONFIRM_RESEND_AFTER_S = 0.4  # still moving this long after a stop -> stop again
 WRAP_MIN_EPS_DEG = 0.5
+SLOW_WRITE_TIMEOUT_S = 8.0  # mount/connect, disconnect, enable, disable, find_home (T3.2)
 
 # G7 reasons
 R_OTHER_HAS_CONTROL = "Another window has control"
@@ -49,6 +51,13 @@ R_BUSY = "Command queue full"
 R_NOT_HOLDER = "This window does not have control"
 R_STOP_CANCELLED = "Cancelled by STOP"
 R_LINK_CANCELLED = "Cancelled: control link lost"
+R_WORKER_BUSY = "Another command is still running"
+R_SLEWING = "Mount is slewing; press STOP first"
+R_NOT_HOMED_STATE = "Mount is not in the not-homed state"
+# Commands refused while the mount is not homed (T3.3). HOME, STOP, DISCONNECT, tracking off and
+# the lock commands are never gated; a future jog joins this set.
+HOMED_GATED = frozenset({"goto_altaz", "goto_radec_j2000"})
+CODE_HOME_BLOCKED = "home_blocked_confirm"  # disconnect: home is blocked, ask the user once
 
 
 class Pwi4Error(Exception):
@@ -77,11 +86,16 @@ class Pwi4Writer:
         """GET /status (a read; used to judge/confirm motion independently of the poller)."""
         return await fetch_status(self._http())
 
-    async def _call(self, path: str, **params: Any) -> Any:
+    async def _call(self, path: str, _timeout: float = WRITE_TIMEOUT_S, **params: Any) -> Any:
         """One time-limited GET. Returns the parsed status PWI4 answers with (or None)."""
         try:
             resp = await asyncio.wait_for(
-                self._http().get(path, params=params or None), WRITE_TIMEOUT_S
+                self._http().get(
+                    path,
+                    params=params or None,
+                    timeout=httpx.Timeout(_timeout, connect=CONNECT_TIMEOUT_S),
+                ),
+                _timeout,
             )
         except TimeoutError:
             raise Pwi4Error("PWI4 did not answer in time") from None
@@ -111,6 +125,23 @@ class Pwi4Writer:
 
     async def set_axis0_wrap_range_min(self, degs: float) -> Any:
         return await self._call("/mount/set_axis0_wrap_range_min", degs=degs)
+
+    # --- T3.2 connection sequence (slow calls get a longer, still bounded, time limit)
+
+    async def mount_connect(self) -> Any:
+        return await self._call("/mount/connect", SLOW_WRITE_TIMEOUT_S)
+
+    async def mount_disconnect(self) -> Any:
+        return await self._call("/mount/disconnect", SLOW_WRITE_TIMEOUT_S)
+
+    async def mount_enable(self, axis: int) -> Any:
+        return await self._call("/mount/enable", SLOW_WRITE_TIMEOUT_S, axis=axis)
+
+    async def mount_disable(self, axis: int) -> Any:
+        return await self._call("/mount/disable", SLOW_WRITE_TIMEOUT_S, axis=axis)
+
+    async def find_home(self) -> Any:
+        return await self._call("/mount/find_home", SLOW_WRITE_TIMEOUT_S)
 
 
 def nearest_wrap_min(
@@ -158,6 +189,23 @@ def check_command(cmd: Command, ctx: CommandContext) -> str | None:
 
 
 @dataclass
+class HomeVerdict:
+    """Result of the HOME safety check (SafetyEngine.check_home): `reason` None = allowed."""
+
+    reason: str | None = None
+    sun_blocked: bool = False  # the refusal is the Sun disc (wording of the warning / question)
+    start_sun_sep: float | None = None  # Sun separation at the start pose (recovery rule)
+
+
+HomeCheck = Callable[[Any], HomeVerdict]
+
+
+def home_check_allow(status: Any) -> HomeVerdict:
+    """Default home check (no safety engine attached)."""
+    return HomeVerdict()
+
+
+@dataclass
 class _Job:
     cmd: Command
     conn_id: str
@@ -187,6 +235,10 @@ class ControlService:
         # Safety monitor hooks (T3.1b): a validated goto was sent / motion context reset.
         self.goto_started: Callable[[Command], None] = lambda cmd: None
         self.motion_cleared: Callable[[], None] = lambda: None
+        # T3.2: HOME safety check (SafetyEngine.check_home) and the homing watch of the monitor.
+        self.home_check: HomeCheck = home_check_allow
+        self.homing_begin: Callable[[HomeVerdict], None] = lambda verdict: None
+        self.homing_end: Callable[[], None] = lambda: None
         self.holder: str | None = None
         self.ready = False
         self.shutting_down = False
@@ -197,6 +249,15 @@ class ControlService:
         self._worker: asyncio.Task | None = None
         self._bg: set[asyncio.Task] = set()
         self._startup_task: asyncio.Task | None = None
+        self._startup_deferred = False  # PWI4 was unreachable at gateway start (CONNECT may run)
+        self._startup_lock = asyncio.Lock()
+        from .sequences import Sequencer  # local: sequences imports this module
+
+        self.seq = Sequencer(self)
+        self.homed = HomedGuard(audit)
+        self.homed.connecting = lambda: (
+            self.seq.active and self.seq.info is not None and self.seq.info.name == "connect"
+        )
         hub.on_disconnect.append(self._on_disconnect)
 
     # ------------------------------------------------------------------ helpers
@@ -213,9 +274,15 @@ class ControlService:
         return t
 
     def _ack(
-        self, conn_id: str, cmd_id: str | None, cmd: str | None, ok: bool, reason: str | None
+        self,
+        conn_id: str,
+        cmd_id: str | None,
+        cmd: str | None,
+        ok: bool,
+        reason: str | None,
+        code: str | None = None,
     ) -> dict[str, Any]:
-        return {
+        ack: dict[str, Any] = {
             "type": "ack",
             "id": cmd_id,
             "cmd": cmd,
@@ -223,6 +290,9 @@ class ControlService:
             "reason": reason,
             "control": self.control_for(conn_id),
         }
+        if code is not None:  # machine-readable refusal kind (e.g. home_blocked_confirm)
+            ack["code"] = code
+        return ack
 
     def _audit_cmd(self, conn_id: str, cmd: Command, ok: bool, reason: str | None, **extra) -> None:
         self.audit.write(
@@ -299,6 +369,11 @@ class ControlService:
             self._audit_cmd(conn_id, cmd, True, None)
             return self._ack(conn_id, cmd.id, name, True, None)
 
+        if name in SEQUENCE_COMMANDS:
+            return self._sequence_command(conn_id, cmd)
+        if name == "homed_override":
+            return self._homed_override(conn_id, cmd)
+
         # ---- motion commands
         reason = self._motion_refusal(conn_id, cmd)
         if reason:
@@ -317,9 +392,92 @@ class ControlService:
         self._audit_cmd(conn_id, cmd, ok, reason)
         return self._ack(conn_id, cmd.id, name, ok, reason)
 
-    def _refuse(self, conn_id: str, cmd: Command, reason: str) -> dict[str, Any]:
-        self._audit_cmd(conn_id, cmd, False, reason)
-        return self._ack(conn_id, cmd.id, cmd.name, False, reason)
+    def _refuse(
+        self, conn_id: str, cmd: Command, reason: str, code: str | None = None
+    ) -> dict[str, Any]:
+        self._audit_cmd(conn_id, cmd, False, reason, **({"code": code} if code else {}))
+        return self._ack(conn_id, cmd.id, cmd.name, False, reason, code)
+
+    # ------------------------------------------------------------------ not-homed guard (T3.3)
+
+    def _homed_override(self, conn_id: str, cmd: Command) -> dict[str, Any]:
+        """Proceed without homing. Needs the control lock like a motion command (taken when
+        free); only while connected and not homed. No PWI4 write."""
+        if self.shutting_down:
+            return self._refuse(conn_id, cmd, R_SHUTTING)
+        if not self.ready:
+            return self._refuse(
+                conn_id, cmd, R_STARTING if self.poller.last_good is not None else R_NO_PWI4
+            )
+        if self.holder is not None and self.holder != conn_id:
+            return self._refuse(conn_id, cmd, R_OTHER_HAS_CONTROL)
+        if self.seq.active:
+            return self._refuse(conn_id, cmd, self.seq.busy_reason())
+        status = self.fresh_status()
+        if status is None:
+            return self._refuse(conn_id, cmd, R_NO_PWI4)
+        if not status.mount.is_connected:
+            return self._refuse(conn_id, cmd, R_NO_MOUNT)
+        if not self.homed.blocking:
+            return self._refuse(conn_id, cmd, R_NOT_HOMED_STATE)
+        if self.holder is None:
+            self._set_holder(conn_id, "first_command")
+        self.homed.override(conn_id)
+        self.hub.republish_latest()
+        self._audit_cmd(conn_id, cmd, True, None)
+        return self._ack(conn_id, cmd.id, cmd.name, True, None)
+
+    # ------------------------------------------------------------------ sequences (T3.2)
+
+    def _sequence_command(self, conn_id: str, cmd: Command) -> dict[str, Any]:
+        """connect / disconnect / home: acked when STARTED; progress is in snapshot.sequence.
+        No await happens before the sequence is registered (per-connection ordering)."""
+        reason, code = self._sequence_refusal(conn_id, cmd)
+        if reason:
+            return self._refuse(conn_id, cmd, reason, code)
+        if self.holder is None:
+            self._set_holder(conn_id, "first_command")
+        self.seq.start(cmd, conn_id)
+        self._audit_cmd(conn_id, cmd, True, None)
+        return self._ack(conn_id, cmd.id, cmd.name, True, None)
+
+    def _sequence_refusal(self, conn_id: str, cmd: Command) -> tuple[str | None, str | None]:
+        name = cmd.name
+        if self.shutting_down:
+            return R_SHUTTING, None
+        if not self.ready and not (name == "connect" and self._startup_deferred):
+            return (R_STARTING if self.poller.last_good is not None else R_NO_PWI4), None
+        if self._link_busy:
+            return R_LINK_STOP, None
+        if self.holder is not None and self.holder != conn_id:
+            return R_OTHER_HAS_CONTROL, None
+        if self.seq.active:
+            return self.seq.busy_reason(), None
+        if self._current is not None or not self._queue.empty():
+            return R_WORKER_BUSY, None
+        if name == "connect":
+            return None, None  # PWI4 may be down: the sequence starts it
+        status = self.fresh_status()
+        if status is None:
+            return R_NO_PWI4, None
+        if not status.mount.is_connected:
+            return R_NO_MOUNT, None
+        axes_on = all(ax.is_enabled for ax in (status.mount.axis0, status.mount.axis1))
+        if name == "home":
+            for i, ax in enumerate((status.mount.axis0, status.mount.axis1)):
+                if not ax.is_enabled:
+                    return f"Axis {i} disabled", None
+            return self.home_check(status).reason, None
+        # disconnect: a blocked home asks the user once (the second send carries skip_home)
+        if axes_on and not cmd.args.get("skip_home"):
+            verdict = self.home_check(status)
+            if verdict.reason:
+                if verdict.sun_blocked:
+                    q = "Home is blocked by the Sun; disconnect without homing?"
+                else:
+                    q = f"Home is blocked ({verdict.reason}); disconnect without homing?"
+                return q, CODE_HOME_BLOCKED
+        return None, None
 
     def _motion_refusal(self, conn_id: str, cmd: Command) -> str | None:
         if self.shutting_down:
@@ -330,6 +488,8 @@ class ControlService:
             return R_LINK_STOP
         if self.holder is not None and self.holder != conn_id:
             return R_OTHER_HAS_CONTROL
+        if self.seq.active:
+            return self.seq.busy_reason()
         status = self.fresh_status()
         if status is None:
             return R_NO_PWI4
@@ -339,7 +499,15 @@ class ControlService:
             for i, ax in enumerate((status.mount.axis0, status.mount.axis1)):
                 if not ax.is_enabled:
                     return f"Axis {i} disabled"
-        ctx = CommandContext(conn_id, status, self.poller.latest, self.poller.current_site_check())
+        if self.homed.blocking and (
+            cmd.name in HOMED_GATED or (cmd.name == "tracking" and cmd.args.get("on"))
+        ):
+            return R_NOT_HOMED
+        snap = self.poller.latest
+        if cmd.name == "tracking" and cmd.args.get("on") and snap is not None:
+            if snap.state == "SLEWING":
+                return R_SLEWING
+        ctx = CommandContext(conn_id, status, snap, self.poller.current_site_check())
         return self.check(cmd, ctx)
 
     # ------------------------------------------------------------------ worker
@@ -384,8 +552,16 @@ class ControlService:
             elif cmd.name == "tracking":
                 self.motion_cleared()
                 if cmd.args["on"]:
+                    # T3.3 (sim finding): after a goto stopped mid-slew the axis-0 position can
+                    # lie outside PWI4's wrap window; tracking_on then re-normalises it into the
+                    # window = an unwinding slew of up to 360 deg. Centre the window on where the
+                    # mount is, so TRACK holds the current pointing (Q1).
+                    st = self.fresh_status()
+                    if st is not None and st.mount.azimuth_degs is not None:
+                        await self._prepare_wrap(st.mount.azimuth_degs)
                     await self.writer.tracking_on()
                     self.motion_commanded = True
+                    self._audit_track_start(job.conn_id, cmd)
                 else:
                     await self.writer.tracking_off()
             if not job.future.done():
@@ -397,6 +573,20 @@ class ControlService:
             if not job.future.done():
                 job.future.set_result((False, job.cancelled_reason or "Cancelled"))
             raise
+
+    def _audit_track_start(self, conn_id: str, cmd: Command) -> None:
+        """Audit the pointing the track starts from (T3.3: TRACK holds the current RA/Dec)."""
+        st = self.fresh_status()
+        pos: dict[str, Any] = {}
+        if st is not None:
+            m = st.mount
+            pos = {
+                "ra_h": m.ra_j2000_hours,
+                "dec_deg": m.dec_j2000_degs,
+                "alt": m.altitude_degs,
+                "az": m.azimuth_degs,
+            }
+        self.audit.write("track_start", client=conn_id, id=cmd.id, **pos)
 
     async def _prepare_wrap(self, target_az: float) -> None:
         """P8/P9: set the axis-0 wrap minimum so the nearest representation is taken."""
@@ -427,6 +617,9 @@ class ControlService:
                 job.future.set_result((False, reason))
             n += 1
         self.motion_cleared()
+        if self.seq.active:  # connect / disconnect / home end with STOP, link loss, safety stop
+            self.seq.cancel(reason)
+            n += 1
         cur = self._current
         if cur is not None:
             cur.cancelled_reason = reason
@@ -583,6 +776,7 @@ class ControlService:
             await asyncio.sleep(0.25)
         if res is None or not res.reachable:
             self.audit.write("startup", result="pwi4_unreachable", deferred=True)
+            self._startup_deferred = True
             self._startup_task = asyncio.create_task(self._startup_retry())
             return
         await self._startup_with(res)
@@ -595,7 +789,20 @@ class ControlService:
                 await self._startup_with(res)
                 return
 
+    async def ensure_started(self, res: PollResult) -> bool:
+        """CONNECT started PWI4 (or found it answering) while the start-up check was still
+        deferred: run it now, before anything else touches the mount. True when ready."""
+        if not self.ready:
+            await self._startup_with(res)
+        return self.ready
+
     async def _startup_with(self, res: PollResult) -> None:
+        async with self._startup_lock:
+            if self.ready:
+                return
+            await self._startup_locked(res)
+
+    async def _startup_locked(self, res: PollResult) -> None:
         t0 = time.perf_counter()
         m = res.status.mount
         active = status_motion(res.status)

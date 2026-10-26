@@ -1,7 +1,8 @@
 <script setup lang="ts">
 // Detailed Mount Status modal (A4-ii, concept/Detialed Info.png): expanded 3D view on the left,
-// live parameters and (disabled until Phase 3) mount-control groups on the right.
+// live parameters and the live mount-control groups (MountControlPanel, T3.2) on the right.
 import { computed } from 'vue'
+import MountControlPanel from '@/components/mount/MountControlPanel.vue'
 import MountHemisphere3D from '@/components/mount/MountHemisphere3D.vue'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { useMountStore } from '@/stores/mount'
@@ -50,7 +51,6 @@ const groups = computed<Row[][]>(() => [
   ],
 ])
 
-const CONTROL_HINT = 'Mount control arrives in Phase 3'
 </script>
 
 <template>
@@ -88,47 +88,11 @@ const CONTROL_HINT = 'Mount control arrives in Phase 3'
             </div>
           </fieldset>
 
-          <fieldset class="md-group" :title="CONTROL_HINT" data-testid="md-connection">
-            <legend>Connection</legend>
-            <div class="md-seg">
-              <button type="button" disabled :class="{ 'md-on': !d.mountConnected }">
-                {{ d.mountConnected ? 'DISCONNECT' : 'DISCONNECTED' }}
-              </button>
-              <button type="button" disabled :class="{ 'md-on': d.mountConnected }">
-                {{ d.mountConnected ? 'CONNECTED' : 'CONNECT' }}
-              </button>
-            </div>
-          </fieldset>
-
-          <fieldset class="md-group" :title="CONTROL_HINT" data-testid="md-pointing">
-            <legend>Pointing Mode</legend>
-            <div class="md-seg">
-              <button type="button" disabled :class="{ 'md-on': !d.tracking }">
-                {{ d.tracking ? 'STOP' : 'STOPPED' }}
-              </button>
-              <button type="button" disabled :class="{ 'md-on': d.tracking }">
-                {{ d.tracking ? 'TRACKING' : 'TRACK' }}
-              </button>
-            </div>
-          </fieldset>
-
-          <fieldset class="md-group" :title="CONTROL_HINT" data-testid="md-commands">
-            <legend>Commands</legend>
-            <div class="md-grid">
-              <button type="button" disabled>
-                HOME MOUNT
-              </button>
-              <button type="button" disabled>
-                TRACK TARGET
-              </button>
-              <button type="button" disabled>
-                JOG
-              </button>
-              <button type="button" disabled>
-                GOTO
-              </button>
-            </div>
-          </fieldset>
+          <!-- Same live control as the dashboard MOUNT CONTROL panel (T3.2): one component, so the
+               modal and the dashboard can never disagree. It sizes from this wrapper's height. -->
+          <div class="md-control" data-testid="md-control">
+            <MountControlPanel />
+          </div>
         </div>
       </div>
     </DialogContent>
@@ -151,12 +115,8 @@ const CONTROL_HINT = 'Mount control arrives in Phase 3'
 .mount-dialog .md-dot { display: inline-block; width: 12px; height: 12px; border-radius: 9999px; margin-right: 6px; vertical-align: -1px; }
 .mount-dialog .md-dot-on { background: var(--accent-green-border); }
 .mount-dialog .md-dot-off { background: var(--disabled); }
-.mount-dialog .md-seg { display: grid; grid-template-columns: 1fr 1fr; }
-.mount-dialog .md-grid { display: grid; grid-template-columns: 1fr 1fr; }
-.mount-dialog .md-seg button, .mount-dialog .md-grid button { height: 38px; border: 1px solid var(--control-border); background: transparent; color: var(--foreground); font-size: 16px; font-weight: 700; letter-spacing: 0.01em; cursor: not-allowed; opacity: 0.85; }
-.mount-dialog .md-seg button.md-on { border-color: var(--accent-green-border); color: var(--accent-green-border); border-width: 2px; }
-.mount-dialog .md-seg button + button, .mount-dialog .md-grid button:nth-child(even) { margin-left: -1px; }
-.mount-dialog .md-grid button:nth-child(n + 3) { margin-top: -1px; }
-@media (max-height: 900px) { .mount-dialog .md-row { line-height: 20px; font-size: 15px; } .mount-dialog .md-rows + .md-rows { margin-top: 10px; } .mount-dialog .md-seg button, .mount-dialog .md-grid button { height: 32px; } .mount-dialog .md-side { gap: 8px; } .mount-dialog .md-body { padding-top: 36px; } .mount-dialog .md-view { height: min(800px, calc(100vh - 6rem)); } }
+/* MountControlPanel sizes from its container height; 380 px = its 1920x1080 design height. */
+.mount-dialog .md-control { height: 380px; flex: none; }
+@media (max-height: 900px) { .mount-dialog .md-row { line-height: 20px; font-size: 15px; } .mount-dialog .md-rows + .md-rows { margin-top: 10px; } .mount-dialog .md-control { height: 300px; } .mount-dialog .md-side { gap: 8px; } .mount-dialog .md-body { padding-top: 36px; } .mount-dialog .md-view { height: min(800px, calc(100vh - 6rem)); } }
 @media (max-width: 960px) { .mount-dialog .md-body { grid-template-columns: minmax(0, 1fr); } .mount-dialog .md-view { height: 50vh; } }
 </style>

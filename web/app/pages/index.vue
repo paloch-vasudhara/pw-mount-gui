@@ -2,6 +2,7 @@
 import { ref } from 'vue'
 import SectionFrame from '~/components/SectionFrame.vue'
 import ToolsGroup from '~/components/ToolsGroup.vue'
+import MountControlPanel from '~/components/mount/MountControlPanel.vue'
 import MountDetailsDialog from '~/components/mount/MountDetailsDialog.vue'
 import MountStatusPanel from '~/components/mount/MountStatusPanel.vue'
 import SkyChart from '~/components/sky/SkyChart.vue'
@@ -51,7 +52,9 @@ const filters = useFiltersStore()
         <MountStatusPanel @open-details="detailsOpen = true" />
         <MountDetailsDialog v-model:open="detailsOpen" />
       </SectionFrame>
-      <SectionFrame title="Mount Control" />
+      <SectionFrame title="Mount Control">
+        <MountControlPanel homed-dialog />
+      </SectionFrame>
     </div>
   </main>
 </template>

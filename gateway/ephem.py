@@ -106,9 +106,20 @@ class Ephem:
     ) -> tuple[float, float]:
         """Apparent topocentric (alt, az) of a J2000 RA/Dec at `when` (precession, nutation,
         aberration included; no refraction)."""
-        from skyfield.api import Star
+        from .transforms import radec_j2000_to_altaz  # H4 (T3.3)
 
-        t = self._ts.from_datetime(when or datetime.now(UTC))
-        star = Star(ra_hours=ra_h, dec_degrees=dec_deg)
-        alt, az, _ = self._observer(site).at(t).observe(star).apparent().altaz()
-        return float(alt.degrees), float(az.degrees)
+        return radec_j2000_to_altaz(
+            ra_h, dec_deg, when or datetime.now(UTC), site, ts=self._ts, earth=self._eph["earth"]
+        )
+
+    def altaz_radec_j2000(
+        self,
+        site: tuple[float, float, float],
+        alt: float,
+        az: float,
+        when: datetime,
+    ) -> tuple[float, float]:
+        """Inverse of `radec_j2000_altaz` (H4); the time is explicit."""
+        from .transforms import altaz_to_radec_j2000
+
+        return altaz_to_radec_j2000(alt, az, when, site, ts=self._ts, earth=self._eph["earth"])
