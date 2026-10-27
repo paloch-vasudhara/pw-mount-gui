@@ -21,6 +21,41 @@ Each task `Tn.m` runs the same loop. The supervisor (main session) owns this fil
 
 **Non-negotiables:** no agent commits (the user commits) · ssa-toolkit is never modified · throwaway ports only, every server torn down after a check · user hand-styling is never reverted · this file + the logic sheet are the source of truth · at ~90–95 % of the session budget: no new briefs, PAUSE in-flight agents at a compiling state, write the resume point here + memory, stop.
 
+**Test tiers (user-approved 2026-10-27; replaces "full gates on every sub-task"):**
+- **Why:** T3.3b took a whole 5 h session. The cause was not long tests but repetition: the full sim suite after every change and ×2 at the end, chasing flaky tests in untouched areas, open-ended measuring, three jobs in one brief, the supervisor repeating a full run, and the report only at the end.
+- **Tier 1, each sub-task (worker).** The brief lists the exact commands.
+  - Unit tests: the test files of the touched modules while working, then the full non-sim pytest (~3 min) **once** at the end.
+  - Sim: **only the new or changed sim tests, once.** A second run only if a timing result is within 20 % of its limit. **Never the full sim suite.**
+  - Web: typecheck + lint + the touched files' vitest.
+  - **A flaky test outside the task's area:** note it, don't debug it. It goes on the flaky list in §8.
+  - **Measurement work:** 30–45 min timebox, then report the best result.
+  - **Brief timebox ~90 min:** stop and report at the limit.
+  - **Progress notes** go to `scratchpad/<task>/report.md` as the worker goes (survives crashes / usage limits).
+- **Tier 2, each sub-task (supervisor, ~20–30 min):**
+  - review the diff against the spec;
+  - re-run the task's new or changed sim tests once;
+  - a small independent spot-check script for the task's key numbers;
+  - a real browser **only if the UI changed** (one scripted pass at 1920 and 1280×600 @1.5);
+  - no full independent sim run.
+- **Tier 3, end of a main phase (T3, T4, …):**
+  - full sim suite ×2, the PWI4 harness, a full browser pass of the phase's screens;
+  - the flaky list is fixed or tightened here, slow sim tests are trimmed here;
+  - then the user's phase check.
+- **Sizing:** split mixed sub-tasks into separate small briefs (e.g. b1 / b2 / b3) so one stuck part doesn't hold the others.
+- **Sim-test areas (name the rows in a brief):**
+
+| Area | Sim test file |
+|---|---|
+| Tracking / TRACK / H4 vs PWI4 | `gateway/tests/test_track_pwi4sim.py` |
+| Safety (Lim EL, Sun, monitor, refraction frame) | `gateway/tests/test_safety_pwi4sim.py` |
+| Sequences (connect / disconnect / home, homed guard) | `gateway/tests/test_sequences_pwi4sim.py` |
+| Control (lock, link loss, start-up stop, protocol) | `gateway/tests/test_control_pwi4sim.py` |
+| Stall guard | `gateway/tests/test_stall_pwi4sim.py` |
+| Poller / state machine | `gateway/tests/test_gateway_pwi4sim.py` |
+| Harness / sim_guard | `tools/pwi4_harness/tests/` |
+
+- **Flaky list** (fix at the phase end): `test_safety.py::test_monitor_lets_validated_goto_reach_lim_el_plus_margin[0.1]` (unit, under load); `test_gateway_pwi4sim.py::test_goto_stop_state_sequence`.
+
 **PWI4 testing:** mount-control work is tested against **PWI4 in simulation mode** (user-confirmed, O3). Never point automated tests at a PWI4 instance connected to the real mount; real-mount sessions are user-run checks only.
 
 ---
@@ -967,6 +1002,77 @@ Runs after the user commits T3.2 + T3.3, before T3.4.
   - round trip ≤ 0.1″;
   - the PWI4-sim cross-check tightened from ≤ 90″ to ≤ 2–5″.
 
+### T3.4 — Go To modal (A5c-iv) + Jog modal (A5c-iii) (spec, 2026-10-26; user decisions Q6–Q9 same day)
+
+**User decisions (10-26):**
+- **Q6:** the dry-run check, as recommended (`POST /api/mount/check`; SLEW disabled before the click with the gateway's exact reason).
+- **Q7:** the modal stays open; the status line follows the slew, as recommended.
+- **Q8, the user's variant of (b):** while STOPPED, **no `tracking_on`**. While a direction is held the gateway sets that **axis's rate directly**; on release, a keep-alive timeout or a disconnection, the axis rate goes **back to zero**.
+  - **Caution for the worker:** P10 measured that `mount/offset axisN_set_rate_arcsec_per_sec` does not move an idle mount on the sim (bookkeeping only).
+  - The first step of T3.4 is therefore a sim probe for a direct axis-rate path on a stopped mount: the offset rate with tracking off, any `/mount/` endpoint in the PWI4 4.1 API that sets an axis velocity, `goto_coord_pair` / raw custom path at a rate, etc. Re-read `pwi4/pwi4_client.py` and PWI4's HTTP API list.
+  - If no direct rate path exists without `tracking_on`, **stop and ask the user** before falling back to (a) rolling gotos. Don't fall back silently.
+  - STEP while stopped = the same axis-rate mechanism for a computed duration, or a single `goto_alt_az` to pose + step if the rate path is imprecise. The worker measures both and reports.
+- **Intent (user, 10-27): parity with PWI4's own jog** (Commands → Jog, the Move Mount window: arrows held at a speed, max 10°/s), **plus** the extra of jogging while sidereal tracking (tracking continues at the new RA/Dec). The Q8 wording is the user's best guess at how PWI4 does it; **PWI4's actual behaviour wins**.
+  - The T3.4b probe therefore records `/status` at 10 Hz while the user jogs in PWI4's Move Mount window on the sim (stopped and tracking), to see what PWI4 itself does: tracking flag, offsets, setpoint velocity, target fields, what happens on release.
+  - It also tries the API candidates (offset axis rate with tracking off, etc.).
+  - The jog is built to reproduce what PWI4 does; any mismatch goes to the user.
+- - **Q8 final (user, 10-27): option A** (see P20): from STOPPED `tracking_on` + axis rate offset while held, rate zero + stop on release, wrap-window check first; while TRACKING, offsets only. Provisional until the real-mount session.
+- **User check 10-27 (T3.4d):** JOG mode always ends STOPPED (from TRACK too); STEP from TRACKING always ends TRACKING (tracking re-enabled after the step if needed, wrap check first).
+- **T3.4e (user, 10-27): option B wrap handling for azimuth jogs** (see the decision log): slide the wrap window during the jog; prompt Turn 360° / Stay only at the mechanical limit; the turn is checked like a goto now, D-SUN in T3.5.
+- **Q9:** speeds are **mount-axis rates** (°/s of each axis), like PWI4's Move Mount.
+
+**Renders:** `concept/Goto Modal.png`, `concept/Job Modal.png`. Both modals open from the MOUNT CONTROL Commands group (GO TO, JOG). The guards apply to both: not homed / stalled, control lock, BUSY.
+
+**Go To modal (A5c-iv):**
+- **Two groups: Local Angular (Azimuth, Elevation) and Celestial (RA, Dec J2000).**
+  - Each value has the H2 format selector (DD/DMS, HMS/DD) and uses the existing triad widgets (`AngleField`, `DmsTriad`, `FormatSelect`).
+  - The group last edited is **active** (green border) and is sent.
+  - The other group shows the pair computed by H4 through `/api/transform` at the current time, dimmed, refreshed at 1 Hz (a celestial target moves in az/el), refracted like PWI4 (P18).
+  - Editing the dimmed group makes it the active one.
+- **Validation:**
+  - Both pairs are checked against Lim EL and the 15° Sun disc. When invalid, the elevation box(es) turn red, SLEW TO COORDINATES is disabled (grey), and the status line gives the reason, e.g. "Target coordinates is below the station limit horizon".
+  - Local Elevation is capped 0–90° (scrolling cannot go below 0°).
+  - The status line reads "Ready" when valid.
+- **Send:**
+  - Local active → `goto_altaz` → ends STOPPED.
+  - Celestial active → `goto_radec_j2000` → ends TRACKING (P4).
+  - Allowed during an object track (replaces it; T4).
+  - The gateway's refusal (including a Sun-crossing path, until D-SUN) shows on the status line.
+- **Q6, the dry-run check (recommended):** a read-only gateway check, `POST /api/mount/check {cmd, args}`, runs the same safety verdict as the real command (target + predicted path vs the Sun) without sending anything. The modal calls it on every input change and once a second, so SLEW is disabled *before* the click with the gateway's exact reason (Sun-crossing path included). The alternative is client-side target checks only, with path refusals appearing after the click.
+- **Q7, modal behaviour after SLEW (recommended):** the modal stays open and the status line follows "Slewing…" → "Arrived (STOPPED)" / "Tracking". The alternative is closing it on a successful send.
+
+**Jog modal (A5c-iii):**
+- **JOG / STEP segmented control.**
+  - **JOG:** the mount turns at the chosen speed while a direction is held. Speeds 0.5 / 1.0 / 2.0 / 5.0 / 10.0 °/s (default 5.0) via a −/+ stepper; max 10°/s (P17).
+  - **STEP:** one step per press. Steps 1′ / 5′ / 10′ / 30′ / 1° (default 10′). Further steps are blocked until the current one completes.
+  - ▲▼ = elevation ±, ◀▶ = azimuth −/+. The Az/El boxes are read-only live values.
+  - Keyboard: arrow keys, hold = jog (JOG mode), press = step (STEP mode).
+- **While sidereal TRACKING:** jog/step nudge the pointing through PWI4 offsets (`axisN_set_rate_arcsec_per_sec` / `axisN_add_arcsec`, P10). Tracking continues at the new RA/Dec. The speed is the axis rate.
+- **While STOPPED, a plain move. Q8, the mechanism** (P10: offsets do not move an idle mount):
+  - **(a) recommended: rolling `goto_alt_az` targets.** While held, the gateway re-targets 1–2 s ahead along the direction at the chosen speed every ~0.2 s; on release, STOP. Steps = a single `goto_alt_az` to pose + step. It never enters tracking, so it never triggers PWI4's wrap normalisation turn (P19). `_prepare_wrap` keeps the nearest representation (P8/P9), and every target is validated like a goto. Speed is approximate (PWI4's 0.5 s approach constant, P13); the worker measures it.
+  - (b) A temporary `tracking_on` + axis rate offset, then `tracking_off` on release. The rates are exact and the stop takes 0.12 s, **but `tracking_on` can make PWI4 turn up to 360° to normalise the wrap (P19)**: unacceptable as a jog side effect unless the pose is known to be inside the window.
+  - (c) A short `altaz` custom path (P7, `update_wrap=0`) extended while held. Precise, but more moving parts.
+- **Dead-man (I3 for jog):** the client sends `jog {dir, speed}` and then a keep-alive every 100 ms while held. The gateway stops the jog when keep-alives stop for > 300 ms, on release, on link loss (existing) and on blur / visibility-hidden in the browser.
+- **Limits G1–G3:**
+  - a jog/step toward Lim EL or into the Sun disc is refused;
+  - while jogging, the monitor's predictive look-ahead stops the mount early enough to stay above Lim EL / outside the disc (stopping distance at 10°/s with the axis acceleration + latency);
+  - the stall guard (T3.3b) stays active.
+- During an object track: disabled (T4).
+- **Q9, speed meaning (recommended):** the axis rate (°/s of each mount axis, as PWI4's own Move Mount window). The alternative is on-sky rate (azimuth scaled by 1/cos el).
+
+**Gateway:**
+- New commands `jog` (start/keep-alive/stop, strict schema, lock), `step` (dir, size) and `homed`-guarded motion.
+- The dry-run check endpoint (Q6).
+- Audit `jog_start` / `jog_stop` (reason: release / keep-alive timeout / limit / link) and `step`.
+- Tests: FakePwi4 units for the keep-alive timeout, step serialization, limit refusals and the nudge vs plain choice; sim tests for jog speed accuracy (measured), stop latency on release and on a keep-alive loss, a step size accuracy, and a jog toward Lim EL stopped above it.
+
+**Gate:**
+- unit + sim tests;
+- a real browser at 1920 and 1280×600 @1.5 against `concept/Goto Modal.png` / `Job Modal.png`;
+- hold-to-jog with the mouse and with the keyboard; tab blur stops the jog;
+- red elevation boxes and the disabled SLEW with reasons;
+- a step while one is running is ignored.
+
 ---
 
 ## 7. Progress tracker
@@ -993,8 +1099,8 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | T3.1b | ✅ | ✅ 10-21 | ✅ 10-22 | ✅ 10-22 | pending (/dev/control) | safety v1: PWI4-site gate (O-SITE), target + path Sun checks, Sun shortcut, predictive monitor, recovery |
 | T3.2 | ✅ | ✅ 10-22 | ✅ 10-22 | ✅ 10-22 | pending (incl. close PWI4 → CONNECT starts it) | connect/disconnect sequences (BUSY, failed step, PWI4 start 60 s), HOME (85/180 in settings, Sun-blocked → skip/confirm), MOUNT CONTROL panel |
 | T3.3 | ✅ | ✅ 10-22 | ✅ 10-22 | ✅ 10-22 | pending (with T3.2; commit together) | TRACK = tracking_on (+ wrap centring, P19); H4 in gateway + `/api/transform` (0.47–0.53″ vs astropy); not-homed guard per connect session + dialog/chip; Pointing Mode STOP/TRACK |
-| T3.3b | ⬜ | | | | | refraction parity (P18), keep PWI4 wrap turn (P19 revert), stall guard (P19a); spec ready (Q5 = PWI4's model) |
-| T3.4 | ⬜ | | | | | |
+| T3.3b | ✅ | ✅ 10-27 | ✅ 10-27 | ✅ 10-27 | ✅ 10-27 (with T3.4) | refraction parity (P18), keep PWI4 wrap turn (P19 revert), stall guard (P19a); spec ready (Q5 = PWI4's model) |
+| T3.4 | ✅ | ✅ 10-27 | ✅ 10-27 | ✅ 10-27 | ✅ 10-27 (incl. T3.4d/e) | a: Go To modal + `/api/mount/check` dry run; b: PWI4 jog recording + rate probe (P20); c: Jog modal + jog/step (option A). First task under the new test tiers |
 | T3.5 | ⬜ | | | | | D-SUN |
 | T4.1 | ⬜ | | | | | |
 | T4.2 | ⬜ | | | | | |
@@ -1006,24 +1112,27 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | T6.2 | ⬜ | | | | | |
 | T6.3 | ⬜ | | | | | |
 
-**Resume point (2026-10-22, T3.3 verified; session handed off, user testing):** Phases 0–2 committed (Phase 2 `26b18f0`); T3.1 committed `92bd389`. **T3.2 + T3.3 verified, UNCOMMITTED: the user commits them together after the user check.** The user's gateway on 8400 must be restarted to load the T3.3 code. Next:
-1. User check of T3.3:
-   - connect (with a Sun-blocked home, or a gateway restart, the dialog appears);
-   - Proceed anyway / Home mount;
-   - TRACK / STOP from the dashboard and the Details modal;
-   - the TRACK disabled reasons.
-2. The user commits T3.2 + T3.3.
-3. **T3.3b** (spec in §6): refraction parity (P18), revert the wrap centring (P19), stall guard (P19a, per-axis target difference); Q5 = PWI4's refraction model.
-4. **T3.4:** Go To modal (A5c-iv; H4 via `/api/transform`; decide refracted vs unrefracted local display, P18) + Jog modal (A5c-iii; P10: offsets only move a tracking mount; jog max 10°/s; serialized steps; arrow keys). Write the spec first.
-5. Then T3.5 (D-SUN).
-- **Real-mount session checklist** (the user's first session on the real L-350):
-  - Stall-guard thresholds (P19a).
-  - HOMING detection + motion: record the actual path (region sensor ≈ 60° alt → index, P16) and the homing altitude floor `min(Lim EL, start alt)`;
+**Resume point (2026-10-27, end of session; compaction next):** Phases 0–2 committed; T3.1 `92bd389`; T3.2 + T3.3 `96ef418`. **T3.3b + T3.4 (incl. T3.4d/e) user-checked 10-27 and committed by the user right after this point** (check `git log`). Next:
+1. **T3.5 D-SUN.** Write the spec first from the approved design (§4 "D-SUN"); split into small briefs under the §1 test tiers. It must route:
+   - gotos (local + celestial; today refused with "Slew path passes within 15° of the Sun");
+   - HOME (today skipped / confirmed when Sun-blocked);
+   - the T3.4e `wrap_turn` (`TODO(T3.5 D-SUN)` in `gateway/safety.py`);
+   - jog stays refuse/stop (no detours for manual motion), unless the spec decides otherwise with the user.
+   - Use PWI4 custom `altaz` paths (P7, `update_wrap=0`, P8) for detours; the D-SUN timing must use the actual axis path (P9, P13).
+2. **Phase 3 end = Tier 3:**
+   - full sim suite ×2, harness, full browser pass of all Phase 3 screens (panel, Details modal, Go To, Jog, stalled/not-homed UX);
+   - fix the flaky list (§1); trim the slow sim tests;
+   - then the Phase 3 user check.
+- **Real-mount session checklist** (the user's first session on the real L-350; homing + jog will be tested together):
+  - PWI4's real jog behaviour (does a release keep tracking? speeds? P20; option A provisional);
+  - the real azimuth mechanical range + wrap behaviour (T3.4e assumed the sim's ±300°);
+  - stall-guard thresholds (P19a);
+  - HOMING path (≈ 60° region sensor, P16) and the homing altitude floor;
   - what PWI4 reports before the first home, and whether `/status` has a homed flag;
   - whether `mount/stop` ends tracking;
-  - real acceleration (the sim ignores 20°/s²);
-  - refraction in the reported alt/az (P18);
-  - `tracking_on` after a wrap change (P19);
+  - real acceleration vs the jog look-ahead / limit margins;
+  - refraction match (P18);
+  - PWI4's wrap turn on `tracking_on` (P19);
   - `PWI4.cfg` behaviour.
 
 ---
@@ -1051,6 +1160,10 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | 2026-10-20 | T1.1 | Publish ticker decoupled from PWI4 fetch; `pwi4.age_ms`; > 1 s stale → DISCONNECTED "PWI4 not responding"; connect timeout 0.25 s, retry 1 s when unreachable | Windows connect to a closed localhost port waits the full timeout (~0.5 s) → stream fell to ~2 Hz | supervisor |
 | 2026-10-20 | T1.1 | WebSocket can't pass Nitro devProxy (HTTP only) → in dev the page connects straight to the gateway (`runtimeConfig.public.gatewayWs`); token fetch stays proxied; prod = same-origin (gateway serves the app) |
 | 2026-10-20 | A4-i | **Red warnings** (user): Status red on FAULT; Sun Distance red when ≤ 15° (green > 15°). Implemented in T1.4 |
+| 2026-10-27 | T3.4e | Azimuth jog across PWI4's wrap edge swung 360° silently. Option B: the gateway slides PWI4's wrap window along with an azimuth jog (no turn while the axis has mechanical room, sim ±300°); near the real mechanical limit the jog stops with a margin and prompts "turn 360° / stay"; Turn = a goto-like validated reposition (pad dimmed, STOP available; D-SUN routing in T3.5 like gotos); Stay = stop at the limit, prompt again on the next jog that way | user |
+| 2026-10-27 | T3.4 user check | JOG mode always ends STOPPED (also from TRACK: jog = move to a place); STEP from TRACKING always ends TRACKING (step = offset a track; re-enable tracking if PWI4 dropped it). Jog STEP-running buttons dimmed solid, not translucent. Go To: a click anywhere in a group activates it; computed local El red for a failing celestial target; the inactive group live-updates after edits (bug: it did not). Go To + Sun guard: user-verified clean | user |
+| 2026-10-27 | process | Test tiers: sub-tasks run only the touched units + new/changed sim tests once (non-sim full pytest once); the full sim suite ×2 + full browser pass only at the end of a main phase; timeboxes; progress notes; split mixed sub-tasks | user |
+| 2026-10-26 | T3.4 | Q6 dry-run check; Q7 Go To modal stays open with a status line; Q8 jog while stopped = direct axis rates while held, no tracking_on, rate back to zero on release / disconnect; Q9 speeds = mount-axis rates | user |
 | 2026-10-22 | T3.3 review | P18: local alt/az refracted like PWI4 (Go To must equal typing into PWI4). P19: PWI4's unwinding turn on tracking_on is intended (keeps turning room); revert the wrap centring. P19a: new stall guard (axis not moving 2–3 s while commanded → auto STOP + "home before further use"). PWI4 cfg + app settings were changed by the user to move the test Sun; kept for now | user |
 | 2026-10-22 | T3.2 re-check | User re-checked the Details-modal controls: OK. PWI4 manual supplied: the Simulator has no Home commands; L-Series must home after every power cycle (P16) | user |
 | 2026-10-22 | T3.2 | Home pose 85°/180° stored in the settings file (correctable); HOME blocked when its path crosses the Sun disc: on CONNECT skip home with a warning, on DISCONNECT ask "disconnect without homing?"; PWI4 start timeout 60 s (maybe 30 s later) |
@@ -1093,6 +1206,7 @@ Agreement (first 50 satellites × 7 epochs): TEME position diff max 1.4e-7 km; a
 | P17 | Manual, other facts used by later tasks: Jog max **10°/s** (A5c-iii max matches); **mount offsets reset when slewing to a new target**; apparent RA/Dec = precession + nutation + annual aberration, **no refraction**; PWI4 **changes the Azm wrap region by itself when tracking a satellite** (cf. P8); slew time constant default 0.5 s (P13); extra PWI4 instances use ports 8220+N; PWI4 has no ASCOM MoveAxis; warranty excludes damage from software that does not implement mechanical motion limits (reinforces G1) | H4 convention = no refraction (T3.3); T3.4 jog speeds; T4.2 wrap handling (after `follow_tle` re-read the wrap range) |
 | P18 | **PWI4's reported alt/az include atmospheric refraction** (T3.3 sim cross-check: PWI4 alt/az vs H4 of PWI4's own J2000 RA/Dec differ by 13–77″, matching Bennett refraction within 30″ in altitude; azimuth part < 20″). H4 and PWI4's apparent RA/Dec carry no refraction | The safety Lim EL check of an RA/Dec target (H4, unrefracted) is slightly stricter than PWI4's reported altitude (≈ 3.5′ at 15°): safe direction. T3.4 Go To modal: decide whether the computed local pair is shown refracted (as PWI4 reports) or not; real-mount check |
 | P19 | **`tracking_on` after a goto that changed the axis-0 wrap window and was stopped mid-slew slews the axis back into the window (~20°/s, up to 360°)** (T3.3 sim, full suite only; reproduced with direct sim calls) | Fixed: before `tracking_on` the gateway centres the wrap window on the current azimuth (`_prepare_wrap`), so TRACK holds the current pointing (Q1 parity). Real-mount check: the same behaviour with cable wrap |
+| P20 | **PWI4's own jog (Move Mount), recorded on the sim 10-27 while the user jogged:**<ul><li>the sim jog never moves the mount;</li><li>the offset-rate fields stay 0, so PWI4's jog uses an internal path that is not in the HTTP API (the public API has no jog / axis-velocity endpoint);</li><li>**a jog press on a stopped mount turns tracking on**: 5 tracking starts vs the user's 2 Track presses;</li><li>tracking ended on the user's STOPs, not visibly on release.</li></ul>**API probe:** `axis0_set_rate_arcsec_per_sec` does nothing on a stopped mount; while tracking it is exact (6.05° in 3 s at 2°/s incl. sidereal) | **T3.4 Q8 = option A (user 10-27):**<ul><li>jog from STOPPED = `tracking_on` + axis rate offset while held; on release (or a keep-alive timeout / disconnect) the rate goes to zero and the mount stops (`stop` + `tracking_off`), ending STOPPED;</li><li>before `tracking_on` the gateway checks axis 0 is inside its wrap window (P19), otherwise it refuses "Wrap out of range: re-home or Go To first";</li><li>while TRACKING: rate offsets only, tracking continues.</li></ul>**Real-mount session:** re-check PWI4's jog behaviour (does a release keep tracking? the speeds?) together with homing; the mechanics may change then |
 
 Harness note: `08_watchdog.explicit_stop_latency_s` is mis-measured in the supervisor run (includes the silent period); conclusion unaffected — fix opportunistically.
 
@@ -1472,6 +1586,107 @@ _Differences between the as-built app and the logic sheet / concept renders, wit
   - Supervisor tweaks: web Sun comparison `<=` (as the gateway); `TIP_GOTO` → "Arrives in T3.4".
 - **`PWI4.cfg`:** changed since the 10-22 morning baseline. PWI4's own files were rewritten 07:00–07:25 (incl. `Elmo.L350.Mount.cfg` at 07:00:58), consistent with the user looking at the L-350 device settings for the manual check; still `Devices.Mount = Simulator.Mount`. New baseline `40A4C3F4BF1168E7A7D5EFE6A8782FD2462A0B80F369A5A425C162A9D6A5578C`.
 - **Known:** a window opening right after another may see a stale `not_homed` and get `Mount is not in the not-homed state` on override (harmless).
+
+### T3.3b log (2026-10-26 → 27)
+- **Gateway worker** (stopped at the usage limit before its final gates; report lost) delivered:
+  - **Refraction:** Saemundsson × 0.9865 (PWI4's own scale, fitted on the sim) in `gateway/transforms.py`, tapered to 0 between −1 and −2° true alt, exact Newton inverse. H4, safety targets and the Sun (incl. the snapshot `sun` / `sun_distance`) are all in the observed frame.
+  - **P19 revert:** no wrap centring before `tracking_on`.
+  - **Stall guard:** `StallWatch` per axis = commanded (|dist_to_target| > 900″, or setpoint velocity > 0.05°/s) and position frozen ≤ 1″ for 2.5 s → `stall_stop` + `homed.reason = "stalled"`. Not evaluated during HOME or sequences. Stall text in `state_reason`. Refusals `Mount stalled; home it first`.
+- **Web worker:** stalled chip / dialog (Home only) / reasons / status line.
+- **Supervisor (Tier 2, new process):**
+  - non-sim pytest 348 pass;
+  - the 3 affected sim files once: 18/19 first, then 19/19;
+  - web gates (typecheck 0, lint 0 errors, vitest 334).
+  - **Measured:**
+    - H4 (refracted) vs PWI4 0.31–0.46″ after a constant −0.70 s clock offset between PWI4's status time and ours (raw 3.6–10″);
+    - P19: a TRACK after a stop outside the wrap window → PWI4 turned 359.93° in 22.9 s and landed within 0.01″; ordinary stopped gotos held (turn 0–0.02°, ≤ 0.01″);
+    - stall axis 0 frozen at the +300° limit → guard 2.84 s; axis 1 frozen at the 91.1° limit → guard 2.64 s.
+  - **Fixes by the supervisor:**
+    - the web read the stall text from `snapshot.warning`; now `state_reason` (where the gateway puts it);
+    - **`test_stall_pwi4sim[1]` depended on the real Sun** (base alt 20° or 72° picked by the real Sun, then a fixed +40°: from 20° it never reached the limit). The offset is now computed to go 9° past the axis-1 limit.
+  - **Real browser:** the STALLED chip, status line with the axis, "Mount stalled" dialog with Home only, GO TO / TRACK refusals, HOME clears it.
+  - Browser-script lessons:
+    - closing the scripted browser while it holds control with the mount tracking triggers the (correct) link-loss stop;
+    - a Sun-pinned sweep can be stopped by the (correct) Sun monitor before it stalls.
+
+### T3.4 log (2026-10-27, first task under the test tiers)
+- **T3.4a, Go To:**
+  - **Gateway:** `POST /api/mount/check`. It shares `ControlService._motion_verdict` with the real command (the lock holder is not evaluated), takes no lock, writes no audit and sends no PWI4 write. Codes: `below_lim_el`, `sun_target`, `sun_path`, `not_homed`, `stalled`, … Later it also accepts `jog` / `step`.
+  - **Web:** `GotoDialog.vue` + `utils/goto-modal.ts`. The red box uses the gateway codes (supervisor tweak: `below_lim_el` / `sun_target` red, `sun_path` not).
+  - **Browser gate found 4 bugs, fixed by a 45-min worker:**
+    1. the status lagged one edit behind (the check waited for the transform, `Promise.allSettled`);
+    2. Celestial sometimes active on open;
+    3. a slow first result;
+    4. a format change activated the dimmed group (the widgets re-emit on sign flip / blur / format change; edits now need a real user gesture in the row).
+    - The gateway's check was proven correct first with a direct API probe.
+  - **Re-gate:** Local active on open; Ready at 1.2 s; az 195 → "Within 15° of the Sun" (red box); 230 → "Slew path passes…"; 120 → Ready. Each answer matches its input.
+- **T3.4b, PWI4's jog:**
+  - The user jogged in PWI4's Move Mount on the sim while a read-only recorder logged `/status` at 10 Hz (P20): the sim jog never moves; the offset fields stay 0; a jog press on a stopped mount turns tracking on.
+  - API probe: a rate offset does nothing on a stopped mount and is exact while tracking.
+  - **User decision: option A** (provisional until the real-mount session).
+- **T3.4c, Jog:**
+  - **Gateway:** `gateway/jog.py` `JogController`.
+    - Commands: `jog` (keep-alive every 100 ms, 300 ms timeout), `jog_stop`, `step`; snapshot `jog` / `step`.
+    - From STOPPED: wrap check → `tracking_on` + axis rate; release → stop_rate, stop, tracking_off, offset reset.
+    - From TRACKING: rate only.
+    - Steps: `goto_altaz` from STOPPED, `add_arcsec` while tracking.
+    - New refusals: "Wrap out of range: re-home or Go To first", "Step in progress", "Slewing; press STOP first", "Jog in progress; release first", "Axis N at its mechanical limit", "Step goes past the axis N limit".
+    - Monitor look-ahead is now speed-dependent, `max(0.5, 0.45 + v/2a)` (0.7 s at 10°/s); jogs that cannot stop before a limit are refused up front; the jogged axis counts as commanded for the stall guard.
+  - **Web:** `JogDialog.vue` + `utils/jog-modal.ts`.
+  - **Supervisor Tier 2:**
+    - non-sim pytest 414 pass, ruff clean, web gates (typecheck 0, lint 0 errors, vitest 373);
+    - `test_jog_pwi4sim.py` once, 6/6:
+      - jog 2°/s → 1.998°/s (−0.1 %); stationary + not tracking 0.09 s after release;
+      - keep-alive loss → stopped 0.41 s;
+      - jog while tracking keeps tracking (1.1″ drift after release);
+      - step 10′ stopped err ≤ 1.9″, tracking ≤ 1.8″;
+      - 5°/s toward Lim EL 15° stopped at 16.88°;
+      - wrap refusal;
+    - real browser: hold ▶ jogs ("Jogging right at 5.0°/s") and release stops; window blur stops a held jog; the ArrowLeft key jogs and its keyup releases; a STEP 10′ moved el +0.17°; a second press during a step was ignored (pad disabled); the Go To checks above; no clipping at 1920 / 1280×600 @1.5 (the jog dialog's guide line touches the edge = scrollWidth flag only).
+- **Process note:** T3.3b's remaining verification + all of T3.4 fitted in one session under the new tiers.
+
+### T3.4d log (2026-10-27, user-check fixes)
+- **Gateway:** JOG always ends STOPPED (also from TRACKING); STEP from TRACKING ends TRACKING (`_resume_tracking`, wrap check, `step_end.tracking_resumed`). Sim (changed tests once): jog from TRACKING → STOPPED 0.094 s after release; steps ≤ 2.1″, tracking step ends TRACKING.
+- **Web:**
+  - solid dimmed jog buttons (no opacity; the guide line no longer shows through);
+  - Go To group activation on any pointerdown in the group;
+  - a red computed Local El when the Celestial target fails (a `.gt-dim input` rule out-ranked `.is-invalid`).
+- **Item 4 root cause (supervisor):** the Nuxt **dev proxy** sent `/api/transform` to the analysis service (only `/api/mount/*` went to the gateway), so the computed pair froze in dev. The unit tests use a fake API, so they could not see it. Fixed in `web/nuxt.config.ts` (`/api/transform` → gateway).
+  - **Lesson:** any new gateway route outside `/api/mount` needs a dev-proxy entry. The browser gate is the only check that sees the proxy.
+- **Real-browser re-gate:**
+  - RA/Dec follows each az edit and the 1 Hz refresh;
+  - clicking Celestial → active + Local El red for the Sun target;
+  - jog from TRACKING → STOPPED; step from TRACKING → TRACKING;
+  - dimmed pad screenshot OK.
+- **Gates:** typecheck 0, lint 0 errors, vitest 381, ruff clean, test_jog 42.
+- **Audit check of the user's session:** the user's "steps disable tracking" came from two explicit STOPs (05:23:01 / 05:23:07Z) before the steps; the tracking steps themselves kept tracking. The rule is now guaranteed anyway.
+
+### T3.4e log (2026-10-27, azimuth wrap handling, option B)
+- **Gateway** (`gateway/jog.py`, `control.py`, `safety.py`, `snapshot.py`, `commands.py`, `app.py`; new `tests/test_wrap.py`):
+  - **Wrap slide:** during an axis-0 jog the window is re-centred (`pos − 180`) when the axis comes within 40° of its edge; at most every 0.5 s. If the write fails, the jog is released.
+    - Sim check first: re-centring while tracking + rate offset does not jump. Without the slide PWI4 swung back at ~30°/s.
+  - **Mechanical limit:** the jog ends at `limit − (stopping distance + 2°)` (9° at 10°/s) → snapshot `jog_limit {axis, dir, limit_deg, turn_deg, est_s}`.
+    - A jog that way again → "Azimuth at its mechanical limit: turn 360° or jog the other way" (`az_limit`).
+  - **Turn:** `wrap_turn {}` = goto-like (tracking_off, wrap window set to `target − 180`, `goto_alt_az` to the same alt/az); guarded like a goto incl. the Sun path (`TODO(T3.5 D-SUN)` in safety.py).
+    - Snapshot `turn {from_deg, to_deg}`. "Turn in progress; press STOP first". "No room for a 360° turn".
+  - **Cancel:** `wrap_turn_cancel {}` = stay.
+  - **Supervisor change:** a jog from STOPPED (and the tracking-resume after a tracking step) with axis 0 outside the wrap window now **re-centres the window first** (audit `wrap_recentre`) instead of refusing "Wrap out of range". Found in the browser: after a reconnect PWI4's window reset left the axis at 255° outside [−180, 180], and every jog was refused. Tests updated.
+- **Web:**
+  - the "Azimuth limit reached" prompt (Turn 360° / Stay here), with the pad dimmed + "Turning 360° to …" while turning;
+  - supervisor fix: drop the hold and clear refusals when `jog_limit` appears ("Another command is still running" showed from refused keep-alives).
+- **Measured:**
+  - **Worker sim:**
+    - 10°/s across the old edge: max 11.2°/s, no swing;
+    - limit stop at 292.25° (margin 9°);
+    - turn 292.25 → −67.75° in 23.1 s, errors ≤ 1.3″;
+    - STOP mid-turn cancels;
+    - a pinned Sun on the sweep → refused.
+  - **Supervisor:**
+    - the re-centre sim test (moved 3.15°, max step 0.096°);
+    - full non-sim pytest 447 pass; ruff clean; web gates (vitest 385);
+    - real browser: hold → right at 10°/s from 255° → stopped 291.7° → prompt (text OK) → Turn → "Turning 360° to −68.3°…", pad dimmed → same pointing → jog works after.
+  - `PWI4.cfg` unchanged.
+- **For T3.5:** route `wrap_turn` through D-SUN like gotos. Known edge: a failed `wrap_turn` after the wrap write leaves the window moved (now harmless: the next jog re-centres).
 
 ## 9. Known limitations & risks
 

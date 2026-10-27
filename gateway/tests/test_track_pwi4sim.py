@@ -17,7 +17,7 @@ import asyncio
 import math
 import os
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -37,6 +37,7 @@ from gateway.tests.test_sequences_pwi4sim import (
     disconnect_sim,
     start_gateway,
 )
+from gateway.transforms import refraction_arcsec
 
 pytestmark = [
     pytest.mark.pwi4sim,
@@ -68,11 +69,6 @@ def sep_arcsec(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
 
 def radec_sep_arcsec(ra1_h: float, dec1: float, ra2_h: float, dec2: float) -> float:
     return sep_arcsec(ra1_h * 15.0, dec1, ra2_h * 15.0, dec2)
-
-
-def bennett_refraction_arcsec(alt_deg: float) -> float:
-    """Bennett (1982) refraction for 1010 hPa / 10 C, arcsec (cross-check of the PWI4 offset)."""
-    return 60.0 / math.tan(math.radians(alt_deg + 7.31 / (alt_deg + 4.4)))
 
 
 def status_time(s) -> datetime:
@@ -112,12 +108,115 @@ async def wait_stationary(pwi, timeout: float = 30.0) -> None:
     raise AssertionError("mount did not settle")
 
 
-async def goto_altaz_and_wait(c: Client, pwi, alt: float, az: float) -> None:
+async def wait_arrived(pwi, timeout: float = 90.0) -> None:
+    """Test infrastructure: wait until a goto has really finished: not slewing and both axes
+    within 5 arcsec of their targets, 3 reads in a row (a slew that has not started yet, or has
+    not been picked up yet, is not 'stationary')."""
+    t0 = time.monotonic()
+    ok = 0
+    while time.monotonic() - t0 < timeout:
+        m = (await status(pwi)).mount
+        d0, d1 = m.axis0.dist_to_target_arcsec, m.axis1.dist_to_target_arcsec
+        if not m.is_slewing and abs(d0) < 5.0 and abs(d1) < 5.0:
+            ok += 1
+            if ok >= 3:
+                return
+        else:
+            ok = 0
+        await asyncio.sleep(0.3)
+    raise AssertionError("mount did not arrive")
+
+
+async def track_and_land(c: Client, pwi, timeout: float = 60.0) -> dict:
+    """TRACK (a bare tracking_on, T3.3b / P19) then wait for any PWI4 turn to finish. PWI4 may
+    normalise axis 0 into its wrap window by turning (up to ~360 deg); that is intended. Returns
+    the turn size / time and how far the final RA/Dec is from the RA/Dec of the TRACK moment."""
+    s_pre = await status(pwi)
+    m_pre = s_pre.mount
+    ax_pre = m_pre.axis0.position_degs
+    ack = await c.cmd("tracking", {"on": True})
+    assert ack["ok"], ack
+    t0 = time.monotonic()
+    calm = 0
+    slewing_s = 0.0
+    last = t0
+    ax_max_dev = 0.0
+    while time.monotonic() - t0 < timeout:
+        s = await status(pwi)
+        m = s.mount
+        now = time.monotonic()
+        if m.is_slewing:
+            slewing_s += now - last
+        last = now
+        ax_max_dev = max(ax_max_dev, abs(m.axis0.position_degs - ax_pre))
+        if c.state == "TRACKING" and not m.is_slewing:
+            calm += 1
+            if calm >= 4:
+                break
+        else:
+            calm = 0
+        await asyncio.sleep(0.5)
+    assert c.state == "TRACKING", c.state
+    s_end = await status(pwi)
+    m_end = s_end.mount
+    err = radec_sep_arcsec(
+        m_pre.ra_j2000_hours, m_pre.dec_j2000_degs, m_end.ra_j2000_hours, m_end.dec_j2000_degs
+    )
+    return {
+        "turn_deg": round(ax_max_dev, 2),
+        "axis0_pre_end": (round(ax_pre, 2), round(m_end.axis0.position_degs, 2)),
+        "slewing_s": round(slewing_s, 1),
+        "total_s": round(time.monotonic() - t0, 1),
+        "final_radec_err_arcsec": round(err, 2),
+    }
+
+
+def assert_no_false_stops(g) -> None:
+    """The safety monitor must not stop a PWI4 turn that is clear of the Sun and above Lim EL."""
+    bad = [e for e in g.audit_events() if e["event"] in ("limit_stop", "stall_stop")]
+    assert not bad, bad
+
+
+SUN_CLEAR_DEG = 30.0  # PWI4 itself cuts slews short near the (real) Sun: stay well clear
+
+
+def path_clear_of_sun(a0: float, z0: float, a1: float, z1: float, sun, n: int = 60) -> bool:
+    """True when the straight alt/az path (azimuth the short way) stays SUN_CLEAR_DEG from `sun`."""
+    dz = (z1 - z0 + 180.0) % 360.0 - 180.0
+    for i in range(n + 1):
+        u = i / n
+        if sep_arcsec(z0 + dz * u, a0 + (a1 - a0) * u, sun[1], sun[0]) < SUN_CLEAR_DEG * 3600.0:
+            return False
+    return True
+
+
+async def _goto_one(c: Client, pwi, alt: float, az: float) -> None:
     ack = await c.cmd("goto_altaz", {"alt": alt, "az": az})
     assert ack["ok"], ack
     await asyncio.sleep(0.5)
     await wait_stationary(pwi)
     await c.wait_state("STOPPED", 10)
+
+
+async def goto_altaz_and_wait(c: Client, pwi, alt: float, az: float) -> None:
+    """Gateway Az/El goto and wait. The real Sun must not matter at any time of day (the gateway
+    runs with a pinned Sun, but PWI4 stops slews that run into the real one): when the straight
+    path would pass near the real Sun it is routed through a waypoint altitude (20 or 72 deg,
+    whichever is farther from the Sun's altitude; tracking is not possible near the zenith):
+    vertical leg, azimuth sweep at that altitude, vertical leg. A target azimuth within 40 deg of
+    the real Sun is shifted by 90/-90/180 deg (the tests only need some pose at that altitude)."""
+    s = await status(pwi)
+    m = s.mount
+    sun = ephem().sun_altaz(site_of(s))
+    for shift in (0.0, 90.0, -90.0, 180.0):  # a TARGET near the real Sun is moved aside
+        if sep_arcsec(az + shift, alt, sun[1], sun[0]) >= 40.0 * 3600.0:
+            az = (az + shift) % 360.0
+            break
+    if not path_clear_of_sun(m.altitude_degs, m.azimuth_degs, alt, az, sun):
+        wa = 20.0 if abs(20.0 - sun[0]) >= abs(72.0 - sun[0]) else 72.0
+        await _goto_one(c, pwi, wa, m.azimuth_degs)
+        await _goto_one(c, pwi, wa, az)
+    await _goto_one(c, pwi, alt, az)
 
 
 async def make_stopped(c: Client, pwi) -> None:
@@ -163,48 +262,67 @@ async def sat_pose_after_follow(pwi, tle, seconds: float = 25.0) -> tuple[float,
 
 
 def test_h4_vs_pwi4_reported_altaz(pwi, tmp_path):
-    """PWI4's alt/az vs H4(PWI4's own J2000 RA/Dec) at the status time. The sim has no pointing
-    model, so the difference is only convention. Measured: it is atmospheric refraction (PWI4's
-    alt/az are observed coordinates, H4 has none). Loose bounds; the numbers are recorded."""
+    """T3.3b (P18): H4's default frame is PWI4's (observed, refracted). PWI4's reported alt/az
+    vs H4(PWI4's own J2000 RA/Dec) at the status timestamp, over alt 12..86 and several azimuths.
+
+    Measured on the simulator: the refraction model (Saemundsson x 0.9865) matches to < 1 arcsec,
+    but the simulator's RA/Dec carry a constant Earth-rotation offset of about -0.7 s of time
+    (up to ~10 arcsec along the diurnal circle; PWI4's own UT1/clock handling, not refraction).
+    So the test reports the raw residual (default time) and the residual after fitting that one
+    constant offset: <= 2.5 arcsec. The raw residual is bounded by the offset's size (<= 15")."""
     g = start_gateway(tmp_path, SUN_FAR)
     try:
 
         async def go():
             c = await Client.open(g.token())
             await c.wait_state("STOPPED", 8)
-            m0 = (await status(pwi)).mount
-            diffs = []
-            az0 = m0.azimuth_degs
-            for i, (alt, daz) in enumerate([(55.0, 0.0), (40.0, 70.0), (75.0, 150.0)]):
-                if i or abs(m0.altitude_degs - alt) > 0.5:
-                    await goto_altaz_and_wait(c, pwi, alt, other_az(az0, daz))
-                s = await status(pwi)
-                m = s.mount
-                h_alt, h_az = h4_altaz(s)
-                d = sep_arcsec(m.azimuth_degs, m.altitude_degs, h_az, h_alt)
-                d_alt = (m.altitude_degs - h_alt) * 3600.0
-                d_az = (m.azimuth_degs - h_az) * 3600.0 * math.cos(math.radians(m.altitude_degs))
-                diffs.append(
-                    {
-                        "d_alt_arcsec": round(d_alt, 1),
-                        "d_az_x_cos_alt_arcsec": round(d_az, 1),
-                        "bennett_refraction_arcsec": round(bennett_refraction_arcsec(h_alt), 1),
-                        "pwi4_altaz": (round(m.altitude_degs, 4), round(m.azimuth_degs, 4)),
-                        "h4_altaz": (round(h_alt, 4), round(h_az, 4)),
-                        "diff_arcsec": round(d, 2),
-                    }
-                )
-            RESULTS["h4_vs_pwi4"] = diffs
-            print("\nH4 vs PWI4 (arcsec):", [x["diff_arcsec"] for x in diffs])
-            # Measured (T3.3): the difference is PWI4's atmospheric refraction in the reported
-            # alt/az (+ a few arcsec), i.e. PWI4 alt/az are OBSERVED coordinates while H4 is the
-            # refraction-free apparent direction (P17). Loose bounds; the numbers are the finding.
-            assert all(x["diff_arcsec"] <= 90.0 for x in diffs), diffs
-            assert all(abs(x["d_az_x_cos_alt_arcsec"]) <= 20.0 for x in diffs), diffs
-            assert all(
-                abs(x["d_alt_arcsec"] - x["bennett_refraction_arcsec"]) <= 30.0 for x in diffs
-            ), diffs
             await make_stopped(c, pwi)
+            m0 = (await status(pwi)).mount
+            az0 = m0.azimuth_degs
+            snaps = []
+            for alt, daz in [
+                (55.0, 0.0),
+                (40.0, 70.0),
+                (75.0, 150.0),
+                (20.0, 200.0),
+                (86.0, 250.0),
+            ]:
+                await goto_altaz_and_wait(c, pwi, alt, other_az(az0, daz))
+                await make_stopped(c, pwi)
+                snaps.append(await status(pwi))
+
+            def resid(s, dt: float):
+                m = s.mount
+                t = status_time(s) + timedelta(seconds=dt)
+                h_alt, h_az = ephem().radec_j2000_altaz(
+                    site_of(s), m.ra_j2000_hours, m.dec_j2000_degs, t
+                )
+                return sep_arcsec(m.azimuth_degs, m.altitude_degs, h_az, h_alt)
+
+            raw = [resid(s, 0.0) for s in snaps]
+            offsets = [x / 20.0 for x in range(-40, 41)]  # -2 .. +2 s in 0.1 s steps
+            best_dt = min(offsets, key=lambda dt: max(resid(s, dt) for s in snaps))
+            fitted = [resid(s, best_dt) for s in snaps]
+            m_alt = [
+                (
+                    round(s.mount.altitude_degs, 3),
+                    round(refraction_arcsec(s.mount.altitude_degs), 1),
+                )
+                for s in snaps
+            ]
+            RESULTS["h4_vs_pwi4"] = {
+                "raw_arcsec": [round(x, 2) for x in raw],
+                "fitted_time_offset_s": best_dt,
+                "fitted_arcsec": [round(x, 2) for x in fitted],
+                "alt_refraction_arcsec": m_alt,
+            }
+            print(
+                f"\nH4 (refracted) vs PWI4: raw {[round(x, 1) for x in raw]} arcsec; "
+                f"constant clock offset {best_dt:+.2f} s -> {[round(x, 2) for x in fitted]} arcsec"
+            )
+            assert max(fitted) <= 2.5, (best_dt, fitted)
+            assert -1.5 <= best_dt <= 0.5, best_dt
+            assert max(raw) <= 15.0, raw
             await c.close()
 
         run(go())
@@ -361,47 +479,23 @@ def test_track_after_stopped_goto_holds_current_radec(pwi, tmp_path, kind):
             sep_stop_target = sep_arcsec(ms.azimuth_degs, ms.altitude_degs, target_az, target_alt)
             sep_start_stop = sep_arcsec(ms.azimuth_degs, ms.altitude_degs, start_az, start_alt)
 
-            ack = await c.cmd("tracking", {"on": True})
-            assert ack["ok"], ack
-            trace = []
-            for _ in range(12):  # diagnostics: what does the mount do right after TRACK?
-                mm = (await status(pwi)).mount
-                trace.append(
-                    (round(mm.altitude_degs, 3), round(mm.azimuth_degs, 3), bool(mm.is_slewing),
-                     bool(mm.is_tracking), c.state)
-                )  # fmt: skip
-                if c.state == "TRACKING":
-                    break
-                await asyncio.sleep(0.5)
-            RESULTS[f"parity_trace_{kind}"] = trace
-            assert c.state == "TRACKING", trace
-            s1 = await status(pwi)
-            m1 = s1.mount
-            await asyncio.sleep(6.0)
-            s2 = await status(pwi)
-            m2 = s2.mount
-            hold = radec_sep_arcsec(
-                m1.ra_j2000_hours, m1.dec_j2000_degs, m2.ra_j2000_hours, m2.dec_j2000_degs
+            res = await track_and_land(c, pwi)
+            res.update(
+                {
+                    "slewing_at_stop": bool(mid.is_slewing),
+                    "stop_to_target_deg": round(sep_stop_target / 3600.0, 2),
+                    "stop_to_start_deg": round(sep_start_stop / 3600.0, 2),
+                }
             )
-            from_stop = radec_sep_arcsec(
-                ms.ra_j2000_hours, ms.dec_j2000_degs, m1.ra_j2000_hours, m1.dec_j2000_degs
-            )
+            m2 = (await status(pwi)).mount
             to_target = sep_arcsec(m2.azimuth_degs, m2.altitude_degs, target_az, target_alt)
-            res = {
-                "slewing_at_stop": bool(mid.is_slewing),
-                "stop_to_target_deg": round(sep_stop_target / 3600.0, 2),
-                "stop_to_start_deg": round(sep_start_stop / 3600.0, 2),
-                "radec_drift_in_6s_after_track_arcsec": round(hold, 2),
-                "radec_stop_to_track_start_arcsec": round(from_stop, 1),
-                "final_to_target_deg": round(to_target / 3600.0, 2),
-                "returned_to_old_target": bool(to_target < 0.2 * 3600.0 < sep_stop_target),
-            }
+            res["final_to_old_target_deg"] = round(to_target / 3600.0, 2)
             RESULTS[f"parity_{kind}"] = res
             print(f"\nparity {kind}:", res)
             assert sep_stop_target > 1.0 * 3600.0, "stopped too close to the target to tell"
-            assert hold <= 3.0  # the RA/Dec of the TRACK moment is held
-            assert from_stop <= 60.0  # ... which is the stop moment (+ <= a few s of sky drift)
+            assert res["final_radec_err_arcsec"] <= 5.0, res  # lands on the TRACK-moment RA/Dec
             assert to_target > 0.5 * 3600.0  # and the mount did not go back to the old target
+            assert_no_false_stops(g)
             await make_stopped(c, pwi)
             await c.close()
 
@@ -410,16 +504,26 @@ def test_track_after_stopped_goto_holds_current_radec(pwi, tmp_path, kind):
         g.kill()
 
 
-def test_track_after_stop_outside_wrap_window_does_not_unwind(pwi, tmp_path):
-    """Found at the T3.3 gate: a goto that changed the axis-0 wrap window and was stopped
-    mid-slew leaves the axis outside the new window; a bare mount/tracking_on then makes the sim
-    slew (unwind) back into it. The gateway centres the window on the mount before TRACK."""
+def test_track_after_stop_outside_wrap_window_turns_and_lands(pwi, tmp_path):
+    """P19 (T3.3b): a goto that changed the axis-0 wrap window and was stopped mid-slew leaves the
+    axis outside the new window; a bare mount/tracking_on makes PWI4 turn the axis back into the
+    window (intended: it keeps the mount's turning room). After the turn the mount must be
+    TRACKING on the RA/Dec of the TRACK moment (<= 5 arcsec), and the safety monitor must not
+    have stopped the turn (the Sun is far, altitude stays above Lim EL)."""
+    # The real Sun must not matter (and PWI4 cuts slews short near it): run the whole sweep at an
+    # altitude >= 30 deg away from the Sun's altitude (the sweep covers all azimuths).
+    s0 = pwi.status()
+    sun_alt, _ = ephem().sun_altaz(site_of(s0))
+    base_alt = 20.0 if abs(20.0 - sun_alt) >= abs(72.0 - sun_alt) else 72.0
     pwi.mount_stop()
     pwi.mount_tracking_off()
-    pwi.mount_set_axis0_wrap_range_min(50.0)  # test infrastructure: axis 0 will read 230.5
-    pwi.mount_goto_alt_az(50.0, 230.5)
+    pwi.mount_goto_alt_az(base_alt, s0.mount.azimuth_degs)  # vertical move, then the az sweep
     time.sleep(1.0)
-    run(wait_stationary(pwi))
+    run(wait_arrived(pwi))
+    pwi.mount_set_axis0_wrap_range_min(50.0)  # test infrastructure: axis 0 will read 230.5
+    pwi.mount_goto_alt_az(base_alt, 230.5)
+    time.sleep(1.0)
+    run(wait_arrived(pwi))
     g = start_gateway(tmp_path, SUN_FAR)
     try:
 
@@ -428,26 +532,19 @@ def test_track_after_stop_outside_wrap_window_does_not_unwind(pwi, tmp_path):
             await c.wait_state("STOPPED", 8)
             a0 = (await status(pwi)).mount.axis0.position_degs
             assert abs(a0 - 230.5) < 1.0, a0
-            ack = await c.cmd("goto_altaz", {"alt": 58.0, "az": 310.56})  # long way: -49.4
+            ack = await c.cmd(
+                "goto_altaz", {"alt": base_alt + (8.0 if base_alt < 50 else -8.0), "az": 310.56}
+            )  # long way: -49.4
             assert ack["ok"], ack
             await asyncio.sleep(1.5)
             assert (await c.cmd("stop"))["ok"]
             await c.wait_state("STOPPED", 8)
             await wait_stationary(pwi)
-            ms = (await status(pwi)).mount
-            ack = await c.cmd("tracking", {"on": True})
-            assert ack["ok"], ack
-            await c.wait_state("TRACKING", 5)
-            await asyncio.sleep(3.0)
-            m = (await status(pwi)).mount
-            moved = abs(m.axis0.position_degs - ms.axis0.position_degs)
-            RESULTS["track_after_stop_outside_wrap"] = {
-                "axis0_at_stop": round(ms.axis0.position_degs, 2),
-                "axis0_3s_after_track": round(m.axis0.position_degs, 2),
-                "moved_deg": round(moved, 3),
-                "wrap_min_after": m.axis0_wrap_range_min_degs,
-            }
-            assert moved < 0.5, RESULTS["track_after_stop_outside_wrap"]
+            res = await track_and_land(c, pwi)
+            RESULTS["track_after_stop_outside_wrap"] = res
+            print("\nTRACK after a stop outside the wrap window:", res)
+            assert res["final_radec_err_arcsec"] <= 5.0, res
+            assert_no_false_stops(g)
             await make_stopped(c, pwi)
             await c.close()
 

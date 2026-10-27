@@ -17,6 +17,7 @@ export interface SequenceLike {
 export interface ControlSnapshotLike {
   state?: string | null
   state_reason?: string | null
+  warning?: string | null
   pwi4?: { reachable?: boolean | null } | null
   mount?: { connected?: boolean | null, alt?: number | null } | null
   axes?: Array<{ enabled?: boolean | null } | null> | null
@@ -31,7 +32,12 @@ export interface ControlSnapshotLike {
 export interface HomedInfo {
   state: 'homed' | 'not_homed' | 'overridden' | string
   since?: string | null
+  /** 'stalled': the gateway stopped the mount on a stalled axis; only a completed home clears it. */
+  reason?: 'stalled' | string | null
 }
+
+export const STALLED_REASON = 'Mount stalled; home it first'
+export const STALLED_TEXT = 'Mount stalled (axis not moving); it may be at a physical limit. Home the mount before further use.'
 
 export type LineTone = 'normal' | 'warn' | 'danger'
 
@@ -46,8 +52,6 @@ export const REFUSAL_TTL_MS = 12_000
 export const CODE_HOME_BLOCKED = 'home_blocked_confirm'
 
 export const TIP_TRACK_TARGET = 'Arrives in T4'
-export const TIP_JOG = 'Arrives in T3.4'
-export const TIP_GOTO = 'Arrives in T3.4'
 export const TIP_OTHER_WINDOW = 'Another window has control'
 
 export interface ControlButton {
@@ -69,8 +73,14 @@ export interface ControlView {
   home: ControlButton
   /** TRACK (A5b: tracks the current RA/Dec) with the G7 reason it is disabled. */
   track: ControlButton
+  /** GO TO (A5c-iv): opens the Go To modal. */
+  goto: ControlButton
+  /** JOG (A5c-iii): opens the Jog modal; same gate as GO TO. */
+  jog: ControlButton
   /** homed.state === 'not_homed' while connected: shows the NOT HOMED chip + inline actions. */
   notHomed: boolean
+  /** notHomed because an axis stalled: STALLED chip, HOME only (no Proceed anyway). */
+  stalled: boolean
   /** STOP is never disabled while the gateway link is up (accepted from any window). */
   stopEnabled: boolean
   /** Left Pointing Mode segment: the active "STOPPED" label, or the STOP button. */
@@ -113,6 +123,10 @@ export function statusLine(
   if (opts.holder === 'other') return { text: 'Controlled by another window', tone: 'normal' }
   if (s.pwi4?.reachable === false) return { text: 'PWI4 not running: CONNECT starts it', tone: 'normal' }
   if (s.mount?.connected && !isConnected(s)) return { text: 'Axes disabled: CONNECT enables them', tone: 'normal' }
+  if (isStalled(s)) {
+    const w = s.state_reason ?? s.warning // the gateway sends the stall text as state_reason (T3.3b)
+    return { text: w && /stalled/i.test(w) ? w : STALLED_TEXT, tone: 'danger' }
+  }
   if (isNotHomed(s)) return { text: 'Mount not homed: positions may be wrong', tone: 'warn' }
   if (isConnected(s) && s.state !== 'TRACKING') {
     const why = trackDisabledReason(s, { linkUp: true, holder: opts.holder })
@@ -127,6 +141,10 @@ const num = (v: unknown): v is number => typeof v === 'number' && Number.isFinit
 
 export function isNotHomed(s: ControlSnapshotLike | null): boolean {
   return isConnected(s) && s?.homed?.state === 'not_homed'
+}
+
+export function isStalled(s: ControlSnapshotLike | null): boolean {
+  return isNotHomed(s) && s?.homed?.reason === 'stalled'
 }
 
 /** Gateway Sun shortcut (safety.sun_shortcut): the whole Sun disc is below Lim EL and below the mount. */
@@ -148,7 +166,7 @@ export function trackDisabledReason(
   if (isBusy(s)) return 'Busy'
   if (!isConnected(s)) return 'Axes disabled'
   if (s.state === 'SLEWING') return 'Slewing'
-  if (s.homed?.state === 'not_homed') return 'Mount not homed'
+  if (s.homed?.state === 'not_homed') return s.homed.reason === 'stalled' ? STALLED_REASON : 'Mount not homed'
   const lim = s.limits?.lim_el_deg
   const alt = s.mount?.alt
   const sunAlt = s.sun?.alt
@@ -159,6 +177,20 @@ export function trackDisabledReason(
     const skip = num(sunAlt) && num(lim) && num(alt) && sunShortcut(sunAlt, lim, alt)
     if (!skip) return `Inside the Sun disc (${sunSep.toFixed(1)}° from the Sun)`
   }
+  return null
+}
+
+/** Why GO TO is disabled (G7), first match wins; null = enabled. A slew in progress does not block it (re-target). */
+export function gotoDisabledReason(
+  s: ControlSnapshotLike | null,
+  opts: { linkUp: boolean, holder: ControlHolder },
+): string | null {
+  if (!opts.linkUp || !s) return 'Gateway not reachable'
+  if (!s.mount?.connected) return 'Mount not connected'
+  if (opts.holder === 'other') return TIP_OTHER_WINDOW
+  if (isBusy(s)) return 'Busy'
+  if (!isConnected(s)) return 'Axes disabled'
+  if (s.homed?.state === 'not_homed') return s.homed.reason === 'stalled' ? STALLED_REASON : 'Mount not homed'
   return null
 }
 
@@ -208,7 +240,16 @@ export function buildControlView(
       const reason = trackDisabledReason(s, { linkUp, holder: opts.holder })
       return { enabled: reason === null, reason }
     })(),
+    goto: (() => {
+      const reason = gotoDisabledReason(s, { linkUp, holder: opts.holder })
+      return { enabled: reason === null, reason }
+    })(),
+    jog: (() => {
+      const reason = gotoDisabledReason(s, { linkUp, holder: opts.holder })
+      return { enabled: reason === null, reason }
+    })(),
     notHomed: linkUp && isNotHomed(s),
+    stalled: linkUp && isStalled(s),
     stopEnabled: linkUp && s?.pwi4?.reachable !== false,
     stopLabel: state === 'STOPPED',
     trackingLabel: state === 'TRACKING',

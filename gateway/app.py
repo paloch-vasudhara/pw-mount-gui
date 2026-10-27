@@ -5,12 +5,15 @@ import contextlib
 import json
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from typing import Any
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict
 
 from .audit import AuditLog
+from .commands import CommandError, validate_command
 from .config import Settings
 from .control import ControlService, Pwi4Writer
 from .ephem import Ephem
@@ -26,11 +29,20 @@ from .security import (
 )
 from .settings import Location, SecretStore, SettingsStore, SettingsUpdate, compute_site_check
 from .snapshot import site_key
-from .transforms import AltAzValues, TransformRequest
+from .transforms import TRANSFORM_FRAME, AltAzValues, TransformRequest
 
 VERSION = "0.1.0"
 AUTH_TIMEOUT_S = 2.0
 WS_UNAUTHORIZED = 4401
+
+
+CHECKABLE = frozenset({"goto_altaz", "goto_radec_j2000", "jog", "step", "wrap_turn"})
+
+
+class CheckRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    cmd: str
+    args: dict[str, Any]
 
 
 def with_control(msg: str, control: dict) -> str:
@@ -58,6 +70,11 @@ def create_app(
     control.resolved_az = safety.pop_target_az
     monitor = SafetyMonitor(safety, poller, control)
     control.motion_cleared = monitor.clear
+    monitor.jog_probe = control.jogc.probe  # T3.4c: commanded jog rate for the look-ahead / stall
+    poller.jog_provider = control.jogc.jog_info
+    poller.step_provider = control.jogc.step_info
+    poller.jog_limit_provider = control.jogc.limit_info
+    poller.turn_provider = control.jogc.turn_info
     control.home_check = safety.check_home  # T3.2: HOME gate (Sun path, site, Lim EL)
     control.homing_begin = monitor.begin_homing
     control.homing_end = monitor.end_homing
@@ -66,6 +83,7 @@ def create_app(
     poller.sequence_provider = control.seq.snapshot_info
     poller.homed_observer = control.homed.observe  # T3.3 not-homed guard
     poller.homed_provider = control.homed.info
+    poller.stall_message_provider = control.homed.stall_message
 
     def goto_started(cmd) -> None:
         plan = safety.take_plan(cmd)
@@ -170,8 +188,9 @@ def create_app(
 
     @app.post("/api/transform", dependencies=[Depends(require_auth)])
     def transform(req: TransformRequest) -> JSONResponse:
-        """H4 (T3.3): J2000 RA/Dec <-> apparent topocentric alt/az at an explicit time, no
-        refraction. Read-only (no control lock). Default site = PWI4's own site."""
+        """H4 (T3.3, T3.3b): J2000 RA/Dec <-> OBSERVED topocentric alt/az (refracted like PWI4's
+        reported alt/az, P18) at an explicit time. Read-only (no control lock). Default site =
+        PWI4's own site. The response states the frame in `frame`."""
         if not ephem.available:
             raise HTTPException(status_code=503, detail="ephemeris unavailable")
         if req.site is not None:
@@ -193,7 +212,25 @@ def create_app(
             "t_utc": t.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
             "site": {"lat": site[0], "lon": site[1], "height_m": site[2]},
             "result": result,
+            "frame": TRANSFORM_FRAME,
         }
+        return JSONResponse(body, headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/mount/check", dependencies=[Depends(require_auth)])
+    def check_goto(req: CheckRequest) -> JSONResponse:
+        """Q6 dry run: the verdict a goto would get from the gateway right now, without sending
+        anything to PWI4, taking the lock or writing the audit log. Every refusal that does not
+        depend on WHO sends it is evaluated; the control-lock holder is not (the panel shows
+        control separately)."""
+        if req.cmd not in CHECKABLE:
+            raise HTTPException(status_code=422, detail="not a checkable command")
+        try:
+            cmd = validate_command("check", req.cmd, req.args)
+        except CommandError as exc:
+            raise HTTPException(status_code=422, detail=exc.reason) from None
+        v = control.dry_check(cmd)
+        target = None if v.target is None else {"alt": v.target[0], "az": v.target[1]}
+        body = {"ok": v.reason is None, "reason": v.reason, "code": v.code, "target": target}
         return JSONResponse(body, headers={"Cache-Control": "no-store"})
 
     @app.websocket("/api/mount/ws")

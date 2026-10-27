@@ -108,6 +108,45 @@ class HomedInfo(BaseModel):
 
     state: str  # homed | not_homed | overridden
     since: str  # ISO 8601 UTC
+    # T3.3b: "stalled" = the stall guard stopped the mount (physical limit): only a completed
+    # home clears it, no override. null = the normal not-homed / homed / overridden states.
+    reason: str | None = None
+
+
+class JogInfo(BaseModel):
+    """A running jog (T3.4c). `origin` = how the mount was when the jog began: "stopped" (the
+    gateway turned tracking on for it) or "tracking" (a rate offset only). Informational only:
+    a jog always ends STOPPED."""
+
+    axis: int
+    dir: int
+    speed: float  # deg/s of the mount axis
+    origin: str
+
+
+class StepInfo(BaseModel):
+    axis: int
+    dir: int
+    size_arcmin: int
+
+
+class JogLimitInfo(BaseModel):
+    """T3.4e: an azimuth jog stopped (or was refused) at the axis-0 mechanical limit. `dir` = the
+    direction of the jog, `limit_deg` the mechanical limit, `turn_deg` the size of the wrap turn
+    that would continue the move, `est_s` the estimated duration of that turn."""
+
+    axis: int
+    dir: int
+    limit_deg: float
+    turn_deg: float
+    est_s: float
+
+
+class TurnInfo(BaseModel):
+    """T3.4e: a 360 deg wrap turn is running (axis-0 positions)."""
+
+    from_deg: float
+    to_deg: float
 
 
 class MountSnapshot(BaseModel):
@@ -128,6 +167,10 @@ class MountSnapshot(BaseModel):
     site_check: SiteCheck | None = None  # only when the site comes from Settings
     sequence: SequenceInfo | None = None
     homed: HomedInfo | None = None
+    jog: JogInfo | None = None  # T3.4c: null = no jog running
+    step: StepInfo | None = None  # T3.4c: null = no step running
+    jog_limit: JogLimitInfo | None = None  # T3.4e: null = no azimuth limit prompt
+    turn: TurnInfo | None = None  # T3.4e: null = no wrap turn running
 
 
 def site_key(result: PollResult) -> tuple[float, float, float] | None:
@@ -189,6 +232,10 @@ def build_snapshot(
     limits: Limits | None = None,
     sequence: SequenceInfo | None = None,
     homed: HomedInfo | None = None,
+    jog: JogInfo | None = None,
+    step: StepInfo | None = None,
+    jog_limit: JogLimitInfo | None = None,
+    turn: TurnInfo | None = None,
 ) -> MountSnapshot:
     """result = last good fetch (or the failed one). down_reason forces DISCONNECTED.
 
@@ -323,4 +370,8 @@ def build_snapshot(
         site_check=site_check,
         sequence=sequence,
         homed=homed if connected else None,
+        jog=jog if connected else None,
+        step=step if connected else None,
+        jog_limit=jog_limit if connected else None,
+        turn=turn if connected else None,
     )

@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import time
 from collections.abc import Callable
+from typing import Any
 
 import httpx
 
@@ -73,6 +74,14 @@ class Poller:
         # T3.3: the not-homed guard sees every fetch result and supplies the snapshot field.
         self.homed_observer: Callable[[PollResult, float], None] = lambda result, now: None
         self.homed_provider: Callable[[], HomedInfo | None] = lambda: None
+        # T3.3b: the stall warning (shown as state_reason while the mount is STOPPED + stalled).
+        self.stall_message_provider: Callable[[], str | None] = lambda: None
+        # T3.4c: the running jog / step (None = none).
+        self.jog_provider: Callable[[], Any] = lambda: None
+        self.step_provider: Callable[[], Any] = lambda: None
+        # T3.4e: the azimuth-limit prompt and the running wrap turn (None = none).
+        self.jog_limit_provider: Callable[[], Any] = lambda: None
+        self.turn_provider: Callable[[], Any] = lambda: None
 
     async def fetch_once(self, now_mono: float | None = None) -> PollResult:
         if self._client is None:
@@ -159,7 +168,13 @@ class Poller:
             limits=limits,
             sequence=self.sequence_provider(),
             homed=self.homed_provider() if live else None,
+            jog=self.jog_provider() if live else None,
+            step=self.step_provider() if live else None,
+            jog_limit=self.jog_limit_provider() if live else None,
+            turn=self.turn_provider() if live else None,
         )
+        if snap.homed is not None and snap.homed.reason == "stalled" and snap.state == "STOPPED":
+            snap.state_reason = self.stall_message_provider()
         self.latest = snap
         self.hub.publish(envelope(snap))
         return snap

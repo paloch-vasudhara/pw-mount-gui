@@ -4,12 +4,14 @@
 // later). The gateway decides everything; this panel shows its state, sequence progress and every
 // refusal reason (G7) on one status line.
 import { computed, ref } from 'vue'
+import GotoDialog from '@/components/mount/GotoDialog.vue'
+import JogDialog from '@/components/mount/JogDialog.vue'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { useMountStore } from '~/stores/mount'
 import {
   buildControlView, homedDialogSince, needsHomeConfirm, refusalFromAck,
-  TIP_GOTO, TIP_JOG, TIP_TRACK_TARGET,
+  TIP_TRACK_TARGET,
   type ControlSnapshotLike, type Refusal,
 } from '~/utils/mount-control'
 import type { CommandName } from '~/utils/mount-socket'
@@ -22,6 +24,8 @@ const refusal = ref<Refusal | null>(null)
 const confirm = ref<'disconnect' | 'no_home' | null>(null)
 const homeQuestion = ref('')
 const pending = ref(false)
+const gotoOpen = ref(false)
+const jogOpen = ref(false)
 
 const linkUp = computed(() => store.connection === 'open' && !store.linkStale)
 const view = computed(() => buildControlView(store.snapshot as ControlSnapshotLike | null, {
@@ -123,7 +127,11 @@ const TONE_CLASS = { normal: 'mc-tone-normal', warn: 'mc-tone-warn', danger: 'mc
       <!-- Pointing Mode (A5b): STOP is live (it also cancels a running sequence); TRACK = T3.3 -->
       <div class="mc-group" data-testid="mc-pointing">
         <span class="mc-legend">Pointing Mode</span>
-        <span v-if="view.notHomed" class="mc-chip" data-testid="mc-not-homed-chip" title="Mount not homed: positions may be wrong">NOT HOMED</span>
+        <span
+          v-if="view.stalled" class="mc-chip mc-chip-fault" data-testid="mc-stalled-chip"
+          title="Mount stalled: it may be at a physical limit. Home it before further use"
+        >STALLED — HOME REQUIRED</span>
+        <span v-else-if="view.notHomed" class="mc-chip" data-testid="mc-not-homed-chip" title="Mount not homed: positions may be wrong">NOT HOMED</span>
         <div class="mc-seg">
           <div v-if="view.stopLabel" class="mc-cell mc-active" data-testid="mc-stop-label">
             STOPPED
@@ -159,10 +167,16 @@ const TONE_CLASS = { normal: 'mc-tone-normal', warn: 'mc-tone-warn', danger: 'mc
           <button type="button" data-testid="mc-track-target" disabled :title="TIP_TRACK_TARGET">
             TRACK TARGET
           </button>
-          <button type="button" data-testid="mc-jog" disabled :title="TIP_JOG">
+          <button
+            type="button" data-testid="mc-jog" :disabled="!view.jog.enabled || pending"
+            :title="view.jog.reason ?? 'Jog or step the mount'" @click="jogOpen = true"
+          >
             JOG
           </button>
-          <button type="button" data-testid="mc-goto" disabled :title="TIP_GOTO">
+          <button
+            type="button" data-testid="mc-goto" :disabled="!view.goto.enabled || pending"
+            :title="view.goto.reason ?? 'Slew to coordinates'" @click="gotoOpen = true"
+          >
             GOTO
           </button>
         </div>
@@ -178,7 +192,7 @@ const TONE_CLASS = { normal: 'mc-tone-normal', warn: 'mc-tone-warn', danger: 'mc
           <button type="button" class="mc-take" data-testid="mc-inline-home" :disabled="!view.home.enabled || pending" @click="onHome">
             HOME
           </button>
-          <button type="button" class="mc-take" data-testid="mc-inline-override" :disabled="pending" @click="onOverride">
+          <button v-if="!view.stalled" type="button" class="mc-take" data-testid="mc-inline-override" :disabled="pending" @click="onOverride">
             PROCEED
           </button>
         </template>
@@ -191,14 +205,21 @@ const TONE_CLASS = { normal: 'mc-tone-normal', warn: 'mc-tone-warn', danger: 'mc
       </div>
     </div>
 
+    <GotoDialog v-model:open="gotoOpen" :gate-reason="view.goto.reason" />
+    <JogDialog v-model:open="jogOpen" :gate-reason="view.jog.reason" />
+
     <Dialog :open="homedSince !== null" @update:open="(v: boolean) => { if (!v) dismissHomed() }">
       <DialogContent :show-close-button="false" data-testid="mc-homed-dialog">
         <DialogHeader>
-          <DialogTitle>Mount not homed</DialogTitle>
-          <DialogDescription>Mount not homed — positions may be wrong.</DialogDescription>
+          <DialogTitle>{{ view.stalled ? 'Mount stalled' : 'Mount not homed' }}</DialogTitle>
+          <DialogDescription data-testid="mc-homed-text">
+            {{ view.stalled
+              ? 'The mount stopped because an axis was not moving; it may be at a physical limit. Home the mount before further use.'
+              : 'Mount not homed — positions may be wrong.' }}
+          </DialogDescription>
         </DialogHeader>
         <DialogFooter>
-          <Button variant="outline" data-testid="mc-homed-proceed" @click="homedProceed">
+          <Button v-if="!view.stalled" variant="outline" data-testid="mc-homed-proceed" @click="homedProceed">
             Proceed anyway
           </Button>
           <Button data-testid="mc-homed-home" @click="homedHome">
@@ -289,6 +310,7 @@ button.mc-cell:hover:not(:disabled), .mc-grid button:hover:not(:disabled) { back
   padding: 0 6px; background: var(--page-bg); color: #e0a63c; font-weight: 700; line-height: 1;
   font-size: clamp(10px, calc(var(--u) * 13), 13px); letter-spacing: 0.04em;
 }
+.mc-chip-fault { color: var(--danger); }
 .mc-tone-normal { color: var(--foreground); }
 .mc-tone-warn { color: #e0a63c; }
 .mc-tone-danger { color: var(--danger); }

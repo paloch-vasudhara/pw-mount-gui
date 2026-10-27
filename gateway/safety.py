@@ -6,6 +6,12 @@ Plugs into the T3.1a seams: `ControlService.check` (command gate) and `SafetyMon
 All alt/az and Sun maths use PWI4's own site (from /status), never the Settings location
 (O-SITE). Pure functions live at the top so T3.2 (HOME) and T3.5 (D-SUN) can reuse them.
 
+Frame (T3.3b, P18): every alt/az here is the mount's own frame, i.e. OBSERVED (refracted like
+PWI4's reported altitude). RA/Dec goto targets go through H4 with refraction (`Ephem.radec_j2000_
+altaz`), and the Sun (`Ephem.sun_altaz`, also the snapshot's sun and sun_distance) is refracted by
+the same model (tapered to 0 between -1 and -2 deg, so it never blows up near the horizon). The
+Sun shortcut (`sun_shortcut`) therefore compares refracted Sun altitude with Lim EL / mount alt.
+
 Test hook: the env var `PW_TEST_SUN_ALTAZ="alt,az"` pins the Sun to a fixed position. It exists
 ONLY for the automated tests (sim runs cannot be pointed at the real Sun) and is inert when
 unset; when set, the gateway audits `test_sun_override` at start so it cannot go unnoticed.
@@ -36,7 +42,12 @@ from .settings import (
 )
 
 KEEPOUT_DEG = SUN_KEEPOUT_DEG  # 15 deg
-LOOKAHEAD_S = 0.5  # monitor look-ahead on the measured velocity
+LOOKAHEAD_S = 0.5  # monitor look-ahead on the measured velocity (the minimum, see lookahead_s)
+# T3.4c: the look-ahead grows with speed so that the mount can still be STOPPED before a limit:
+# distance needed = v * STOP_LATENCY_S + v^2 / (2 * accel), i.e. v * lookahead_s(v, accel).
+# STOP_LATENCY_S budgets /status age (<= 0.1 s poll + HTTP), the 10 Hz monitor tick, the stop
+# request and the velocity-estimate lag (VEL_WINDOW_S); measured worst case ~0.3 s.
+STOP_LATENCY_S = 0.45
 VEL_WINDOW_S = 0.2  # velocity = position change over at least this long
 SLEW_TAU_DEFAULT_S = 0.5  # PWI4 slew time constant (P13) when status does not report it
 PATH_SAMPLE_S = 0.1
@@ -53,6 +64,19 @@ CORRIDOR_TOL_DEG = 2.0  # validated goto: allowed distance from the predicted pa
 ARRIVED_DEG = 0.2  # validated goto ends when the mount is this close to its target axes
 PLAN_STILL_S = 0.8  # ... or when it has not moved for this long (stopped by someone else)
 
+# Stall guard (T3.3b, P19a). An axis is "commanded to move" when its OWN distance to its target
+# is large (dist_to_target_arcsec; |target_mech_position - position| when that is not reported)
+# or, on a real mount, its setpoint velocity is non-zero. It stalls when, while commanded, its
+# position stays within STALL_POS_TOL_ARCSEC of where it was STALL_S ago. Per axis: an altitude
+# axis that arrived first has a ~0 target distance and is never "commanded". Healthy sidereal
+# tracking keeps the target distance at the follow error (a few arcsec), so it is never
+# commanded however slowly the axis turns (pole / zenith poses). Thresholds are from the
+# simulator; re-tune in the real-mount session.
+STALL_S = 2.5  # commanded and not moving for this long
+STALL_POS_TOL_ARCSEC = 1.0  # "not moving" = position within this of the reference
+STALL_CMD_DIST_ARCSEC = 900.0  # 0.25 deg: well above any follow / settle error
+STALL_CMD_SETPOINT_V = 0.05  # deg/s: a real mount's non-zero setpoint velocity also counts
+
 R_SITE = "Station location differs from PWI4's site"
 R_SUN = "Within 15° of the Sun"
 R_PATH_SUN = "Slew path passes within 15° of the Sun"
@@ -61,8 +85,40 @@ R_NO_AZ = "Target azimuth is outside the mount's mechanical range"
 R_CORRIDOR = "Mount left the validated slew path"
 
 
+def lookahead_s(speed: float, accel: float) -> float:
+    """Predictive look-ahead (s) for an axis moving at `speed` deg/s with deceleration `accel`
+    deg/s^2: the time over which a stop request issued now still has to be safe."""
+    return max(LOOKAHEAD_S, STOP_LATENCY_S + speed / (2.0 * max(accel, 1.0)))
+
+
+def jog_margin_deg(speed: float, accel: float) -> float:
+    """Stopping distance a jog at `speed` needs before any limit (= speed * look-ahead)."""
+    return speed * lookahead_s(speed, accel)
+
+
+def turn_duration_s(x0: float, x1: float, vmax: float, accel: float, tau: float) -> float:
+    """Estimated duration (s) of an axis move x0 -> x1 with the reported velocity / acceleration
+    and PWI4's exponential approach (P13): the same model the corridor plans use."""
+    path = simulate_axis(x0, x1, vmax, accel, tau)
+    return round((len(path) - 1) * PATH_SAMPLE_S, 1)
+
+
 def r_below(lim_el: float) -> str:
     return f"Below station limit elevation (Lim EL {lim_el:g}°)"
+
+
+def reason_code(reason: str) -> str | None:
+    """Stable machine token of a safety refusal (the dry-run check's `code`)."""
+    if reason.startswith("Below station limit elevation"):
+        return "below_lim_el"
+    return {
+        R_SITE: "site_mismatch",
+        R_SUN: "sun_target",
+        R_PATH_SUN: "sun_path",
+        R_NO_EPHEM: "no_ephemeris",
+        R_NO_AZ: "no_az",
+        "PWI4 not running / not reachable": "no_pwi4",
+    }.get(reason)
 
 
 # ------------------------------------------------------------------ pure functions
@@ -291,6 +347,70 @@ def monitor_decision(
     return None
 
 
+@dataclass
+class StallEvent:
+    axis: int
+    dist_arcsec: float
+    duration_s: float
+
+
+@dataclass
+class _AxisStall:
+    ref_pos: float | None = None
+    t0: float = 0.0
+
+
+class StallWatch:
+    """Per-axis stall detector (pure; fed one /status sample at a time, no I/O)."""
+
+    def __init__(self) -> None:
+        self._axes = [_AxisStall(), _AxisStall()]
+
+    def reset(self) -> None:
+        self._axes = [_AxisStall(), _AxisStall()]
+
+    @staticmethod
+    def commanded_dist_arcsec(ax: Any) -> float | None:
+        """Distance to the target when the axis is commanded to move, else None."""
+        dist = ax.dist_to_target_arcsec
+        if (
+            dist is None
+            and ax.target_mech_position_degs is not None
+            and ax.position_degs is not None
+        ):
+            dist = (ax.target_mech_position_degs - ax.position_degs) * 3600.0
+        sv = getattr(ax, "setpoint_velocity_degs_per_sec", None)
+        if dist is not None and abs(dist) > STALL_CMD_DIST_ARCSEC:
+            return abs(dist)
+        if sv is not None and abs(sv) > STALL_CMD_SETPOINT_V:
+            return abs(dist) if dist is not None else 0.0
+        return None
+
+    def update(
+        self, t: float, mount: Any, active: bool, jog_axis: int | None = None
+    ) -> StallEvent | None:
+        """`active` = the mount is slewing / tracking (and not in a sequence). Returns the first
+        stalled axis, or None. The reference restarts whenever the axis moves or is not
+        commanded. `jog_axis`: the axis a running jog drives (T3.4c): it counts as commanded
+        whatever its reported target distance, so a jog into a mechanical limit trips the guard."""
+        hit: StallEvent | None = None
+        for i, ax in enumerate((mount.axis0, mount.axis1)):
+            st = self._axes[i]
+            pos = ax.position_degs
+            dist = self.commanded_dist_arcsec(ax) if active and pos is not None else None
+            if dist is None and active and pos is not None and jog_axis == i:
+                dist = abs(ax.dist_to_target_arcsec or 0.0)
+            if dist is None:
+                st.ref_pos = None
+                continue
+            if st.ref_pos is None or abs(pos - st.ref_pos) * 3600.0 > STALL_POS_TOL_ARCSEC:
+                st.ref_pos, st.t0 = pos, t
+                continue
+            if t - st.t0 >= STALL_S and hit is None:
+                hit = StallEvent(i, dist, t - st.t0)
+        return hit
+
+
 def parse_sun_override(text: str | None) -> tuple[float, float] | None:
     if not text:
         return None
@@ -426,16 +546,54 @@ class SafetyEngine:
 
     def check(self, cmd: Command, ctx: CommandContext) -> str | None:
         name = cmd.name
-        if name not in ("goto_altaz", "goto_radec_j2000") and not (
+        if name not in ("goto_altaz", "goto_radec_j2000", "jog", "step", "wrap_turn") and not (
             name == "tracking" and cmd.args.get("on")
         ):
             return None  # stop / locks / tracking off: never gated here
         reason = self._check_motion(cmd, ctx)
         if reason:
+            ctx.code = reason_code(reason)
+        if reason and not ctx.dry:  # a dry run (POST /api/mount/check) leaves no trace
             self.audit.write(
                 "safety_refusal", client=ctx.conn_id, cmd=name, args=cmd.args, reason=reason
             )
         return reason
+
+    def _check_jog(
+        self,
+        cmd: Command,
+        ctx: CommandContext,
+        m: Any,
+        lim: float,
+        sun: tuple[float, float] | None,
+    ) -> str | None:
+        """Jog (and a step while TRACKING; a step from STOPPED is judged as a goto): refuse a
+        direction that leads straight into Lim EL or the Sun disc at the current pose, i.e. when
+        the mount could not be stopped in time (`jog_margin_deg`) or the step itself would end
+        inside. Moving away from a limit (recovery) is always allowed. The mount's own travel
+        limits and the wrap window are the gateway's (JogController.refusal)."""
+        axis, d = cmd.args["axis"], cmd.args["dir"]
+        alt, az = m.altitude_degs, m.azimuth_degs
+        if cmd.name == "jog":
+            ax = (m.axis0, m.axis1)[axis]
+            margin = jog_margin_deg(cmd.args["speed"], ax.acceleration_degs_per_sec_sqr or 20.0)
+        else:
+            margin = cmd.args["size_arcmin"] / 60.0
+        d_alt = d * margin if axis == 1 else 0.0
+        d_az = d * margin if axis == 0 else 0.0
+        if cmd.name == "step":
+            ctx.target = (alt + d_alt, (az + d_az) % 360.0)
+        if d_alt < 0.0 and alt + d_alt < lim:
+            return r_below(lim)
+        if sun is not None:
+            now = sun_sep(az, alt, sun)
+            n = 8
+            for k in range(1, n + 1):
+                f = k / n
+                sep = sun_sep(az + d_az * f, alt + d_alt * f, sun)
+                if sep <= KEEPOUT_DEG and sep < now - 1e-6:
+                    return R_SUN
+        return None
 
     def _check_motion(self, cmd: Command, ctx: CommandContext) -> str | None:
         sc = ctx.site_check
@@ -460,12 +618,18 @@ class SafetyEngine:
                 return R_SUN
             return None
 
-        if cmd.name == "goto_altaz":
+        if cmd.name in ("jog", "step"):
+            return self._check_jog(cmd, ctx, m, lim, sun if use_sun else None)
+
+        if cmd.name == "wrap_turn" and "target0" not in cmd.args:
+            return "PWI4 not running / not reachable"  # no turn plan (the status changed)
+        if cmd.name in ("goto_altaz", "wrap_turn"):
             t_alt, t_az = cmd.args["alt"], cmd.args["az"]
         else:
             if not self.ephem.available:
                 return R_NO_EPHEM
             t_alt, t_az = self.ephem.radec_j2000_altaz(site, cmd.args["ra_h"], cmd.args["dec_deg"])
+        ctx.target = (t_alt, t_az)
         if t_alt < lim:
             return r_below(lim)
         if use_sun and sun_sep(t_az, t_alt, sun) <= KEEPOUT_DEG:
@@ -475,13 +639,19 @@ class SafetyEngine:
         if None in (a0.position_degs, a1.position_degs):
             return None
         tgt0 = None
-        if None not in (a0.min_mech_position_degs, a0.max_mech_position_degs):
+        if cmd.name == "wrap_turn":
+            # T3.4e: the effective command carries the axis-0 target (the OTHER representation of
+            # the current azimuth). Judged exactly like a goto: Lim EL / Sun target above, the
+            # Sun PATH (the sweep along the whole altitude circle) below.
+            # TODO(T3.5 D-SUN): route the turn through the detour planner instead of refusing.
+            tgt0 = cmd.args["target0"]
+        elif None not in (a0.min_mech_position_degs, a0.max_mech_position_degs):
             tgt0 = axis0_target(
                 a0.position_degs, t_az, a0.min_mech_position_degs, a0.max_mech_position_degs
             )
             if tgt0 is None:
                 return R_NO_AZ
-        if cmd.name == "goto_radec_j2000":
+        if cmd.name == "goto_radec_j2000" and not ctx.dry:
             self._target_az[cmd.id] = t_az
             if len(self._target_az) > 32:
                 self._target_az.pop(next(iter(self._target_az)))
@@ -503,15 +673,16 @@ class SafetyEngine:
                 limit = KEEPOUT_DEG if start_sep > KEEPOUT_DEG else start_sep - 0.05
                 if low <= limit:
                     return R_PATH_SUN
-            self._plans[cmd.id] = ValidatedGoto(
-                start=start,
-                target=(tgt0, t_alt),
-                paths=paths,
-                duration_s=max(len(p) for p in paths) * PATH_SAMPLE_S,
-                start_sun_sep=start_sep,
-            )
-            if len(self._plans) > 32:
-                self._plans.pop(next(iter(self._plans)))
+            if not ctx.dry:
+                self._plans[cmd.id] = ValidatedGoto(
+                    start=start,
+                    target=(tgt0, t_alt),
+                    paths=paths,
+                    duration_s=max(len(p) for p in paths) * PATH_SAMPLE_S,
+                    start_sun_sep=start_sep,
+                )
+                if len(self._plans) > 32:
+                    self._plans.pop(next(iter(self._plans)))
         return None
 
 
@@ -531,6 +702,13 @@ class SafetyMonitor:
         self.stops = 0
         self.plan: ValidatedGoto | None = None
         self.homing: HomingWatch | None = None
+        self.stall = StallWatch()
+        self.stall_event: StallEvent | None = None  # set by tick(), consumed by _run()
+        self.stalls = 0
+        # T3.4c: (axis, dir, speed) of the running jog, or None (JogController.probe).
+        self.jog_probe: Any = lambda: None
+        self._stall_t = -1.0
+        self._last_stall_stop = -1e9
         self._task: asyncio.Task | None = None
 
     def begin_homing(self, verdict: HomeVerdict) -> None:
@@ -552,6 +730,7 @@ class SafetyMonitor:
         """New command / STOP / link loss: back to the predictive rules."""
         self.plan = None
         self.homing = None
+        self.stall.reset()  # a new command / STOP gets a fresh stall window
 
     def start(self) -> None:
         if self._task is None:
@@ -590,12 +769,32 @@ class SafetyMonitor:
             self._hist.append((t, m.altitude_degs, m.azimuth_degs, 0.0, 0.0))
         return st, t
 
+    def _check_stall(self, st: Any, t: float) -> None:
+        """Stall guard (T3.3b): fed once per new /status sample; sets `stall_event`.
+        Not evaluated during a HOME run (its path and fields are unknown, P12) or a connect /
+        disconnect sequence."""
+        if t == self._stall_t:
+            return
+        self._stall_t = t
+        m = st.mount
+        active = (
+            bool(m.is_slewing or m.is_tracking)
+            and self.homing is None
+            and not self.control.seq.active
+            and bool(m.axis0.is_enabled and m.axis1.is_enabled)
+        )
+        jog = self.jog_probe()
+        ev = self.stall.update(t, m, active, jog[0] if jog is not None else None)
+        if ev is not None:
+            self.stall_event = ev
+
     def tick(self) -> tuple[str, dict[str, float]] | None:
         """Evaluate once; returns the stop decision (None = fine). No I/O."""
         got = self._sample()
         if got is None:
             return None
-        st, _ = got
+        st, t_sample = got
+        self._check_stall(st, t_sample)
         vel = self.velocity()
         if vel is None:
             return None
@@ -626,13 +825,29 @@ class SafetyMonitor:
                 self.plan = None  # ends; the predictive rules take over (tracking, drift)
             else:
                 return validated_decision(m.altitude_degs, axes, plan, lim, sun, m.azimuth_degs)
-        return monitor_decision(m.altitude_degs, m.azimuth_degs, vel[0], vel[1], lim, sun)
+        v_alt, v_az = vel
+        jog = self.jog_probe()
+        if jog is not None:  # a running jog: judge by its commanded rate while the axis ramps up
+            ax, d, speed = jog
+            if ax == 1:
+                v_alt = d * max(speed, abs(v_alt))
+            else:
+                v_az = d * max(speed, abs(v_az))
+        fast = m.axis1 if abs(v_alt) >= abs(v_az) else m.axis0
+        look = lookahead_s(max(abs(v_alt), abs(v_az)), fast.acceleration_degs_per_sec_sqr or 20.0)
+        return monitor_decision(m.altitude_degs, m.azimuth_degs, v_alt, v_az, lim, sun, look)
 
     async def _run(self) -> None:
         while True:
             try:
                 decision = self.tick()
                 now = time.monotonic()
+                ev, self.stall_event = self.stall_event, None
+                if ev is not None and now - self._last_stall_stop >= STOP_REPEAT_S:
+                    self._last_stall_stop = now
+                    self.stalls += 1
+                    self.stall.reset()
+                    await self.control.stall_stop(ev.axis, ev.dist_arcsec, ev.duration_s)
                 if decision and now - self._last_stop >= STOP_REPEAT_S:
                     self._last_stop = now
                     self.stops += 1

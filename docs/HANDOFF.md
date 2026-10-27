@@ -1,4 +1,4 @@
-# Session handoff — updated 2026-10-22 end of session (T3.3 verified; user testing, then commits T3.2 + T3.3)
+# Session handoff — updated 2026-10-27 end of session (T3.3b + T3.4 user-checked; next T3.5 D-SUN)
 
 Read this first, then `docs/BUILD_PLAN.md` (§7 tracker + **resume point**, §6 task specs, §8 logs/findings), then `docs/logic_sheet.txt` as needed.
 
@@ -42,11 +42,23 @@ Read this first, then `docs/BUILD_PLAN.md` (§7 tracker + **resume point**, §6 
     - not-homed guard (`gateway/homed.py`, snapshot `homed`, command `homed_override`) + the dashboard dialog / NOT HOMED chip;
     - Pointing Mode STOP/TRACK live.
     - Log in BUILD_PLAN §8 "T3.3 log".
+  - T3.2 + T3.3 committed `96ef418`.
+  - **T3.3b + T3.4 (incl. T3.4d/e) user-checked 10-27; the user commits them right after this handoff** (check `git log`; if still uncommitted, ask before doing anything else).
+    - T3.3b:
+      - refraction = PWI4's model (Saemundsson × 0.9865, ≤ 0.46″ vs PWI4);
+      - P19 revert (PWI4's unwinding turn on `tracking_on` is intended);
+      - stall guard (per axis, 2.5 s frozen while far from its target → STOP + "STALLED — HOME REQUIRED").
+    - T3.4:
+      - Go To modal + `POST /api/mount/check` (shared verdict);
+      - Jog modal + `jog` / `jog_stop` / `step` (`gateway/jog.py`): JOG always ends STOPPED, STEP from TRACKING ends TRACKING;
+      - azimuth wrap slide + mechanical-limit prompt + `wrap_turn` (option B);
+      - a jog outside the wrap window re-centres it.
+    - Dev-proxy fix: `/api/transform` → gateway (`web/nuxt.config.ts`).
+    - Logs: BUILD_PLAN §8 "T3.3b / T3.4 / T3.4d / T3.4e log".
   - **Next:**
-    1. User check of T3.3 (restart the 8400 gateway first).
-    2. The user commits T3.2 + T3.3 together.
-    3. **T3.3b** (spec in BUILD_PLAN §6): refraction parity (P18), revert the wrap centring (P19, PWI4's turn is intended), stall guard (P19a: both axes, stall = no movement while the axis's own target difference is large). Q5 = PWI4's refraction model. Spec ready; dispatch right after the user's commit.
-    4. **T3.4** (Go To + Jog modals). Write the spec first.
+    1. **T3.5 D-SUN.** Spec first from the §4 design. It routes gotos, HOME and `wrap_turn`.
+    2. Phase 3 end = Tier 3 (full sim ×2, harness, full browser pass, the flaky list) → the Phase 3 user check.
+  - **Working method:** BUILD_PLAN §1 "Test tiers" (user-approved 10-27). Sub-tasks test only the changed areas; the full sim suite only at phase end; timeboxed briefs with progress notes.
   - The PWI4 cfg + app settings changes of 10-22 07:00–07:25 were the user's (moved the test Sun away from the home position); keep them.
   - **Real-mount checklist:** in BUILD_PLAN §7 under the resume point.
   - **The resume point is in BUILD_PLAN §7.**
@@ -83,8 +95,10 @@ Read this first, then `docs/BUILD_PLAN.md` (§7 tracker + **resume point**, §6 
 - Sim tests that keep clear of the REAL Sun depend on the time of day and the sim's start pose: use the "never closer than the start, end ≥ 35° clear" rule (`safe_target`). The Phase-1 test can leave the sim near the morning Sun.
 - Worker browser runs: start Nuxt with `NUXT_ANALYSIS_URL` pointing at a closed port unless the analysis service is needed. The default `/api` proxy hits the user's analysis service on 8410.
 - Shell scripting: long inline `python - <<EOF` heredocs with backticks/quotes can break bash; write the script to the scratchpad with the Write tool and run it.
+- New gateway REST routes outside `/api/mount` need a `devProxy` entry in `web/nuxt.config.ts` (T3.4d: `/api/transform` went to the analysis service in dev).
 - Vue prop wiring is not covered by unit tests (T3.3: `home-dialog` vs `homed-dialog`), so always do the real-browser gate.
 - `PW_TEST_SUN_ALTAZ` pins the Sun for safety only; the snapshot/UI keep the real Sun.
+- **Test tiers (10-27):** sub-tasks run only the touched units + new/changed sim tests once; the full sim ×2 only at phase end (BUILD_PLAN §1).
 - Python on this Windows box can't see Git Bash `/tmp` — use the session scratchpad or repo-relative paths.
 
 ## What exists (repo map)

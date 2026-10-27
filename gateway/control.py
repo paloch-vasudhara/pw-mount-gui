@@ -26,7 +26,7 @@ import httpx
 
 from .audit import AuditLog
 from .commands import MOTION_COMMANDS, SEQUENCE_COMMANDS, Command, CommandError, parse_command
-from .homed import R_NOT_HOMED, HomedGuard
+from .homed import R_NOT_HOMED, R_STALLED, HomedGuard
 from .hub import Hub
 from .poller import Poller
 from .pwi4_io import CONNECT_TIMEOUT_S, PollResult, fetch_status, new_client, parse
@@ -54,10 +54,37 @@ R_LINK_CANCELLED = "Cancelled: control link lost"
 R_WORKER_BUSY = "Another command is still running"
 R_SLEWING = "Mount is slewing; press STOP first"
 R_NOT_HOMED_STATE = "Mount is not in the not-homed state"
+# T3.4c jog / step
+R_JOG_SLEWING = "Slewing; press STOP first"
+R_STEP = "Step in progress"
+R_JOGGING = "Jog in progress; release first"
+R_WRAP = "Wrap out of range: re-home or Go To first"
+# T3.4e azimuth wrap handling
+R_AZ_LIMIT = "Azimuth at its mechanical limit: turn 360° or jog the other way"
+R_NO_ROOM = "No room for a 360° turn"
+R_TURN = "Turn in progress; press STOP first"
 # Commands refused while the mount is not homed (T3.3). HOME, STOP, DISCONNECT, tracking off and
 # the lock commands are never gated; a future jog joins this set.
-HOMED_GATED = frozenset({"goto_altaz", "goto_radec_j2000"})
+HOMED_GATED = frozenset({"goto_altaz", "goto_radec_j2000", "jog", "step", "wrap_turn"})
 CODE_HOME_BLOCKED = "home_blocked_confirm"  # disconnect: home is blocked, ask the user once
+_REASON_CODES: dict[str, str] = {
+    R_SHUTTING: "shutting_down",
+    R_STARTING: "starting",
+    R_NO_PWI4: "no_pwi4",
+    R_LINK_STOP: "link_stop",
+    R_NO_MOUNT: "no_mount",
+    R_SLEWING: "slewing",
+    R_NOT_HOMED: "not_homed",
+    R_STALLED: "stalled",
+    R_OTHER_HAS_CONTROL: "other_has_control",
+    R_JOG_SLEWING: "slewing",
+    R_STEP: "step_in_progress",
+    R_JOGGING: "jog_in_progress",
+    R_WRAP: "wrap_out_of_range",
+    R_AZ_LIMIT: "az_limit",
+    R_NO_ROOM: "no_room",
+    R_TURN: "turn_in_progress",
+}
 
 
 class Pwi4Error(Exception):
@@ -120,6 +147,11 @@ class Pwi4Writer:
     async def goto_alt_az(self, alt_degs: float, az_degs: float) -> Any:
         return await self._call("/mount/goto_alt_az", alt_degs=alt_degs, az_degs=az_degs)
 
+    async def mount_offset(self, **params: Any) -> Any:
+        """/mount/offset (T3.4c jog / step): axisN_set_rate_arcsec_per_sec, axisN_stop_rate,
+        axisN_add_arcsec, axisN_reset. Only moves a TRACKING mount (P10)."""
+        return await self._call("/mount/offset", **params)
+
     async def goto_ra_dec_j2000(self, ra_hours: float, dec_degs: float) -> Any:
         return await self._call("/mount/goto_ra_dec_j2000", ra_hours=ra_hours, dec_degs=dec_degs)
 
@@ -176,6 +208,21 @@ class CommandContext:
     status: Any | None  # latest fresh PWI4Status (None when PWI4 is unreachable / stale)
     snapshot: Any | None  # latest MountSnapshot
     site_check: Any | None
+    # Dry run (POST /api/mount/check): the safety hook must not audit or store a plan, and
+    # reports the target's observed (alt, az) in `target`.
+    dry: bool = False
+    target: tuple[float, float] | None = None
+    code: str | None = None  # stable token of the refusal kind, set by the hook
+
+
+@dataclass
+class MotionVerdict:
+    """What a motion command would get: `reason` None = allowed. `code` is a stable machine
+    token for the refusal kind (None when unclassified); `target` the observed (alt, az)."""
+
+    reason: str | None
+    code: str | None = None
+    target: tuple[float, float] | None = None
 
 
 CheckHook = Callable[[Command, CommandContext], str | None]
@@ -254,6 +301,9 @@ class ControlService:
         from .sequences import Sequencer  # local: sequences imports this module
 
         self.seq = Sequencer(self)
+        from .jog import JogController  # local: jog imports this module
+
+        self.jogc = JogController(self)
         self.homed = HomedGuard(audit)
         self.homed.connecting = lambda: (
             self.seq.active and self.seq.info is not None and self.seq.info.name == "connect"
@@ -365,6 +415,7 @@ class ControlService:
         if name == "release_control":
             if self.holder != conn_id:
                 return self._refuse(conn_id, cmd, R_NOT_HOLDER)
+            await self.jogc.release("release")  # a jog needs its keep-alive sender to hold control
             self._set_holder(None, "release_control")
             self._audit_cmd(conn_id, cmd, True, None)
             return self._ack(conn_id, cmd.id, name, True, None)
@@ -373,6 +424,8 @@ class ControlService:
             return self._sequence_command(conn_id, cmd)
         if name == "homed_override":
             return self._homed_override(conn_id, cmd)
+        if name in ("jog", "jog_stop", "step", "wrap_turn", "wrap_turn_cancel"):
+            return await self.jogc.handle(conn_id, cmd)
 
         # ---- motion commands
         reason = self._motion_refusal(conn_id, cmd)
@@ -418,6 +471,8 @@ class ControlService:
             return self._refuse(conn_id, cmd, R_NO_PWI4)
         if not status.mount.is_connected:
             return self._refuse(conn_id, cmd, R_NO_MOUNT)
+        if self.homed.stalled:
+            return self._refuse(conn_id, cmd, R_STALLED)  # T3.3b: only a completed home helps
         if not self.homed.blocking:
             return self._refuse(conn_id, cmd, R_NOT_HOMED_STATE)
         if self.holder is None:
@@ -480,13 +535,67 @@ class ControlService:
         return None, None
 
     def _motion_refusal(self, conn_id: str, cmd: Command) -> str | None:
+        return self._motion_verdict(cmd, conn_id).reason
+
+    def dry_check(self, cmd: Command) -> MotionVerdict:
+        """The verdict `cmd` would get right now from any window that holds (or can take)
+        control: the same rules as the real command, minus the lock-holder rule. Read-only."""
+        v = self._motion_verdict(cmd, None)
+        if v.target is None and cmd.name == "goto_radec_j2000":
+            v.target = self._observed_target(cmd)  # the target is useful beside a refusal too
+        elif cmd.name == "goto_altaz":
+            v.target = (cmd.args["alt"], cmd.args["az"])
+        return v
+
+    def _observed_target(self, cmd: Command) -> tuple[float, float] | None:
+        ephem = self.poller.ephem
+        site = self.poller.pwi4_site()
+        if site is None or not ephem.available:
+            return None
+        try:
+            alt, az = ephem.radec_j2000_altaz(site, cmd.args["ra_h"], cmd.args["dec_deg"])
+        except Exception:
+            return None
+        return (alt, az)
+
+    def _motion_verdict(self, cmd: Command, conn_id: str | None) -> MotionVerdict:
+        """THE verdict function of a motion command, shared by the real command (`conn_id` = the
+        sender, also audited by the safety hook) and the dry run (`conn_id` None: the lock-holder
+        rule is skipped and nothing is audited or planned)."""
+        dry = conn_id is None
+        code: str | None = None
+        reason = self._gateway_refusal(cmd, conn_id)
+        ctx = None
+        if reason is None:
+            snap = self.poller.latest
+            ctx = CommandContext(
+                conn_id or "", self.fresh_status(), snap, self.poller.current_site_check(), dry
+            )
+            reason = self.check(
+                self.jogc.effective(cmd) if cmd.name in ("step", "wrap_turn") else cmd, ctx
+            )
+            code = getattr(ctx, "code", None)
+        else:
+            code = self._code_of(reason)
+        return MotionVerdict(reason, code, ctx.target if ctx is not None else None)
+
+    def _code_of(self, reason: str) -> str | None:
+        if reason in _REASON_CODES:
+            return _REASON_CODES[reason]
+        if reason.startswith("Axis ") and reason.endswith(" disabled"):
+            return "axis_disabled"
+        if reason == self.seq.busy_reason():
+            return "sequence_busy"
+        return None
+
+    def _gateway_refusal(self, cmd: Command, conn_id: str | None) -> str | None:
         if self.shutting_down:
             return R_SHUTTING
         if not self.ready:
             return R_STARTING if self.poller.last_good is not None else R_NO_PWI4
         if self._link_busy:
             return R_LINK_STOP
-        if self.holder is not None and self.holder != conn_id:
+        if conn_id is not None and self.holder is not None and self.holder != conn_id:
             return R_OTHER_HAS_CONTROL
         if self.seq.active:
             return self.seq.busy_reason()
@@ -502,13 +611,12 @@ class ControlService:
         if self.homed.blocking and (
             cmd.name in HOMED_GATED or (cmd.name == "tracking" and cmd.args.get("on"))
         ):
-            return R_NOT_HOMED
+            return R_STALLED if self.homed.stalled else R_NOT_HOMED
         snap = self.poller.latest
         if cmd.name == "tracking" and cmd.args.get("on") and snap is not None:
             if snap.state == "SLEWING":
                 return R_SLEWING
-        ctx = CommandContext(conn_id, status, snap, self.poller.current_site_check())
-        return self.check(cmd, ctx)
+        return self.jogc.refusal(cmd, status)
 
     # ------------------------------------------------------------------ worker
 
@@ -541,6 +649,16 @@ class ControlService:
                 await self.writer.goto_alt_az(cmd.args["alt"], cmd.args["az"])
                 self.motion_commanded = True
                 self.goto_started(cmd)
+            elif cmd.name == "wrap_turn":
+                # T3.4e: reposition to the SAME alt/az through the other representation of axis
+                # 0: the wrap window is centred on the target representation so that PWI4's
+                # goto_alt_az picks it. The args are the effective command (JogController).
+                self.motion_cleared()
+                await self.writer.tracking_off()
+                await self.writer.set_axis0_wrap_range_min(cmd.args["target0"] - 180.0)
+                await self.writer.goto_alt_az(cmd.args["alt"], cmd.args["az"])
+                self.motion_commanded = True
+                self.goto_started(cmd)
             elif cmd.name == "goto_radec_j2000":
                 az = self.resolved_az(cmd)
                 if az is not None:
@@ -552,13 +670,10 @@ class ControlService:
             elif cmd.name == "tracking":
                 self.motion_cleared()
                 if cmd.args["on"]:
-                    # T3.3 (sim finding): after a goto stopped mid-slew the axis-0 position can
-                    # lie outside PWI4's wrap window; tracking_on then re-normalises it into the
-                    # window = an unwinding slew of up to 360 deg. Centre the window on where the
-                    # mount is, so TRACK holds the current pointing (Q1).
-                    st = self.fresh_status()
-                    if st is not None and st.mount.azimuth_degs is not None:
-                        await self._prepare_wrap(st.mount.azimuth_degs)
+                    # T3.3b (P19): tracking_on is sent as is. PWI4 itself normalises axis 0 into
+                    # its wrap window (an unwinding turn after a stopped wrap-changing goto); that
+                    # turn is intended and lands on the same RA/Dec. The safety monitor still
+                    # watches it (Lim EL / Sun).
                     await self.writer.tracking_on()
                     self.motion_commanded = True
                     self._audit_track_start(job.conn_id, cmd)
@@ -617,6 +732,7 @@ class ControlService:
                 job.future.set_result((False, reason))
             n += 1
         self.motion_cleared()
+        self.jogc.on_cancel(reason)
         if self.seq.active:  # connect / disconnect / home end with STOP, link loss, safety stop
             self.seq.cancel(reason)
             n += 1
@@ -713,6 +829,7 @@ class ControlService:
             cancelled=cancelled, total_ms=total_ms, **info,
         )  # fmt: skip
         self._spawn(self._confirm_after_stop(conn_id, cmd.id))
+        self._spawn(self.jogc.cleanup())  # a jog / step left rate offsets behind
         return self._ack(conn_id, cmd.id, "stop", True, None)
 
     async def safety_stop(self, reason: str, **details: Any) -> None:
@@ -730,6 +847,29 @@ class ControlService:
         )  # fmt: skip
         if ok:
             self._spawn(self._confirm_after_stop("safety", reason))
+            self._spawn(self.jogc.cleanup())
+
+    async def stall_stop(self, axis: int, dist_arcsec: float, duration_s: float) -> None:
+        """Stall guard (T3.3b, P19a): an axis commanded to move did not move. Stop like a safety
+        stop and set the stalled not-homed guard (no motion until a completed home). The guard
+        is set first, so it holds even if the stop cannot be delivered."""
+        t0 = time.perf_counter()
+        self.homed.stall(axis)
+        self.hub.republish_latest()
+        cancelled = self._cancel_all("Cancelled: mount stalled")
+        try:
+            info = await self._stop_requests()
+            ok = True
+        except Pwi4Error as exc:
+            info, ok = {"error": str(exc)}, False
+        self.audit.write(
+            "stall_stop", axis=axis, dist_arcsec=round(dist_arcsec, 1),
+            duration_s=round(duration_s, 2), delivered=ok, cancelled=cancelled,
+            total_ms=round((time.perf_counter() - t0) * 1000.0, 1), **info,
+        )  # fmt: skip
+        if ok:
+            self._spawn(self._confirm_after_stop("safety", "stall"))
+            self._spawn(self.jogc.cleanup())
 
     async def _confirm_after_stop(self, conn_id: str, cmd_id: str | None) -> None:
         res = await self._confirm_stopped(2.0)
@@ -755,6 +895,7 @@ class ControlService:
                 try:
                     result.update(await self._stop_requests())
                     result.update(await self._confirm_stopped(3.0))
+                    await self.jogc.cleanup()
                 except Pwi4Error as exc:
                     result.update(confirmed=False, error=str(exc))
             result["total_ms"] = round((time.perf_counter() - t0) * 1000.0, 1)

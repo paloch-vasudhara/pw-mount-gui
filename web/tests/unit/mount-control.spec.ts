@@ -256,3 +256,47 @@ describe('not-homed dialog show-once (Q3)', () => {
     expect(d(nh('A', { state: 'STOPPED' }))).toBe('A')
   })
 })
+
+describe('stalled variant of the not-homed guard (T3.3b)', () => {
+  const st = (over: Partial<ControlSnapshotLike> = {}, reason: string | null | 'absent' = 'stalled') =>
+    snap({
+      mount: { connected: true, alt: 40 },
+      homed: { state: 'not_homed', since: 'S', ...(reason === 'absent' ? {} : { reason }) },
+      ...over,
+    })
+
+  it('flags stalled, with the red status line and the stalled TRACK reason', () => {
+    const v = buildControlView(st(), up)
+    expect(v).toMatchObject({ notHomed: true, stalled: true })
+    expect(v.track.reason).toBe('Mount stalled; home it first')
+    expect(v.line?.tone).toBe('danger')
+    expect(v.line?.text).toMatch(/Home the mount before further use/)
+  })
+
+  it('uses the gateway stall text (state_reason) when it names the stall', () => {
+    const w = 'Mount stalled (axis 1 not moving); it may be at a physical limit. Home the mount before further use.'
+    expect(buildControlView(st({ state_reason: w }), up).line).toEqual({ text: w, tone: 'danger' })
+    expect(buildControlView(st({ warning: w }), up).line).toEqual({ text: w, tone: 'danger' })
+    expect(buildControlView(st({ warning: 'other' }), up).line?.text).not.toBe('other')
+  })
+
+  it('keeps the stalled reason in the same priority slot', () => {
+    const o = { linkUp: true, holder: 'none' as const }
+    expect(trackDisabledReason(st({ state: 'SLEWING' }), o)).toBe('Slewing')
+    expect(trackDisabledReason(st({ state: 'STOPPED', mount: { connected: true, alt: 5 } }), o)).toBe('Mount stalled; home it first')
+  })
+
+  it('absent or null reason is a plain not-homed', () => {
+    for (const r of ['absent', null] as const) {
+      const v = buildControlView(st({}, r), up)
+      expect(v).toMatchObject({ notHomed: true, stalled: false })
+      expect(v.track.reason).toBe('Mount not homed')
+      expect(v.line).toEqual({ text: 'Mount not homed: positions may be wrong', tone: 'warn' })
+    }
+  })
+
+  it('the dialog shows once per since for a stall too', () => {
+    expect(homedDialogSince(st(), { linkUp: true, dismissedSince: null })).toBe('S')
+    expect(homedDialogSince(st(), { linkUp: true, dismissedSince: 'S' })).toBeNull()
+  })
+})

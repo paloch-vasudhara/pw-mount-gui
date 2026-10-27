@@ -28,6 +28,8 @@ export type CommandName =
   | 'take_control' | 'release_control' | 'stop'
   | 'goto_altaz' | 'goto_radec_j2000' | 'tracking'
   | 'connect' | 'disconnect' | 'home' | 'homed_override'
+  | 'jog' | 'jog_stop' | 'step'
+  | 'wrap_turn' | 'wrap_turn_cancel'
 
 /**
  * Pending-command bookkeeping: each sent command gets a promise that settles with the matching

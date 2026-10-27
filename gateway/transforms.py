@@ -1,8 +1,21 @@
-"""H4 (T3.3): J2000 RA/Dec <-> topocentric alt/az with an EXPLICIT time.
+"""H4 (T3.3, refraction added in T3.3b): J2000 RA/Dec <-> topocentric alt/az, EXPLICIT time.
 
-Convention (P17, same as PWI4): the alt/az side is the *apparent* topocentric direction with
-precession, nutation, annual aberration and light deflection, and NO atmospheric refraction.
+Frame (P17 + P18, same as PWI4): the J2000 side is catalogue coordinates; the alt/az side is the
+*observed* topocentric direction = apparent (precession, nutation, annual aberration, light
+deflection) PLUS atmospheric refraction, exactly what PWI4 reports. `unrefracted=True` gives /
+takes the refraction-free apparent altitude (internal use). Azimuth is never refracted.
 `t_utc` is always passed in (no "now" inside); the site is `(lat_deg, lon_deg_east, height_m)`.
+
+Refraction model (P18, measured on the PWI4 simulator, T3.3b): Saemundsson's formula for the
+true altitude h (degrees) -> refraction R in arcseconds,
+    R = 60 * 1.02 * F / tan(h + 10.3 / (h + 5.11))      [deg inside the tan]
+with F = 0.9865 (PWI4's pressure/temperature scale, a constant: equals 1010 hPa / 10 C scaled by
+about 1018 hPa / 16 C). Fitted over true altitudes 3.6 .. 89 deg on three azimuth sets: residual
+vs PWI4 <= 1" (see test_transforms). No temperature / pressure inputs (decision Q5).
+Edges: R is clamped >= 0 (the formula turns slightly negative within 0.11 deg of the zenith) and
+is tapered linearly to 0 between h = -1 and h = -2 deg (it diverges at h = -5.11); below -2 deg
+there is no refraction. The taper keeps h -> observed altitude continuous and monotonic, so the
+exact inverse (Newton on the same function) always exists.
 
 The inverse undoes aberration by iterating on the apparent -> astrometric offset (a plain
 `from_altaz().radec()` leaves ~20" of aberration); it converges to < 1e-9" in a few passes.
@@ -20,8 +33,49 @@ from typing import Any
 
 Site = tuple[float, float, float]
 
+TRANSFORM_FRAME = "observed (refracted like PWI4)"  # stated in the /api/transform response
+
 MAX_ITER = 8
 CONVERGED_RAD = 1e-12  # ~2e-7 arcsec
+
+REFRACTION_FACTOR = 0.9865  # PWI4's pressure/temperature scale on Saemundsson (fitted, P18)
+REFRACTION_TAPER_TOP_DEG = -1.0  # full formula for true altitude >= this
+REFRACTION_TAPER_END_DEG = -2.0  # no refraction at or below this
+
+
+def _saemundsson_arcsec(h_deg: float) -> float:
+    arg = math.radians(h_deg + 10.3 / (h_deg + 5.11))
+    return max(0.0, 60.0 * 1.02 * REFRACTION_FACTOR / math.tan(arg))
+
+
+def refraction_arcsec(alt_true_deg: float) -> float:
+    """Refraction (arcsec, added to the true altitude) PWI4 applies at a true altitude."""
+    h = alt_true_deg
+    if h <= REFRACTION_TAPER_END_DEG:
+        return 0.0
+    if h >= REFRACTION_TAPER_TOP_DEG:
+        return _saemundsson_arcsec(h)
+    top = _saemundsson_arcsec(REFRACTION_TAPER_TOP_DEG)
+    span = REFRACTION_TAPER_TOP_DEG - REFRACTION_TAPER_END_DEG
+    return top * (h - REFRACTION_TAPER_END_DEG) / span
+
+
+def refract_alt(alt_true_deg: float) -> float:
+    """Observed (refracted) altitude, degrees, of a true (apparent, refraction-free) altitude."""
+    return alt_true_deg + refraction_arcsec(alt_true_deg) / 3600.0
+
+
+def unrefract_alt(alt_obs_deg: float) -> float:
+    """Exact inverse of `refract_alt` (Newton with a numeric slope; < 1e-9 deg)."""
+    h = alt_obs_deg
+    for _ in range(30):
+        f = refract_alt(h) - alt_obs_deg
+        if abs(f) < 1e-10:
+            break
+        d = 1e-4
+        slope = (refract_alt(h + d) - refract_alt(h - d)) / (2 * d)
+        h -= f / (slope if slope > 0.05 else 1.0)
+    return h
 
 
 def _vec(ra_rad: float, dec_rad: float) -> list[float]:
@@ -56,21 +110,40 @@ def _apparent_dir(obs_at: Any, ra_h: float, dec_deg: float) -> list[float]:
 
 
 def radec_j2000_to_altaz(
-    ra_h: float, dec_deg: float, t_utc: datetime, site: Site, *, ts: Any, earth: Any
+    ra_h: float,
+    dec_deg: float,
+    t_utc: datetime,
+    site: Site,
+    *,
+    ts: Any,
+    earth: Any,
+    unrefracted: bool = False,
 ) -> tuple[float, float]:
-    """Apparent topocentric (alt, az) in degrees of a J2000 RA/Dec (no refraction)."""
+    """Observed topocentric (alt, az) in degrees of a J2000 RA/Dec: refracted like PWI4's
+    reported alt/az (`unrefracted=True`: the apparent direction without refraction)."""
     from skyfield.api import Star
 
     t = ts.from_datetime(_aware(t_utc))
     star = Star(ra_hours=ra_h, dec_degrees=dec_deg)
     alt, az, _ = _observer(earth, site).at(t).observe(star).apparent().altaz()
-    return float(alt.degrees), float(az.degrees)
+    alt_deg = float(alt.degrees)
+    return (alt_deg if unrefracted else refract_alt(alt_deg)), float(az.degrees)
 
 
 def altaz_to_radec_j2000(
-    alt: float, az: float, t_utc: datetime, site: Site, *, ts: Any, earth: Any
+    alt: float,
+    az: float,
+    t_utc: datetime,
+    site: Site,
+    *,
+    ts: Any,
+    earth: Any,
+    unrefracted: bool = False,
 ) -> tuple[float, float]:
-    """J2000 (ra_h in [0, 24), dec_deg) whose apparent topocentric position is (alt, az)."""
+    """J2000 (ra_h in [0, 24), dec_deg) whose observed (refracted, like PWI4) topocentric
+    position is (alt, az); `unrefracted=True`: (alt, az) is the refraction-free direction."""
+    if not unrefracted:
+        alt = unrefract_alt(alt)
     t = ts.from_datetime(_aware(t_utc))
     at = _observer(earth, site).at(t)
     # The observed (apparent) direction in the GCRS axes.

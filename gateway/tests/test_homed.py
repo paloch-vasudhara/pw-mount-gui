@@ -128,7 +128,8 @@ def test_found_connected_mount_is_not_homed_and_refuses_motion(tmp_path):
     with running(homed=False) as (tc, fake, app):
         wait_for(lambda: homed_state(app) == "not_homed")
         h = homed_of(app)
-        assert set(h) == {"state", "since"} and h["since"].endswith("Z")
+        assert set(h) == {"state", "since", "reason"} and h["since"].endswith("Z")
+        assert h["reason"] is None  # T3.3b: only the stall guard sets a reason
         body = tc.get("/api/mount/status").json()
         assert body["homed"]["state"] == "not_homed"
         w = Win(tc)
@@ -392,9 +393,10 @@ def test_tracking_on_refusals_below_lim_el_and_in_sun_disc(monkeypatch, tmp_path
     assert len(refusals) >= 1 and all(r["cmd"] == "tracking" for r in refusals)
 
 
-def test_tracking_on_centres_the_wrap_window_on_the_current_axis(tmp_path):
-    """After a goto stopped mid-slew the axis can lie outside PWI4's wrap window; TRACK sets the
-    window around the current position first so tracking_on cannot unwind the mount."""
+def test_tracking_on_is_sent_as_is_without_wrap_centring(tmp_path):
+    """T3.3b (P19 revert): after a stopped wrap-changing goto the axis can lie outside PWI4's wrap
+    window; PWI4's own unwinding turn on tracking_on is intended, so TRACK must not touch the
+    wrap window (the T3.3 centring was removed)."""
     fake = FakePwi4()
     fake.set(
         mount__azimuth_degs=200.0,
@@ -405,8 +407,6 @@ def test_tracking_on_centres_the_wrap_window_on_the_current_axis(tmp_path):
         w = Win(tc)
         assert w.send("tracking", {"on": True})["ok"]
         p = paths(fake)
-        assert p.index("/mount/set_axis0_wrap_range_min") < p.index("/mount/tracking_on")
-        assert [q for c, q in fake.writes if c == "/mount/set_axis0_wrap_range_min"] == [
-            {"degs": "20.0"}
-        ]
+        assert "/mount/tracking_on" in p
+        assert "/mount/set_axis0_wrap_range_min" not in p
         w.close()
