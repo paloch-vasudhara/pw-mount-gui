@@ -680,6 +680,12 @@ class SafetyEngine:
 
     def check(self, cmd: Command, ctx: CommandContext) -> str | None:
         name = cmd.name
+        if name == "track_object":  # T4.1: only the site gate here; the pass rules are trackcheck
+            sc = ctx.site_check
+            if sc is not None and sc.ok is False:
+                ctx.code = reason_code(R_SITE)
+                return R_SITE
+            return None
         if name not in ("goto_altaz", "goto_radec_j2000", "jog", "step", "wrap_turn") and not (
             name == "tracking" and cmd.args.get("on")
         ):

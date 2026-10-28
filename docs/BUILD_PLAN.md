@@ -1168,6 +1168,93 @@ Runs after the user commits T3.2 + T3.3, before T3.4.
 - the real browser for T3.5d only.
 - **Real-mount checklist:** custom-path following on the L-350; the homing path vs the home-pose route.
 
+### T4.1 — TRACK OBJECT rules: pass check + live button verdict (spec, 2026-10-28)
+
+**Goal:** the gateway decides whether a satellite can be tracked right now (A1a button rules + A1d step 1), and the Track Info card shows that verdict live: TRACK OBJECT enabled, or disabled with the reason (G7). The track workflow itself (pre-position, `follow_tle`, stop at Lim EL, D-SUN for track segments) is T4.2; in T4.1 an enabled button does nothing yet.
+
+**User decisions (10-28):**
+- **Q13 TLE source:** the gateway fetches the TLE from the analysis service by NORAD ID and caches it. The browser only ever sends the NORAD ID.
+- **Q14 Sun at start:** sheet rule kept. Disabled while the object is within 15° of the Sun. A pass that crosses the Sun later stays trackable (D-SUN detour in T4.2).
+- **Q15 minimum time:** disabled when less than **30 s** of the pass remains above Lim EL (PWI4 needs 10–16 s to acquire, P6).
+- **Q16 stale TLE (> 30 d):** trackable; the stale badge (T4.3) warns. The verdict returns `tle_age_days`.
+
+**1. TLE client, `gateway/tle.py`:**
+- New setting `PW_ANALYSIS_URL` (default `http://127.0.0.1:8410`) in `gateway/config.py`.
+- `TleSource.get(norad)` → `GET {analysis}/api/sats/{norad}` → `{name, line1, line2, epoch, tle_age_days}`; sync httpx, timeout 2 s.
+- Cache 10 min per NORAD; a 404 is cached for 30 s; a failure is not cached.
+- Errors: 404 → "Satellite not found or decayed" (G6); timeout / connection error / 5xx → "Satellite data unavailable".
+- Tests use an injected `httpx.MockTransport` and never the user's 8410.
+- In web-app mode (remote analysis + server token) the auth is T6.2's job.
+
+**2. Pass maths, `gateway/passes.py` (pure, no I/O):**
+- `compute_pass(line1, line2, site, lim_el, t_unix, sun_fn) -> PassInfo`. The site is PWI4's (O-SITE). skyfield `EarthSatellite` (python-sgp4 underneath, P6 agreement < 0.04°) with **geometric** alt/az: same as the card and the chunks, slightly stricter than PWI4's refracted altitude (P18, the safe direction).
+- **The current pass:**
+  - search back up to 12 h for the rise (alt crosses 0° upward) and forward up to 12 h for the set;
+  - coarse sampling, vectorised (step ≤ 10 s);
+  - every crossing refined by bisection to ≤ 0.1 s;
+  - the peak refined to ≤ 0.1 s / 0.001°;
+  - no set within 12 h (GEO / HEO / long MEO) → `t_set = None` (continuous).
+- **Fields** (Unix s, or `None` when not applicable):
+  - `t_rise`, `t_in` (first upward Lim EL crossing in this pass), `t_peak`, `peak_alt`, `t_out` (downward Lim EL crossing), `t_set`;
+  - `alt`, `az`, `rising` (alt increasing now), `sun_sep` (the object now vs the Sun).
+- **Continuous objects:** for one that never sets, the peak is the highest altitude in the 12 h forward window, and `t_in` / `t_out` are the Lim EL crossings inside it (None if none).
+- **Budget:** ≤ 30 ms per call for any object class on this PC.
+- **Cache:** per (NORAD, TLE epoch, site, Lim EL), reused until `t_set` passes or 60 s go by. The 1 Hz checks only re-evaluate `alt` / `az` / `sun_sep` / the rules.
+
+**3. Rules, `gateway/passes.py` `track_verdict(info, now) -> (reason, code, phase)`:** pure. The first failing row wins.
+
+| # | Condition | Reason (G7) | code |
+|---|---|---|---|
+| 0 | the existing motion guards (`_gateway_refusal`: PWI4, mount connected, start-up, link stop, not homed / stalled, site mismatch, slewing / routing, jog) | as today | as today |
+| 1 | TLE fetch failed | "Satellite not found or decayed" / "Satellite data unavailable" | `tle_missing` / `tle_unavailable` |
+| 2 | `alt < 0` | "Below the horizon" | `below_horizon` |
+| 3 | `sun_sep < 15` (the Sun shortcut applies as for gotos) | "Within 15° of the Sun" | `sun` |
+| 4 | the pass never reaches Lim EL (`peak_alt < lim_el`) | "Pass peaks below the station limit elevation" | `peak_below_limit` |
+| 5 | `alt < lim_el` and already past the peak | "Setting below the station limit elevation" | `setting` |
+| 6 | time left above Lim EL `< 30 s`: `t_out − max(now, t_in)`, ∞ when `t_out` is None | "Pass ends in under 30 s" | `pass_too_short` |
+| ✓ | `alt ≥ lim_el` → `phase = "track"`; else (rising toward Lim EL) → `phase = "pre_position"` | — | — |
+
+Notes:
+- **G5:** tracking another object is not a refusal (A1e: B replaces A). The caller decides in T4.2.
+- **The Lim EL monitor margin** is not added to the rule; T4.2 decides where the track starts and stops.
+
+**4. Check endpoint:**
+- `track_object {norad:int}` added to the strict command schemas (`gateway/commands.py`) and to `CHECKABLE`.
+- `POST /api/mount/check` answers `{ok, reason, code, target, detour: null, pass, tle_age_days}`:
+  - `target` = the object's alt/az now;
+  - `pass` = the fields above plus `phase`.
+- **The real WS `track_object` command** in T4.1: validated, then refused with "Object tracking arrives in T4.2" (code `not_available`). Never sent to PWI4, not audited as motion.
+
+**5. Web (A1a), `TrackCard.vue`:**
+- While an object is selected, the card polls `/api/mount/check` (`track_object`) at 1 Hz, beside the state poll. Use a time-limited fetch; a gateway that does not answer → disabled "Gateway not responding".
+- **TRACK OBJECT:**
+  - enabled when `ok`;
+  - otherwise disabled (the grey style as today), with `title` = the reason, plus a one-line muted reason under the button. The reason line must fit the 1280×600 @1.5 panel (`--u` sizing); drop to the tooltip only if it does not fit.
+- **The click** is a no-op in T4.1; T4.2 sends `track_object`.
+- **A pure helper `utils/track-verdict.ts`** maps the check answer to `{enabled, reason}` (vitest).
+- No countdown yet (T4.2); no stale badge yet (T4.3).
+
+**Must not touch:** `pwi4/`, ssa-toolkit, `docs/`, `analysis/` (its `/api/sats/{norad}` already returns `tle_line1/2`), PWI4 settings. No commits. Throwaway ports only; never the user's 3200 / 8400 / 8410.
+
+**Briefs:**
+
+| Brief | Kind | Scope | Timebox |
+|---|---|---|---|
+| **T4.1a** | gateway, unit tests only | `tle.py`, `passes.py`, the command schema, `CHECKABLE` + check fields, the WS refusal. Tests:<ul><li>`test_passes.py`: crossings vs a dense 0.1 s brute force ≤ 0.2 s for a LEO pass, a low pass peaking below Lim EL, a MEO and a GEO TLE (fixtures in the test file);</li><li>the rule table, one test per row, on synthetic `PassInfo` incl. edge cases (exactly 30 s left, peak exactly at Lim EL, `t_out` None);</li><li>`test_tle.py` with `MockTransport`: cache, 404 cache, timeout;</li><li>check-endpoint wiring with FakePwi4: the mount guards still win.</li></ul>Then the full non-sim pytest once + ruff | 90 min |
+| **T4.1b** | web | `utils/track-verdict.ts` + vitest; `TrackCard.vue` polling + button state + reason line; typecheck + lint + touched vitest | 45 min |
+
+**Gate (Tier 2):**
+- Review both diffs against this spec.
+- An independent spot check, with throwaway analysis + gateway and the local DB:
+  - 5 real objects (2 LEO in or near a pass, 1 MEO, 1 GEO, 1 below the horizon): `t_in` / `t_out` / `peak_alt` vs a direct skyfield brute force, ≤ 1 s and ≤ 0.01°;
+  - the verdict matches the rule table;
+  - check latency ≤ 50 ms when cached.
+- Real browser (UI changed), one pass at 1920 and at 1280×600 @1.5:
+  - an enabled card;
+  - a disabled one showing its reason (below the horizon, peak below the limit);
+  - the analysis service stopped → "Satellite data unavailable".
+- No sim test is needed (no PWI4 motion). The check endpoint's mount guards are covered by the FakePwi4 tests.
+
 ---
 
 ## 7. Progress tracker
@@ -1197,7 +1284,7 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | T3.3b | ✅ | ✅ 10-27 | ✅ 10-27 | ✅ 10-27 | ✅ 10-27 (with T3.4) | refraction parity (P18), keep PWI4 wrap turn (P19 revert), stall guard (P19a); spec ready (Q5 = PWI4's model) |
 | T3.4 | ✅ | ✅ 10-27 | ✅ 10-27 | ✅ 10-27 | ✅ 10-27 (incl. T3.4d/e) | a: Go To modal + `/api/mount/check` dry run; b: PWI4 jog recording + rate probe (P20); c: Jog modal + jog/step (option A). First task under the new test tiers |
 | T3.5 | ✅ | ✅ 10-27 | ✅ 10-28 | ✅ 10-28 | ✅ 10-28 (commit with the Phase 3 close) | D-SUN: a probe (P21), b planner, c wiring, d/f web, e sim tests (+ turn-watcher fix); browser pass 10-28 |
-| T4.1 | ⬜ | | | | | |
+| T4.1 | ✅ | ✅ 10-28 | ✅ 10-28 | ✅ 10-28 | pending (visual check at :3200) | a: TLE client + pass maths + rules + check endpoint (real TLEs: crossings 0.00 s, peak ≤ 0.005° vs skyfield); b: live TRACK OBJECT verdict + reason line on the card (browser pass 1920 + 1280×600 @1.5) |
 | T4.2 | ⬜ | | | | | |
 | T4.3 | ⬜ | | | | | |
 | T5.1 | ⬜ | | | | | O4 |
@@ -1208,7 +1295,7 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | T6.3 | ⬜ | | | | | |
 
 **Resume point (2026-10-28, Phase 3 closed):** Phases 0–2 committed; T3.1 `92bd389`; T3.2 + T3.3 `96ef418`; T3.3b + T3.4 `06f961b`. **T3.5 + the Phase 3 end (Tier 3) verified 10-28; the user commits them together as the Phase 3 close.** Next:
-1. **Phase 4 (Tracking):** T4.1 spec first, from §5 and the logic sheet. T4.2 includes D-SUN for track segments (§4 step 4; the planner in `gateway/dsun.py` is reusable).
+1. **Phase 4 (Tracking):** T4.1 spec written 10-28 (§6, Q13–Q16 answered); T4.1 ✅ verified 10-28 (§8 T4.1a / T4.1b logs); the user's visual check at :3200 next, then the T4.2 spec. T4.2 includes D-SUN for track segments (§4 step 4; the planner in `gateway/dsun.py` is reusable).
 2. **The real-mount session** (user) whenever available: the checklist below plus D-SUN custom-path following (10°/s arcs, 15°/s straights) and HOME routing vs the real homing path.
 - **Real-mount session checklist** (the user's first session on the real L-350; homing + jog will be tested together):
   - PWI4's real jog behaviour (does a release keep tracking? speeds? P20; option A provisional);
@@ -1248,6 +1335,7 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | 2026-10-20 | T1.1 | WebSocket can't pass Nitro devProxy (HTTP only) → in dev the page connects straight to the gateway (`runtimeConfig.public.gatewayWs`); token fetch stays proxied; prod = same-origin (gateway serves the app) |
 | 2026-10-20 | A4-i | **Red warnings** (user): Status red on FAULT; Sun Distance red when ≤ 15° (green > 15°). Implemented in T1.4 |
 | 2026-10-27 | T3.4e | Azimuth jog across PWI4's wrap edge swung 360° silently. Option B: the gateway slides PWI4's wrap window along with an azimuth jog (no turn while the axis has mechanical room, sim ±300°); near the real mechanical limit the jog stops with a margin and prompts "turn 360° / stay"; Turn = a goto-like validated reposition (pad dimmed, STOP available; D-SUN routing in T3.5 like gotos); Stay = stop at the limit, prompt again on the next jog that way | user |
+| 2026-10-28 | T4.1 Q13–Q16 | TLE fetched by the gateway from the analysis service by NORAD ID (`PW_ANALYSIS_URL`), the browser sends only the ID; TRACK OBJECT disabled while the object is within 15° of the Sun (later Sun crossings → D-SUN in T4.2); disabled with < 30 s left above Lim EL; stale TLEs (> 30 d) trackable with the badge | user |
 | 2026-10-27 | T3.5 Q10–Q12 | D-SUN HOME routing only when the mount completed a home this session (pose trusted); otherwise skip/confirm as today. Go To: SLEW enabled with a detour note. State during a detour: SLEWING + "Avoiding the Sun" | user |
 | 2026-10-27 | T3.4 user check | JOG mode always ends STOPPED (also from TRACK: jog = move to a place); STEP from TRACKING always ends TRACKING (step = offset a track; re-enable tracking if PWI4 dropped it). Jog STEP-running buttons dimmed solid, not translucent. Go To: a click anywhere in a group activates it; computed local El red for a failing celestial target; the inactive group live-updates after edits (bug: it did not). Go To + Sun guard: user-verified clean | user |
 | 2026-10-27 | process | Test tiers: sub-tasks run only the touched units + new/changed sim tests once (non-sim full pytest once); the full sim suite ×2 + full browser pass only at the end of a main phase; timeboxes; progress notes; split mixed sub-tasks | user |
@@ -1866,6 +1954,76 @@ _Differences between the as-built app and the logic sheet / concept renders, wit
     - supervisor random check (3000 slews, between-point interpolation): min Sun separation 15.949°, max rate 15.00°/s, plan ≤ 34 ms;
     - D-SUN sim tests + the two routed-path sim tests once: 9/9. Local detour **10.1 s planned / 11.4 s actual (was 19.4 / 20.5)**, min Sun separation 15.882° (target ≥ 15.5), arrival 0.0002°.
   - **Real-mount checklist:** custom-path following at 10 / 15°/s with the real acceleration.
+
+### T4.1a log (2026-10-28)
+
+**Worker (Sonnet), about 19 min:**
+- New: `gateway/tle.py` (`TleSource`), `gateway/passes.py` (`compute_pass`, `refresh_now`, `track_verdict`), `gateway/trackcheck.py` (`TrackChecker`, the pass cache).
+- Edited: `config.py` (`analysis_url` / `PW_ANALYSIS_URL`), `commands.py` (`track_object`, a motion command), `control.py` (homed-gated; the slewing refusal like `tracking on`; WS refusal "Object tracking arrives in T4.2" / `not_available`), `jog.py` (a jog / step / turn in progress refuses it), `safety.py` (site gate only), `ephem.py` (`timescale`), `app.py` (`CHECKABLE`, the check fields).
+- 59 new unit tests (passes 21, tle 13, check endpoint 25). Full non-sim suite 546 passed / 67 skipped; ruff clean.
+- **Deviations (accepted):**
+  - The coarse 12 h scan uses sgp4 + a GMST rotation (≈ 0.005° from skyfield; skyfield costs 35 µs per sample). Every crossing and the peak is then re-evaluated with skyfield on a 0.5 s grid.
+  - Below the horizon: no next pass is searched.
+  - Row 5 also counts "falling now" as past the peak (never-setting objects).
+  - `track_verdict(info, now, lim_el)`.
+  - The Sun comes from `safety.sun_altaz`, so `PW_TEST_SUN_ALTAZ` works.
+  - Leap-second bug caught: `_times` builds skyfield times from the array's own day.
+
+**Supervisor Tier 2:**
+- **Diff review vs the spec:**
+  - row 0 wins, and no TLE fetch is made then;
+  - other checkable commands keep their old body;
+  - the WS refusal comes before the lock / queue;
+  - thread-safe caches.
+- Re-ran the new + touched tests (139 passed) and ruff (clean).
+- **Spot check** (supervisor script, session scratchpad): throwaway analysis on 18710 with the local DB, PWI4 sim site (0.12, 115.92), Lim EL 15, no PWI4. Independent skyfield brute force (1 s + interpolation, peak at 0.1 s):
+
+| Object | NORAD | Verdict | Crossings vs ref | Peak vs ref | First / cached ms |
+|---|---|---|---|---|---|
+| LEO above Lim EL | 25982 | ok, `track` | rise / in / out / set 0.00 s | 0.01 s, 0.000° | 45 (incl. TLE fetch) / 4.0 |
+| LEO low, rising | 2872 | `peak_below_limit` (peak 12.30°) | rise / set 0.00 s | 0.01 s, 0.000° | 14.5 / 3.9 |
+| LEO below horizon | 900 | `below_horizon` | — | — | 9.4 / 3.9 |
+| MEO (never sets in 12 h) | 2866 | ok, `track` | — | peak at the 12 h window edge (ref grid 10 s), 0.005° | 19.6 / 3.9 |
+| GEO class | 20253 | ok, `track` | — | 0.01 s, 0.000° | 20.0 / 3.9 |
+
+- **Notes for T4.2:**
+  - An object with several Lim EL dips inside one above-horizon pass (an HEO) can report a `t_out` before now. `track_verdict` would then say "Pass ends in under 30 s". This is rare; T4.2's track segments should take the next `t_out` after now.
+  - The pre-position case (rising below Lim EL, peak above it) was not live during the spot check. It is covered by the unit tests and will be seen in the T4.2 sim passes.
+
+### T4.1b log (2026-10-28)
+
+**Worker (Sonnet), about 2 min:**
+- New: `web/app/utils/track-verdict.ts` (`parseTrackVerdict`, `UNREACHABLE_VERDICT`) and `tests/unit/track-verdict.spec.ts` (13 cases).
+- `TrackCard.vue`:
+  - polls `POST /api/mount/check` (`track_object`) at 1 Hz through `useGatewayApi` (5 s request timeout; a tick is skipped while one is in flight; a generation counter drops answers of a stale selection);
+  - button enabled (green gradient) or grey, with `data-enabled`;
+  - the reason as the tooltip and a muted one-line `track-reason` (ellipsis);
+  - the click is a no-op until T4.2.
+- typecheck 0, lint 0 errors (11 old warnings), vitest 406.
+
+**Supervisor Tier 2:**
+- Diff review OK.
+- **Browser pass** (supervisor script, session scratchpad `t41b_gate/`):
+  - throwaway analysis 18710 (local DB) + gateway 18733 (`PW_ANALYSIS_URL` → 18710, Sun pinned −30°) + Nuxt 13270;
+  - the PWI4 sim connected and stopped as test infrastructure, disconnected again afterwards;
+  - objects picked by the pure rules on real TLEs; selection through the Pinia store.
+- **Results:**
+  - not homed → "Mount not homed";
+  - after Proceed:
+    - LEO above Lim EL enabled;
+    - LEO rising below Lim EL (pre-position) enabled;
+    - GEO-class enabled;
+    - "Below the horizon";
+    - "Pass peaks below the station limit elevation";
+  - a quick switch never shows the previous object's verdict;
+  - analysis stopped + an uncached NORAD → "Satellite data unavailable";
+  - gateway stopped → "Gateway not responding" (≤ 12 s through the hanging dev proxy, 5 s request timeout);
+  - no page overflow, no console errors.
+- **Fix (supervisor):**
+  - Problem: at 1280×600 @1.5 the card (`--u` at its 9 px floor) ran past the Track Info frame. It overran by 5 px without the reason line, which was already the case before T4.1, and by 17 px with it.
+  - Fix: an `@container (max-height: 160px)` block tightens the card gap / padding.
+  - Result: card bottom = frame bottom (179 / 179) with the reason line. 1920 is unchanged (screenshots checked).
+- Re-ran typecheck 0, lint 0 errors, vitest 406.
 
 ## 9. Known limitations & risks
 

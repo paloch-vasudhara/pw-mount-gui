@@ -96,6 +96,10 @@ class Step(_Args):
         return v
 
 
+class TrackObject(_Args):
+    norad: Annotated[int, Field(gt=0)]  # NORAD catalogue id; the gateway fetches the TLE (Q13)
+
+
 ARG_MODELS: dict[str, type[_Args]] = {
     "take_control": NoArgs,
     "release_control": NoArgs,
@@ -112,10 +116,11 @@ ARG_MODELS: dict[str, type[_Args]] = {
     "step": Step,
     "wrap_turn": NoArgs,  # T3.4e: 360 deg reposition through the other axis-0 representation
     "wrap_turn_cancel": NoArgs,  # T3.4e: "stay": clears the azimuth-limit prompt
+    "track_object": TrackObject,  # T4.1: check only; the real command arrives with T4.2
 }
 # Commands that move or start the mount (need the lock, ready gateway, a connected mount).
 MOTION_COMMANDS = frozenset(
-    {"goto_altaz", "goto_radec_j2000", "tracking", "jog", "step", "wrap_turn"}
+    {"goto_altaz", "goto_radec_j2000", "tracking", "jog", "step", "wrap_turn", "track_object"}
 )
 # Long-running sequences (T3.2): acked when started, progress is in the snapshot's `sequence`.
 SEQUENCE_COMMANDS = frozenset({"connect", "disconnect", "home"})
@@ -135,6 +140,7 @@ CmdName = Literal[
     "step",
     "wrap_turn",
     "wrap_turn_cancel",
+    "track_object",
 ]
 
 

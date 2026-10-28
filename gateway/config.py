@@ -45,6 +45,8 @@ class Settings:
     # T3.2 CONNECT: PWI4 is started (never stopped) when /status is unreachable.
     pwi4_exe: str | None = None  # None -> auto-detect (Program Files (x86), then Program Files)
     pwi4_start_timeout_s: float = 60.0
+    # T4.1: the analysis service the TLE of a tracked object is fetched from (by NORAD id).
+    analysis_url: str = "http://127.0.0.1:8410"
 
     @classmethod
     def from_env(cls, port: int | None = None) -> Settings:
@@ -67,6 +69,7 @@ class Settings:
             audit_dir=default_audit_dir(),
             pwi4_exe=env.get("PW_PWI4_EXE") or None,
             pwi4_start_timeout_s=float(env.get("PW_PWI4_START_TIMEOUT_S", "60")),
+            analysis_url=env.get("PW_ANALYSIS_URL", "http://127.0.0.1:8410").rstrip("/"),
         )
 
     @property

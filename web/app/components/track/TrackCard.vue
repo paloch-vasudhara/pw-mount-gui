@@ -1,11 +1,13 @@
 <script setup lang="ts">
 // Track Info card (A1a/A1c, concept/Track Cards.png), read-only. Values refresh at 1 Hz from
 // /api/sky/state (polled by stores/selection.ts while an object is selected).
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import FlagBadge from '~/components/track/FlagBadge.vue'
+import { useGatewayApi } from '~/composables/useGatewayApi'
 import { useSelectionStore } from '~/stores/selection'
 import { useSkyStore } from '~/stores/sky'
 import { SAT_CLASS_COLORS } from '~/lib/sky/theme'
+import { parseTrackVerdict, UNREACHABLE_VERDICT, type TrackVerdict } from '~/utils/track-verdict'
 import { formatAz, formatEl, formatRange, illuminationOf, ILLUMINATION_LABEL } from '~/utils/track-format'
 
 const base = useRuntimeConfig().app.baseURL || '/'
@@ -33,6 +35,50 @@ const info = computed(() => {
 })
 const illum = computed(() => (info.value ? illuminationOf(info.value.alt, info.value.lit) : 'unknown'))
 const chipColor = computed(() => SAT_CLASS_COLORS[(info.value?.cls ?? '').toUpperCase()] ?? '#888888')
+
+// TRACK OBJECT verdict (T4.1b): the gateway's check of `track_object` for the selected object, polled
+// at 1 Hz (the api helper's own fetch timeout applies). `checkGen` drops answers of a stale selection;
+// a tick is skipped while the previous request is still in flight.
+const api = useGatewayApi()
+const verdict = ref<TrackVerdict | null>(null)
+let checkGen = 0
+let checkTimer: ReturnType<typeof setInterval> | null = null
+let inFlight = false
+
+async function runVerdict(n: number, g: number) {
+  if (inFlight) return
+  inFlight = true
+  let v: TrackVerdict
+  try {
+    v = parseTrackVerdict(await api.post<unknown>('/api/mount/check', { cmd: 'track_object', args: { norad: n } }))
+  }
+  catch {
+    v = UNREACHABLE_VERDICT
+  }
+  if (g === checkGen) {
+    inFlight = false
+    verdict.value = v
+  }
+}
+
+function stopVerdict() {
+  checkGen += 1
+  inFlight = false
+  if (checkTimer) clearInterval(checkTimer)
+  checkTimer = null
+  verdict.value = null
+}
+
+watch(norad, (n) => {
+  stopVerdict()
+  if (n === null) return
+  const g = checkGen
+  void runVerdict(n, g)
+  checkTimer = setInterval(() => void runVerdict(n, g), 1000)
+}, { immediate: true })
+onBeforeUnmount(stopVerdict)
+const trackEnabled = computed(() => verdict.value?.enabled === true)
+const trackReason = computed(() => verdict.value?.reason ?? null)
 </script>
 
 <template>
@@ -73,9 +119,13 @@ const chipColor = computed(() => SAT_CLASS_COLORS[(info.value?.cls ?? '').toUppe
         <i v-if="illum !== 'unknown'" class="dot" :class="illum" />{{ ILLUMINATION_LABEL[illum] }}
       </dd>
     </dl>
-    <span class="track-wrap" title="Object tracking arrives in Phase 4">
-      <button type="button" class="track-btn" disabled data-testid="track-object">TRACK OBJECT</button>
+    <span class="track-wrap" :title="trackReason ?? undefined" :class="{ on: trackEnabled }">
+      <button
+        type="button" class="track-btn" :class="{ on: trackEnabled }" :disabled="!trackEnabled"
+        :data-enabled="trackEnabled ? 'true' : 'false'" data-testid="track-object"
+      >TRACK OBJECT</button>
     </span>
+    <div v-if="trackReason" class="track-reason" :title="trackReason" data-testid="track-reason">{{ trackReason }}</div>
   </div>
   <div v-else class="empty" data-testid="track-empty">
     No object selected
@@ -117,5 +167,15 @@ const chipColor = computed(() => SAT_CLASS_COLORS[(info.value?.cls ?? '').toUppe
 .dot.illuminated { background: #ffc233; }
 .dot.umbra, .dot.below { background: #8a8a8a; }
 .track-wrap { display: block; margin-top: 0.3em; cursor: not-allowed; }
+.track-wrap.on { cursor: default; }
+.track-btn.on { background: linear-gradient(var(--primary-from), var(--primary-to)); color: #fff; cursor: pointer; }
+.track-reason { margin-top: -0.2em; font-size: 0.85em; line-height: 1.2; color: var(--muted-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .track-btn { width: 100%; height: 2.2em; border: 0; background: #7b7b7b; color: #a8a8a8; font-size: 1.05em; font-weight: 700; letter-spacing: 0.02em; cursor: not-allowed; }
+/* Short panel (--u at its 9 px floor, e.g. 1280x600 @1.5): tighter spacing so the card and the
+   T4.1 reason line stay inside the panel (1920x1080 is unaffected). */
+@container (max-height: 160px) {
+  .card { gap: 0.3em; padding: 0.4em 0.9em 0.4em; }
+  .track-wrap { margin-top: 0; }
+  .track-reason { margin-top: -0.3em; }
+}
 </style>

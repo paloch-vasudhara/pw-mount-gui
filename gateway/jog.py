@@ -301,7 +301,7 @@ class JogController:
     def refusal(self, cmd: Command, status: Any) -> str | None:
         """Jog / step rules of the gateway verdict (after the axes / homed gates)."""
         name = cmd.name
-        other = name in ("goto_altaz", "goto_radec_j2000", "tracking", "wrap_turn")
+        other = name in ("goto_altaz", "goto_radec_j2000", "tracking", "wrap_turn", "track_object")
         if self._releasing and (other or name in ("jog", "step")):
             return R_WORKER_BUSY
         if name not in ("jog", "step"):

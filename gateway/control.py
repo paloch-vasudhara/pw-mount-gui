@@ -80,7 +80,10 @@ R_ROUTING = "Avoiding the Sun; press STOP first"
 # Commands refused while the mount is not homed (T3.3). HOME, STOP, DISCONNECT, tracking off and
 # the lock commands are never gated; a future jog joins this set.
 ROUTABLE = frozenset({"goto_altaz", "goto_radec_j2000", "wrap_turn"})  # T3.5c: D-SUN routed
-HOMED_GATED = frozenset({"goto_altaz", "goto_radec_j2000", "jog", "step", "wrap_turn"})
+HOMED_GATED = frozenset(
+    {"goto_altaz", "goto_radec_j2000", "jog", "step", "wrap_turn", "track_object"}
+)
+R_TRACK_NA = "Object tracking arrives in T4.2"
 CODE_HOME_BLOCKED = "home_blocked_confirm"  # disconnect: home is blocked, ask the user once
 _REASON_CODES: dict[str, str] = {
     R_SHUTTING: "shutting_down",
@@ -521,6 +524,9 @@ class ControlService:
         if name in ("jog", "jog_stop", "step", "wrap_turn", "wrap_turn_cancel"):
             return await self.jogc.handle(conn_id, cmd)
 
+        if name == "track_object":  # T4.1: validated, the verdict is /api/mount/check; T4.2 runs it
+            return self._refuse(conn_id, cmd, R_TRACK_NA, "not_available")
+
         # ---- motion commands
         reason = self._motion_refusal(conn_id, cmd)
         if reason:
@@ -714,7 +720,10 @@ class ControlService:
         ):
             return R_STALLED if self.homed.stalled else R_NOT_HOMED
         snap = self.poller.latest
-        if cmd.name == "tracking" and cmd.args.get("on") and snap is not None:
+        starts_tracking = cmd.name == "track_object" or (
+            cmd.name == "tracking" and cmd.args.get("on")
+        )
+        if starts_tracking and snap is not None:
             if snap.state == "SLEWING":
                 return R_SLEWING
         return self.jogc.refusal(cmd, status)

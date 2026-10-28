@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict
 from .audit import AuditLog
 from .commands import CommandError, validate_command
 from .config import Settings
-from .control import ControlService, Pwi4Writer
+from .control import R_NO_PWI4, ControlService, MotionVerdict, Pwi4Writer
 from .ephem import Ephem
 from .hub import Hub
 from .poller import Poller
@@ -29,6 +29,8 @@ from .security import (
 )
 from .settings import Location, SecretStore, SettingsStore, SettingsUpdate, compute_site_check
 from .snapshot import site_key
+from .tle import TleSource
+from .trackcheck import TrackChecker
 from .transforms import TRANSFORM_FRAME, AltAzValues, TransformRequest
 
 VERSION = "0.1.0"
@@ -36,7 +38,9 @@ AUTH_TIMEOUT_S = 2.0
 WS_UNAUTHORIZED = 4401
 
 
-CHECKABLE = frozenset({"goto_altaz", "goto_radec_j2000", "jog", "step", "wrap_turn"})
+CHECKABLE = frozenset(
+    {"goto_altaz", "goto_radec_j2000", "jog", "step", "wrap_turn", "track_object"}
+)
 
 
 class CheckRequest(BaseModel):
@@ -56,6 +60,7 @@ def create_app(
     settings: Settings | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
     secrets: SecretStore | None = None,
+    tle_transport: httpx.BaseTransport | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     token = settings.token or new_token()
@@ -66,6 +71,8 @@ def create_app(
     audit = AuditLog(settings.audit_dir)
     control = ControlService(Pwi4Writer(settings.pwi4_url, transport), poller, hub, audit)
     safety = SafetyEngine.from_env(poller, store, ephem, audit)
+    tle_source = TleSource(settings.analysis_url, tle_transport)
+    track = TrackChecker(tle_source, lambda: ephem.timescale)  # T4.1 TRACK OBJECT verdict
     control.check = safety.check  # T3.1b: command gate
     control.resolved_az = safety.pop_target_az
     monitor = SafetyMonitor(safety, poller, control)
@@ -116,6 +123,7 @@ def create_app(
             yield
         finally:
             await monitor.stop()
+            tle_source.close()
             await control.shutdown()  # G4 graceful-exit stop
             if task is not None:
                 task.cancel()
@@ -133,6 +141,7 @@ def create_app(
     app.state.safety = safety
     app.state.monitor = monitor
     app.state.audit = audit
+    app.state.track = track
 
     def require_auth(request: Request) -> None:
         """REST guard: per-launch token header + Origin / Sec-Fetch-Site (Host: middleware)."""
@@ -235,6 +244,23 @@ def create_app(
         except CommandError as exc:
             raise HTTPException(status_code=422, detail=exc.reason) from None
         v = control.dry_check(cmd)
+        extra: dict[str, Any] = {}
+        if cmd.name == "track_object":
+            # Row 0 (the mount guards) wins; the TLE fetch and the pass rules only run when the
+            # mount could take the command.
+            extra = {"pass": None, "tle_age_days": None}
+            site = poller.pwi4_site()
+            if v.reason is None and site is None:
+                v = MotionVerdict(R_NO_PWI4, "no_pwi4")
+            if v.reason is None:
+                tc = track.evaluate(
+                    cmd.args["norad"],
+                    site,
+                    safety.lim_el(),
+                    lambda: safety.sun_altaz(site),
+                )
+                v = MotionVerdict(tc.reason, tc.code, tc.target)
+                extra = {"pass": tc.pass_info, "tle_age_days": tc.tle_age_days}
         target = None if v.target is None else {"alt": v.target[0], "az": v.target[1]}
         body = {
             "ok": v.reason is None,
@@ -242,6 +268,7 @@ def create_app(
             "code": v.code,
             "target": target,
             "detour": v.detour,
+            **extra,
         }
         return JSONResponse(body, headers={"Cache-Control": "no-store"})
 

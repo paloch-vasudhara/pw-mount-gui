@@ -61,7 +61,7 @@ Read this first, then `docs/BUILD_PLAN.md` (§7 tracker + **resume point**, §6 
        - two monitor fixes (azimuth-axis velocity; arrival needs a settled mount);
        - tests decoupled from the real Sun.
        - The user commits T3.5 + the phase close together.
-    2. **Next: Phase 4 (Tracking)**, T4.1 spec first.
+    2. **Next: Phase 4 (Tracking).** Phase 3 committed `3e4f4c5`. T4.1 spec written 10-28 (BUILD_PLAN §6; Q13–Q16: gateway fetches the TLE by NORAD via `PW_ANALYSIS_URL`, Sun-disc rule kept, ≥ 30 s left above Lim EL, stale TLEs trackable). T4.1 verified 10-28 (a: gateway pass check; b: live TRACK OBJECT verdict on the card). Next: the user's visual check at :3200 (restart 8400; 8410 must run), then the T4.2 spec.
     - `PWI4.cfg` baseline is now `4406df60…e2683a2` (the user's site change).
     - The PWI4 sim site is lat 0.12 / lon 115.92 (user, 10-28).
     - Never run the tests while the user's 8400 gateway is up: its monitor acts on the same sim.

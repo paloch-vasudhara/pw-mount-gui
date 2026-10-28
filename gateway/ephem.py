@@ -48,6 +48,11 @@ class Ephem:
         except Exception as exc:
             self.error = f"{type(exc).__name__}: {exc}"
 
+    @property
+    def timescale(self):
+        """The skyfield timescale (None when the ephemeris failed to load)."""
+        return self._ts
+
     def stale(self, site: tuple[float, float, float] | None) -> bool:
         if not self.available or site is None:
             return False
