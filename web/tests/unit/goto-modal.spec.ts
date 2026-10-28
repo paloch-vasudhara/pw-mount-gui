@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   activateGroup, applyTransformResult, buildGotoCommand, buildTransformRequest, capElevation, CANNOT_VERIFY, editField, elevationInvalid,
-  gotoStatus, initialState, observeState, parseCheck, quickCheck, SLEW_GRACE_MS, slewLine, startSlewTrack,
+  detourLine, gotoStatus, initialState, isRouting, observeState, parseCheck, quickCheck, SLEW_GRACE_MS, slewLine, startSlewTrack,
   type CheckResult, type GotoState, type GotoStatusInput,
 } from '../../app/utils/goto-modal'
 import { buildControlView, gotoDisabledReason, type ControlSnapshotLike } from '../../app/utils/mount-control'
@@ -128,6 +128,41 @@ describe('status line', () => {
     expect(slewLine(t, 'TRACKING', SLEW_GRACE_MS + 1)).toBe('Tracking')
     expect(slewLine(observeState(t, 'SLEWING')!, 'STOPPED', 9_000)).toBe('Stopped')
     expect(slewLine(observeState(t, 'SLEWING')!, 'BUSY', 9_000)).toBeNull()
+  })
+})
+
+describe('Sun-avoidance routing (T3.5)', () => {
+  const i = (over: Partial<GotoStatusInput> = {}): GotoStatusInput => ({
+    gateReason: null, quick: null, ackRefusal: null, sending: false, slew: null, state: 'STOPPED', check: { kind: 'ok' }, now: 10_000, ...over,
+  })
+  it('parses sun_detour with its detour; a plain ok has none', () => {
+    expect(parseCheck({ ok: true, code: 'sun_detour', reason: null, detour: { duration_s: 41.6, side: 'cw' } }))
+      .toEqual({ kind: 'ok', detour: { duration_s: 41.6, side: 'cw' } })
+    expect(parseCheck({ ok: true, reason: null, detour: null })).toEqual({ kind: 'ok' })
+  })
+  it('a detour keeps SLEW enabled with the detour line, not red', () => {
+    const check = parseCheck({ ok: true, code: 'sun_detour', reason: null, detour: { duration_s: 41.6, side: 'cw' } })
+    expect(gotoStatus(i({ check }))).toEqual({ text: 'Path detours around the Sun (about 42 s)', tone: 'normal', canSlew: true })
+    expect(detourLine({ duration_s: 7.4, side: 'ccw' })).toBe('Path detours around the Sun (about 7 s)')
+    expect(elevationInvalid(check)).toBe(false)
+  })
+  it('sun_no_detour is a refusal on the status line, SLEW disabled, no red elevation box', () => {
+    const check = parseCheck({ ok: false, code: 'sun_no_detour', reason: 'Slew path passes within 15° of the Sun; no safe detour' })
+    expect(gotoStatus(i({ check }))).toEqual({ text: 'Slew path passes within 15° of the Sun; no safe detour', tone: 'danger', canSlew: false })
+    expect(elevationInvalid(check)).toBe(false)
+  })
+  it('detects routing from route.active or the state reason', () => {
+    expect(isRouting({ route: { active: true } })).toBe(true)
+    expect(isRouting({ state_reason: 'Avoiding the Sun' })).toBe(true)
+    expect(isRouting({ route: { active: false }, state_reason: null })).toBe(false)
+    expect(isRouting({ route: null })).toBe(false)
+    expect(isRouting(null)).toBe(false)
+  })
+  it('the follow line reads Avoiding the Sun… while routing, Slewing… otherwise', () => {
+    const t = observeState(startSlewTrack('local', 10_000), 'SLEWING')!
+    expect(gotoStatus(i({ slew: t, state: 'SLEWING', routing: true })).text).toBe('Avoiding the Sun…')
+    expect(gotoStatus(i({ slew: t, state: 'SLEWING', routing: false })).text).toBe('Slewing…')
+    expect(slewLine(t, 'SLEWING', 10_500, true)).toBe('Avoiding the Sun…')
   })
 })
 

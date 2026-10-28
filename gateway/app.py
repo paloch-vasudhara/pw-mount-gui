@@ -91,6 +91,12 @@ def create_app(
             monitor.begin(plan)
 
     control.goto_started = goto_started
+    # T3.5c D-SUN: stored routes, the monitor's route plan, the final-leg check, the HOME gate
+    control.take_route = safety.take_route
+    control.route_begin = monitor.begin_route
+    control.route_final_check = lambda cmd: safety.final_check(control.fresh_status(), cmd)
+    safety.homed_state = lambda: control.homed.state
+    poller.route_provider = control.route_info
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -230,7 +236,13 @@ def create_app(
             raise HTTPException(status_code=422, detail=exc.reason) from None
         v = control.dry_check(cmd)
         target = None if v.target is None else {"alt": v.target[0], "az": v.target[1]}
-        body = {"ok": v.reason is None, "reason": v.reason, "code": v.code, "target": target}
+        body = {
+            "ok": v.reason is None,
+            "reason": v.reason,
+            "code": v.code,
+            "target": target,
+            "detour": v.detour,
+        }
         return JSONResponse(body, headers={"Cache-Control": "no-store"})
 
     @app.websocket("/api/mount/ws")

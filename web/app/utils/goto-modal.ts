@@ -106,9 +106,12 @@ export function quickCheck(state: GotoState): string | null {
 
 // ----- gateway check ---------------------------------------------------------------------------
 
+/** T3.5: a Sun-avoiding route the gateway would fly (check code `sun_detour`). */
+export interface Detour { duration_s: number, side: string }
+
 export type CheckResult =
   | { kind: 'pending' }
-  | { kind: 'ok' }
+  | { kind: 'ok', detour?: Detour | null }
   | { kind: 'refused', reason: string, code?: string | null }
   | { kind: 'unreachable' }
 
@@ -116,9 +119,15 @@ export const CANNOT_VERIFY = 'Cannot verify the target'
 
 /** Maps the check endpoint's JSON to a CheckResult; anything else is unreachable. */
 export function parseCheck(body: unknown): CheckResult {
-  const b = body as { ok?: unknown, reason?: unknown, code?: unknown } | null | undefined
+  const b = body as { ok?: unknown, reason?: unknown, code?: unknown, detour?: unknown } | null | undefined
   if (!b || typeof b !== 'object' || typeof b.ok !== 'boolean') return { kind: 'unreachable' }
-  if (b.ok) return { kind: 'ok' }
+  if (b.ok) {
+    const d = b.detour as { duration_s?: unknown, side?: unknown } | null | undefined
+    if (b.code === 'sun_detour' && d && typeof d === 'object' && fin(d.duration_s)) {
+      return { kind: 'ok', detour: { duration_s: d.duration_s, side: typeof d.side === 'string' ? d.side : '' } }
+    }
+    return { kind: 'ok' }
+  }
   return {
     kind: 'refused',
     reason: typeof b.reason === 'string' && b.reason ? b.reason : 'Command refused',
@@ -136,9 +145,18 @@ export function elevationInvalid(check: CheckResult): boolean {
   // The gateway's codes (T3.4a): target elevation refusals turn the box red, the path does not.
   if (check.code) return check.code === 'below_lim_el' || check.code === 'sun_target'
   const text = `${check.code ?? ''} ${check.reason}`
-  if (/path/i.test(text)) return false
+  if (/path|detour/i.test(text)) return false
   return /lim[ _]?el|limit|horizon|below|sun/i.test(text)
 }
+
+/** T3.5: the mount is flying a Sun-avoiding route (snapshot `route.active` or the state reason). */
+export const AVOIDING_SUN = 'Avoiding the Sun'
+export function isRouting(s: { state_reason?: string | null, route?: { active?: boolean } | null } | null | undefined): boolean {
+  return !!s?.route?.active || s?.state_reason === AVOIDING_SUN
+}
+
+/** Status line of a routed slew, before the click: "Path detours around the Sun (about N s)" (N = the whole route). */
+export const detourLine = (d: Detour): string => `Path detours around the Sun (about ${Math.round(d.duration_s)} s)`
 
 // ----- slew tracking + status line -------------------------------------------------------------
 
@@ -162,8 +180,8 @@ export function observeState(track: SlewTrack | null, state: string | null | und
 }
 
 /** The slew-follow line: Slewing… -> Arrived (STOPPED) / Tracking. null = fall through to the check line. */
-export function slewLine(track: SlewTrack, state: string | null | undefined, now: number): string | null {
-  if (state === 'SLEWING') return 'Slewing…'
+export function slewLine(track: SlewTrack, state: string | null | undefined, now: number, routing = false): string | null {
+  if (state === 'SLEWING') return routing ? `${AVOIDING_SUN}…` : 'Slewing…'
   if (!track.sawSlewing && now - track.ackAt < SLEW_GRACE_MS) return 'Slewing…'
   if (state === 'TRACKING') return 'Tracking'
   if (state === 'STOPPED') return track.kind === 'local' ? 'Arrived (STOPPED)' : 'Stopped'
@@ -179,6 +197,8 @@ export interface GotoStatusInput {
   sending: boolean
   slew: SlewTrack | null
   state: string | null | undefined
+  /** T3.5: the mount is routing around the Sun (isRouting of the snapshot). */
+  routing?: boolean
   check: CheckResult
   now: number
 }
@@ -197,11 +217,11 @@ export function gotoStatus(i: GotoStatusInput): GotoStatus {
   if (i.ackRefusal) return { text: i.ackRefusal, tone: 'danger', canSlew }
   if (i.sending) return { text: 'Sending…', tone: 'normal', canSlew: false }
   if (i.slew) {
-    const line = slewLine(i.slew, i.state, i.now)
+    const line = slewLine(i.slew, i.state, i.now, !!i.routing)
     if (line) return { text: line, tone: 'normal', canSlew }
   }
   switch (i.check.kind) {
-    case 'ok': return { text: 'Ready', tone: 'normal', canSlew }
+    case 'ok': return { text: i.check.detour ? detourLine(i.check.detour) : 'Ready', tone: 'normal', canSlew }
     case 'refused': return { text: i.check.reason, tone: 'danger', canSlew: false }
     case 'unreachable': return { text: CANNOT_VERIFY, tone: 'danger', canSlew: false }
     default: return { text: 'Checking…', tone: 'normal', canSlew: false }

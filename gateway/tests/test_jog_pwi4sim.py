@@ -25,7 +25,6 @@ import time
 import pytest
 
 from gateway.control import R_AZ_LIMIT
-from gateway.safety import R_PATH_SUN
 from gateway.tests.test_control_pwi4sim import (  # noqa: F401  (pwi is a fixture)
     RESULTS,
     Client,
@@ -664,23 +663,26 @@ def test_wrap_turn_stop_and_stay(setup):
     assert len([e for e in ev if e["event"] == "wrap_turn_cancel"]) == 1
 
 
-def test_wrap_turn_refused_when_the_sun_is_on_its_path(setup_sun_path):
+def test_wrap_turn_with_the_sun_on_its_path_is_routed(setup_sun_path):
+    """T3.4e refused this turn; since T3.5 (D-SUN) it is routed around the Sun. The full routed
+    turn is covered by test_dsun_pwi4sim; here: accepted as a detour, and STOP ends it."""
     pwi, g, _ = setup_sun_path
 
     async def go():
         await put_pose(pwi, 50.0, 255.0)
         c = await open_client(g)
-        smp = Sampler(pwi).start()
         ack = await c.cmd("wrap_turn")
-        await asyncio.sleep(1.0)
-        smp.close()
-        print("\nTURN with the Sun on its path:", ack["reason"])
-        assert not ack["ok"] and ack["reason"] == R_PATH_SUN, ack
-        assert c.turn is None
-        assert max(abs(x[1] - smp.samples[0][1]) for x in smp.samples) < 0.01  # did not move
+        print("\nTURN with the Sun on its path:", ack)
+        assert ack["ok"], ack
+        await asyncio.sleep(4.0)
+        await c.cmd("stop")
+        await asyncio.sleep(1.5)
         await c.close()
         pwi.mount_set_axis0_wrap_range_min(-180.0)
 
     run(go())
     ev = g.audit_events()
-    assert not [e for e in ev if e["event"] == "wrap_turn"]
+    det = [e for e in ev if e["event"] == "sun_detour"]
+    assert det and det[0]["kind"] == "wrap_turn", det
+    assert [e for e in ev if e["event"] == "sun_detour_stopped"]
+    assert not [e for e in ev if e["event"] == "sun_detour_done"]

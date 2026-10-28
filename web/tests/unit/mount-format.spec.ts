@@ -109,6 +109,11 @@ describe('buildMountDisplay', () => {
     expect(d.statusReason).toBe('PWI4 not running / not reachable')
   })
 
+  it('shows Avoiding the Sun as the reason while SLEWING on a route', () => {
+    const d = buildMountDisplay({ ...snap, state: 'SLEWING', state_reason: 'Avoiding the Sun' }, false)
+    expect(d.statusReason).toBe('Avoiding the Sun')
+  })
+
   it('no snapshot yet shows dashes', () => {
     const d = buildMountDisplay(null, false)
     expect(d.status.text).toBe(EM_DASH)

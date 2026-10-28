@@ -27,6 +27,8 @@ export interface ControlSnapshotLike {
   limits?: { lim_el_deg?: number | null, sun_keepout_deg?: number | null } | null
   /** Not-homed guard (T3.3, Q3); null when the mount is not connected. */
   homed?: HomedInfo | null
+  /** T3.5: a Sun-avoiding route (state SLEWING, state_reason "Avoiding the Sun"). */
+  route?: { active?: boolean, sides?: string[], t_end?: number } | null
 }
 
 export interface HomedInfo {
@@ -165,7 +167,7 @@ export function trackDisabledReason(
   if (opts.holder === 'other') return TIP_OTHER_WINDOW
   if (isBusy(s)) return 'Busy'
   if (!isConnected(s)) return 'Axes disabled'
-  if (s.state === 'SLEWING') return 'Slewing'
+  if (s.state === 'SLEWING') return s.state_reason === 'Avoiding the Sun' ? 'Avoiding the Sun' : 'Slewing' // T3.5, Q12
   if (s.homed?.state === 'not_homed') return s.homed.reason === 'stalled' ? STALLED_REASON : 'Mount not homed'
   const lim = s.limits?.lim_el_deg
   const alt = s.mount?.alt

@@ -70,6 +70,7 @@ class FakePwi4:
         self.paths: list[str] = []
         # Write-path model (T3.1a): every request with its query, and a tiny mount state machine.
         self.calls: list[tuple[str, dict[str, str]]] = []
+        self.bodies: list[tuple[str, str]] = []  # (path, form body) of every POST (T3.5c)
         self.stop_ends_tracking = False  # model PWI4 variant where mount/stop also ends tracking
         self.write_delay = 0.0  # seconds a /mount/* write hangs before answering
         self.fail_writes: set[str] = set()  # paths answered with HTTP 500
@@ -102,6 +103,8 @@ class FakePwi4:
             over["mount.is_tracking"] = True
         elif path.startswith("/mount/goto_"):
             over["mount.is_slewing"] = True
+        elif path == "/mount/custom_path/apply":
+            over["mount.is_tracking"] = True  # P21: a custom path reports tracking
         elif path == "/mount/connect":
             if not self.connect_noop:
                 over["mount.is_connected"] = True
@@ -124,6 +127,8 @@ class FakePwi4:
     async def handler(self, request: httpx.Request) -> httpx.Response:
         self.paths.append(request.method + " " + request.url.path)
         self.calls.append((request.url.path, dict(request.url.params)))
+        if request.method == "POST":
+            self.bodies.append((request.url.path, request.content.decode()))
         if request.url.path.startswith("/mount/") and not self.down:
             if self.write_delay:
                 await asyncio.sleep(self.write_delay)

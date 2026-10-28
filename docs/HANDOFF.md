@@ -1,4 +1,4 @@
-# Session handoff — updated 2026-10-27 end of session (T3.3b + T3.4 user-checked; next T3.5 D-SUN)
+# Session handoff — updated 2026-10-28 (Phase 3 closed: T3.5 + Tier 3 verified; user commits; next Phase 4)
 
 Read this first, then `docs/BUILD_PLAN.md` (§7 tracker + **resume point**, §6 task specs, §8 logs/findings), then `docs/logic_sheet.txt` as needed.
 
@@ -56,8 +56,15 @@ Read this first, then `docs/BUILD_PLAN.md` (§7 tracker + **resume point**, §6 
     - Dev-proxy fix: `/api/transform` → gateway (`web/nuxt.config.ts`).
     - Logs: BUILD_PLAN §8 "T3.3b / T3.4 / T3.4d / T3.4e log".
   - **Next:**
-    1. **T3.5 D-SUN.** Spec first from the §4 design. It routes gotos, HOME and `wrap_turn`.
-    2. Phase 3 end = Tier 3 (full sim ×2, harness, full browser pass, the flaky list) → the Phase 3 user check.
+    1. **Phase 3 closed 10-28:**
+       - T3.5 D-SUN plus the Tier 3 run: full sim ×2, harness, full browser pass;
+       - two monitor fixes (azimuth-axis velocity; arrival needs a settled mount);
+       - tests decoupled from the real Sun.
+       - The user commits T3.5 + the phase close together.
+    2. **Next: Phase 4 (Tracking)**, T4.1 spec first.
+    - `PWI4.cfg` baseline is now `4406df60…e2683a2` (the user's site change).
+    - The PWI4 sim site is lat 0.12 / lon 115.92 (user, 10-28).
+    - Never run the tests while the user's 8400 gateway is up: its monitor acts on the same sim.
   - **Working method:** BUILD_PLAN §1 "Test tiers" (user-approved 10-27). Sub-tasks test only the changed areas; the full sim suite only at phase end; timeboxed briefs with progress notes.
   - The PWI4 cfg + app settings changes of 10-22 07:00–07:25 were the user's (moved the test Sun away from the home position); keep them.
   - **Real-mount checklist:** in BUILD_PLAN §7 under the resume point.

@@ -28,7 +28,7 @@ from gateway.jog import (
     LIMIT_EXTRA_DEG,
     WRAP_SLIDE_MARGIN_DEG,
 )
-from gateway.safety import R_PATH_SUN, R_SUN, jog_margin_deg, r_below, turn_duration_s
+from gateway.safety import R_SUN, jog_margin_deg, r_below, turn_duration_s
 
 from .conftest import FakePwi4
 from .test_check import H, check
@@ -410,13 +410,11 @@ def test_wrap_turn_sun_target_and_sun_path_refused(monkeypatch):
     monkeypatch.setenv("PW_TEST_SUN_ALTAZ", "45,300")
     fake = fresh(FakePwi4())
     with running(fake) as (tc, _, _):
+        # T3.5c: the sweep is no longer refused, D-SUN detours it (the dry run says so)
         d = check(tc, "wrap_turn", {})
-        assert not d["ok"] and d["reason"] == R_PATH_SUN and d["code"] == "sun_path"
-        w = Win(tc)
-        ack = w.send("wrap_turn", None, "t")
-        assert not ack["ok"] and ack["reason"] == R_PATH_SUN
+        assert d["ok"] and d["reason"] is None and d["code"] == "sun_detour", d
+        assert d["detour"]["duration_s"] > 360.0 / 15.0  # a 360 deg sweep at <= 15 deg/s
         assert paths(fake) == []
-        w.close()
 
 
 def test_wrap_turn_refused_while_jogging_or_turning_and_others_refused_while_turning():

@@ -18,18 +18,24 @@ import contextlib
 import math
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from . import state
 from .audit import AuditLog
 from .commands import MOTION_COMMANDS, SEQUENCE_COMMANDS, Command, CommandError, parse_command
 from .homed import R_NOT_HOMED, R_STALLED, HomedGuard
 from .hub import Hub
 from .poller import Poller
 from .pwi4_io import CONNECT_TIMEOUT_S, PollResult, fetch_status, new_client, parse
+from .snapshot import RouteInfo, jd_from_utc
+
+if TYPE_CHECKING:
+    from . import dsun
 
 WRITE_TIMEOUT_S = 1.0  # hard cap on one PWI4 write
 ACK_TIMEOUT_S = 5.0  # a queued command that is not done by then is answered "timed out"
@@ -39,6 +45,13 @@ CONFIRM_POLL_S = 0.1
 CONFIRM_RESEND_AFTER_S = 0.4  # still moving this long after a stop -> stop again
 WRAP_MIN_EPS_DEG = 0.5
 SLOW_WRITE_TIMEOUT_S = 8.0  # mount/connect, disconnect, enable, disable, find_home (T3.2)
+PATH_WRITE_TIMEOUT_S = 3.0  # custom path upload / apply (T3.5c)
+# D-SUN route execution (T3.5c, P21)
+ROUTE_SETTLE_S = 1.0  # wait after the last route point before the final command (P21: ~0.5 s)
+ROUTE_REASON = "Avoiding the Sun"  # Q12: state_reason while a route flies
+ROUTE_WRAP_MARGIN_DEG = 1.0  # the route's axis-0 range sits this far inside the wrap window
+ROUTE_WRAP_FIT_DEG = 357.0  # a route spanning more cannot fit a 360 deg window with the margin
+ROUTE_POSE_TOL_DEG = 2.0  # the mount must still be this close to the validated start pose
 
 # G7 reasons
 R_OTHER_HAS_CONTROL = "Another window has control"
@@ -63,8 +76,10 @@ R_WRAP = "Wrap out of range: re-home or Go To first"
 R_AZ_LIMIT = "Azimuth at its mechanical limit: turn 360° or jog the other way"
 R_NO_ROOM = "No room for a 360° turn"
 R_TURN = "Turn in progress; press STOP first"
+R_ROUTING = "Avoiding the Sun; press STOP first"
 # Commands refused while the mount is not homed (T3.3). HOME, STOP, DISCONNECT, tracking off and
 # the lock commands are never gated; a future jog joins this set.
+ROUTABLE = frozenset({"goto_altaz", "goto_radec_j2000", "wrap_turn"})  # T3.5c: D-SUN routed
 HOMED_GATED = frozenset({"goto_altaz", "goto_radec_j2000", "jog", "step", "wrap_turn"})
 CODE_HOME_BLOCKED = "home_blocked_confirm"  # disconnect: home is blocked, ask the user once
 _REASON_CODES: dict[str, str] = {
@@ -84,6 +99,7 @@ _REASON_CODES: dict[str, str] = {
     R_AZ_LIMIT: "az_limit",
     R_NO_ROOM: "no_room",
     R_TURN: "turn_in_progress",
+    R_ROUTING: "slewing",
 }
 
 
@@ -158,6 +174,38 @@ class Pwi4Writer:
     async def set_axis0_wrap_range_min(self, degs: float) -> Any:
         return await self._call("/mount/set_axis0_wrap_range_min", degs=degs)
 
+    # --- T3.5c custom path (D-SUN route): new -> add_point_list (POST) -> apply
+
+    async def custom_path_new(self, coord: str = "altaz") -> Any:
+        return await self._call("/mount/custom_path/new", PATH_WRITE_TIMEOUT_S, type=coord)
+
+    async def custom_path_add_points(self, points: list[tuple[float, float, float]]) -> Any:
+        """points = (absolute JD UTC, axis0/azimuth deg, altitude deg); form field `data` holds
+        one "jd,c0,c1" line per point (same encoding as pwi4_client)."""
+        body = "\n".join(f"{jd:.10f},{c0:.6f},{c1:.6f}" for jd, c0, c1 in points)
+        try:
+            resp = await asyncio.wait_for(
+                self._http().post(
+                    "/mount/custom_path/add_point_list",
+                    data={"data": body},
+                    timeout=httpx.Timeout(PATH_WRITE_TIMEOUT_S, connect=CONNECT_TIMEOUT_S),
+                ),
+                PATH_WRITE_TIMEOUT_S,
+            )
+        except TimeoutError:
+            raise Pwi4Error("PWI4 did not answer in time") from None
+        except httpx.HTTPError as exc:
+            raise Pwi4Error(f"PWI4 not reachable ({type(exc).__name__})") from None
+        if resp.status_code != 200:
+            raise Pwi4Error(f"PWI4 refused the request (HTTP {resp.status_code})")
+        return None
+
+    async def custom_path_apply(self, update_wrap: int = 0) -> Any:
+        """update_wrap=0 ALWAYS (P8): the gateway manages the wrap window itself."""
+        return await self._call(
+            "/mount/custom_path/apply", PATH_WRITE_TIMEOUT_S, update_wrap=int(update_wrap)
+        )
+
     # --- T3.2 connection sequence (slow calls get a longer, still bounded, time limit)
 
     async def mount_connect(self) -> Any:
@@ -213,6 +261,7 @@ class CommandContext:
     dry: bool = False
     target: tuple[float, float] | None = None
     code: str | None = None  # stable token of the refusal kind, set by the hook
+    detour: dict[str, Any] | None = None  # T3.5c: {"duration_s", "side"} when D-SUN routes it
 
 
 @dataclass
@@ -223,6 +272,7 @@ class MotionVerdict:
     reason: str | None
     code: str | None = None
     target: tuple[float, float] | None = None
+    detour: dict[str, Any] | None = None  # T3.5c: the goto would be routed around the Sun
 
 
 CheckHook = Callable[[Command, CommandContext], str | None]
@@ -242,6 +292,41 @@ class HomeVerdict:
     reason: str | None = None
     sun_blocked: bool = False  # the refusal is the Sun disc (wording of the warning / question)
     start_sun_sep: float | None = None  # Sun separation at the start pose (recovery rule)
+    route: Any = None  # T3.5c: a dsun.Route to the home pose (the path is Sun-blocked, Q10)
+
+
+@dataclass
+class ActiveRoute:
+    """The D-SUN route being flown (snapshot `route`, the state override, cancel cleanup)."""
+
+    sides: list[str]
+    t_end_utc: datetime
+    kind: str  # goto_altaz / goto_radec_j2000 / wrap_turn / home
+
+
+def route_wrap_plan(
+    points: list[dsun.RoutePoint],
+) -> tuple[float, list[dsun.RoutePoint], bool]:
+    """(wrap_min, points to fly, truncated) for a route (P8/P9/P21).
+
+    The wrap window [w, w + 360) must hold every flown axis-0 value with >= 1 deg margin, or the
+    mount unwinds ~346 deg mid-path. A route within ROUTE_WRAP_FIT_DEG fits entirely
+    (w = lo - 1). A longer one (a 360 deg wrap_turn) cannot: the window is anchored at the start
+    pose on the travel side and the points are cut at the first one outside it; the final
+    command then finishes the last few degrees."""
+    xs = [p.axis0 for p in points]
+    lo, hi = min(xs), max(xs)
+    if hi - lo <= ROUTE_WRAP_FIT_DEG:
+        return lo - ROUTE_WRAP_MARGIN_DEG, list(points), False
+    s = points[0].axis0
+    up = (max(xs) - s) >= (s - min(xs))
+    w = s - 2.0 if up else s + 2.0 - 359.0  # the start pose sits 2 deg inside the window
+    kept: list[dsun.RoutePoint] = []
+    for p in points:
+        if not w + ROUTE_WRAP_MARGIN_DEG <= p.axis0 <= w + ROUTE_WRAP_FIT_DEG + 1.0:
+            break
+        kept.append(p)
+    return w, kept, True
 
 
 HomeCheck = Callable[[Any], HomeVerdict]
@@ -286,6 +371,15 @@ class ControlService:
         self.home_check: HomeCheck = home_check_allow
         self.homing_begin: Callable[[HomeVerdict], None] = lambda verdict: None
         self.homing_end: Callable[[], None] = lambda: None
+        # T3.5c D-SUN: the safety engine's stored route of a command, the monitor's route plan,
+        # the check of the short final goto after a route, and the wait (a test seam).
+        self.take_route: Callable[[Command], Any] = lambda cmd: None
+        self.route_begin: Callable[..., None] = lambda *a, **k: None
+        self.route_final_check: Callable[[Command], str | None] = lambda cmd: None
+        self.route_sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep
+        self.route: ActiveRoute | None = None
+        self._route_set_override = False
+        self._route_prev: tuple[str, str | None] | None = None
         self.holder: str | None = None
         self.ready = False
         self.shutting_down = False
@@ -577,7 +671,12 @@ class ControlService:
             code = getattr(ctx, "code", None)
         else:
             code = self._code_of(reason)
-        return MotionVerdict(reason, code, ctx.target if ctx is not None else None)
+        return MotionVerdict(
+            reason,
+            code,
+            ctx.target if ctx is not None else None,
+            getattr(ctx, "detour", None) if reason is None else None,
+        )
 
     def _code_of(self, reason: str) -> str | None:
         if reason in _REASON_CODES:
@@ -604,6 +703,8 @@ class ControlService:
             return R_NO_PWI4
         if not status.mount.is_connected:
             return R_NO_MOUNT
+        if self.route is not None and cmd.name in MOTION_COMMANDS:
+            return R_ROUTING  # a D-SUN route is flying: only STOP is accepted
         if cmd.name in MOTION_COMMANDS:
             for i, ax in enumerate((status.mount.axis0, status.mount.axis1)):
                 if not ax.is_enabled:
@@ -640,7 +741,10 @@ class ControlService:
     async def _execute(self, job: _Job) -> None:
         cmd = job.cmd
         try:
-            if cmd.name == "goto_altaz":
+            rg = self.take_route(cmd) if cmd.name in ROUTABLE else None
+            if rg is not None:
+                await self._route_job(job, rg)
+            elif cmd.name == "goto_altaz":
                 self.motion_cleared()
                 # P15: PWI4's goto_alt_az does not end tracking; a local Az/El goto must end
                 # STOPPED (logic sheet A5c-iv), so tracking goes off first.
@@ -688,6 +792,164 @@ class ControlService:
             if not job.future.done():
                 job.future.set_result((False, job.cancelled_reason or "Cancelled"))
             raise
+
+    # ------------------------------------------------------------------ D-SUN route (T3.5c)
+
+    def route_info(self) -> RouteInfo | None:
+        ar = self.route
+        if ar is None:
+            return None
+        t_end = ar.t_end_utc.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        return RouteInfo(sides=ar.sides, t_end=t_end)
+
+    async def fly_route(
+        self,
+        route: Any,
+        *,
+        conn_id: str,
+        cmd_id: str | None,
+        kind: str,
+        start_sun_sep: float | None = None,
+        started: Callable[[], None] | None = None,
+    ) -> tuple[bool, Any]:
+        """Fly a dsun.Route as a PWI4 custom alt/az path and wait for its end (+ settle).
+
+        tracking_off -> wrap window around the route (route_wrap_plan) -> custom_path new / add /
+        apply(update_wrap=0), first point = the CURRENT pose at now + LEAD, then the state override
+        "Avoiding the Sun", the monitor's route plan and the audit. Returns (truncated, last
+        flown RoutePoint). The caller sends its final command and MUST call `_route_end` (also on
+        error / cancel). Raises Pwi4Error; cancellation propagates."""
+        from . import dsun  # local: dsun imports safety, which imports this module
+
+        st = self.fresh_status()
+        m = st.mount if st is not None else None
+        if m is None or m.axis0.position_degs is None or m.axis1.position_degs is None:
+            raise Pwi4Error(R_NO_PWI4)
+        pose = (m.axis0.position_degs, m.axis1.position_degs)
+        p0 = route.points[0]
+        if math.hypot(pose[0] - p0.axis0, pose[1] - p0.alt) > ROUTE_POSE_TOL_DEG:
+            raise Pwi4Error("Mount moved since the check; try again")
+        pts = [dsun.RoutePoint(0.0, pose[0] % 360.0, pose[1], pose[0]), *route.points[1:]]
+        wrap_min, kept, truncated = route_wrap_plan(pts)
+        if len(kept) < 2:
+            raise Pwi4Error("Route does not fit the wrap window")
+        last = kept[-1]
+        total = dsun.LEAD_S + last.t + ROUTE_SETTLE_S
+        self.motion_cleared()
+        await self.writer.tracking_off()
+        cur = m.axis0_wrap_range_min_degs
+        if cur is None or abs(cur - wrap_min) >= 0.05:
+            await self.writer.set_axis0_wrap_range_min(wrap_min)
+        t0 = time.monotonic()
+        now = datetime.now(UTC)
+        self.route_begin(
+            [(p.axis0, p.alt) for p in kept], (last.axis0, last.alt), total, start_sun_sep, pose
+        )
+        jd0 = jd_from_utc(now) + dsun.LEAD_S / 86400.0
+        await self.writer.custom_path_new("altaz")
+        await self.writer.custom_path_add_points([(jd0 + p.t / 86400.0, p.az, p.alt) for p in kept])
+        await self.writer.custom_path_apply(0)
+        self.motion_commanded = True
+        self.route = ActiveRoute(list(route.sides), now + timedelta(seconds=total), kind)
+        self._route_prev = state.get_override()
+        self._route_set_override = self._route_prev is None or self._route_prev[0] != "BUSY"
+        if self._route_set_override:
+            state.set_override("SLEWING", ROUTE_REASON)
+        self.audit.write(
+            "sun_detour", client=conn_id, id=cmd_id, kind=kind,
+            start=[round(pose[0], 3), round(pose[1], 3)],
+            target=[round(route.points[-1].axis0, 3), round(route.points[-1].alt, 3)],
+            sides=list(route.sides) or ["straight"], duration_s=round(route.duration_s, 1),
+            detour_deg=round(route.detour_deg, 2), min_sun_sep=round(route.min_sun_sep_deg, 2),
+            points=len(kept), truncated=truncated, wrap_min=round(wrap_min, 2),
+        )  # fmt: skip
+        self.hub.republish_latest()
+        if started is not None:
+            started()
+        await self.route_sleep(max(0.0, total - (time.monotonic() - t0)))
+        return truncated, last
+
+    def _route_end(self, event: str, **fields: Any) -> None:
+        """Leave the route: restore the state override, drop the snapshot route, audit.
+        Idempotent (a no-op when no route is active)."""
+        ar = self.route
+        if ar is None:
+            return
+        self.route = None
+        if self._route_set_override:
+            prev = self._route_prev
+            if prev is None:
+                state.clear_override()
+            else:
+                state.set_override(*prev)
+        self._route_set_override, self._route_prev = False, None
+        self.audit.write(event, kind=ar.kind, **fields)
+        self.hub.republish_latest()
+
+    async def _route_job(self, job: _Job, route_goto: Any) -> None:
+        """A routed goto_altaz / goto_radec_j2000 / wrap_turn: fly the route, then the command's
+        own final move from where the route ended (which may be a truncated wrap_turn sweep)."""
+        cmd = job.cmd
+        route = route_goto.route
+
+        def started() -> None:
+            if not job.future.done():
+                job.future.set_result((True, None))  # acked at the route start, not at its end
+
+        try:
+            await self.fly_route(
+                route, conn_id=job.conn_id, cmd_id=cmd.id, kind=cmd.name,
+                start_sun_sep=route_goto.start_sun_sep, started=started,
+            )  # fmt: skip
+            reason = self.route_final_check(cmd)  # the short final leg must be Sun-clear too
+            if reason:
+                raise Pwi4Error(reason)
+            self.motion_cleared()
+            if cmd.name == "goto_altaz":
+                await self.writer.tracking_off()
+                await self._prepare_wrap(cmd.args["az"])
+                await self.writer.goto_alt_az(cmd.args["alt"], cmd.args["az"])
+            elif cmd.name == "wrap_turn":
+                await self.writer.tracking_off()
+                await self.writer.set_axis0_wrap_range_min(cmd.args["target0"] - 180.0)
+                await self.writer.goto_alt_az(cmd.args["alt"], cmd.args["az"])
+            else:
+                az = self.resolved_az(cmd)
+                await self._prepare_wrap(az if az is not None else route.points[-1].az)
+                await self.writer.goto_ra_dec_j2000(cmd.args["ra_h"], cmd.args["dec_deg"])
+            self.motion_commanded = True
+            self.goto_started(cmd)
+            self._route_end("sun_detour_done", id=cmd.id)
+            if not job.future.done():
+                job.future.set_result((True, None))
+        except Pwi4Error as exc:
+            with contextlib.suppress(Pwi4Error):
+                await self._stop_requests()
+            self._route_end("sun_detour_stopped", id=cmd.id, reason=str(exc))
+            raise
+        finally:  # cancel (STOP / link loss / safety stop) or any bug: always leave cleanly
+            self._route_end(
+                "sun_detour_stopped", id=cmd.id, reason=job.cancelled_reason or "Cancelled"
+            )
+
+    async def fly_home_route(self, route: Any, conn_id: str | None, start_sun_sep: float | None):
+        """HOME whose direct path is Sun-blocked, with a trusted pose (Q10): fly the D-SUN route
+        to the home pose; the caller then runs find_home with the normal homing watch."""
+        try:
+            await self.fly_route(
+                route, conn_id=conn_id or "", cmd_id=None, kind="home",
+                start_sun_sep=start_sun_sep,
+            )  # fmt: skip
+            await self.writer.tracking_off()  # the path hold reports tracking
+            self.motion_cleared()
+            self._route_end("sun_detour_done")
+        except Pwi4Error as exc:
+            with contextlib.suppress(Pwi4Error):
+                await self._stop_requests()
+            self._route_end("sun_detour_stopped", reason=str(exc))
+            raise
+        finally:
+            self._route_end("sun_detour_stopped", reason="Cancelled")
 
     def _audit_track_start(self, conn_id: str, cmd: Command) -> None:
         """Audit the pointing the track starts from (T3.3: TRACK holds the current RA/Dec)."""

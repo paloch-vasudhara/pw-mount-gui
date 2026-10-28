@@ -171,6 +171,7 @@ describe('TRACK disabled reasons (T3.3, G7)', () => {
     expect(trackDisabledReason(ok({ state: 'HOMING' }), o)).toBe('Busy')
     expect(trackDisabledReason(ok({ axes: axes(true, false) }), o)).toBe('Axes disabled')
     expect(trackDisabledReason(ok({ state: 'SLEWING' }), o)).toBe('Slewing')
+    expect(trackDisabledReason(ok({ state: 'SLEWING', state_reason: 'Avoiding the Sun' }), o)).toBe('Avoiding the Sun') // T3.5 Q12
     expect(trackDisabledReason(ok({ homed: { state: 'not_homed', since: 't' } }), o)).toBe('Mount not homed')
     expect(trackDisabledReason(ok({ mount: { connected: true, alt: 10 } }), o)).toBe('Below Lim EL (20°)')
     expect(trackDisabledReason(ok({ sun_distance_deg: 7.25, sun: { alt: 40 } }), o))

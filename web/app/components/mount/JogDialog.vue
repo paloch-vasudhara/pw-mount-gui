@@ -7,10 +7,12 @@ import { useWindowSize } from '@vueuse/core'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { useGatewayApi } from '@/composables/useGatewayApi'
 import { useMountStore } from '@/stores/mount'
+import { parseCheck, type CheckResult } from '@/utils/goto-modal'
 import {
   createJogSender, DEFAULT_SPEED, DEFAULT_STEP, fmtAz, fmtEl, fmtSize, fmtSpeed, isTurning, jogStatus, keyToPad,
-  sizeAtEnd, speedAtEnd, stepBlocked, stepSize, stepSpeed, WRAP_TITLE, wrapPromptText, wrapPromptVisible, type JogMode, type JogSnapshotLike, type Pad,
+  sizeAtEnd, speedAtEnd, stepBlocked, stepSize, stepSpeed, turnCheckNote, WRAP_TITLE, wrapPromptText, wrapPromptVisible, type JogMode, type JogSnapshotLike, type Pad,
 } from '@/utils/jog-modal'
 
 const props = defineProps<{
@@ -20,6 +22,7 @@ const props = defineProps<{
 const open = defineModel<boolean>('open', { default: false })
 
 const store = useMountStore()
+const api = useGatewayApi()
 
 const mode = ref<JogMode>('jog')
 const speed = ref<number>(DEFAULT_SPEED)
@@ -45,8 +48,33 @@ const status = computed(() => jogStatus({
 // T3.4e: wrap-turn prompt. `dismissed` hides it after a refused turn (jog_limit stays); jogging again or a new limit re-arms it.
 const dismissed = ref(false)
 const promptOpen = computed(() => wrapPromptVisible(snap.value, dismissed.value))
-const promptText = computed(() => wrapPromptText(snap.value))
 watch(() => !!snap.value?.jog_limit, (has) => { if (!has) dismissed.value = false })
+
+// T3.5f: one dry check of the turn when the prompt appears / re-arms / the limit changes (no polling).
+const turnCheck = ref<CheckResult>({ kind: 'pending' })
+const turnNote = computed(() => turnCheckNote(turnCheck.value))
+const promptText = computed(() => wrapPromptText(snap.value, turnNote.value.detour))
+let checkSeq = 0
+async function runTurnCheck(): Promise<void> {
+  const my = ++checkSeq
+  turnCheck.value = { kind: 'pending' }
+  let res: CheckResult
+  try {
+    res = parseCheck(await api.post<unknown>('/api/mount/check', { cmd: 'wrap_turn', args: {} }))
+  }
+  catch {
+    res = { kind: 'unreachable' }
+  }
+  if (my === checkSeq) turnCheck.value = res
+}
+watch(
+  () => (promptOpen.value && open.value ? JSON.stringify(snap.value?.jog_limit ?? null) : null),
+  (key) => {
+    if (key === null) { checkSeq++; turnCheck.value = { kind: 'pending' } }
+    else void runTurnCheck()
+  },
+  { immediate: true },
+)
 async function doTurn(): Promise<void> {
   dismissed.value = true
   const ack = await store.sendCommand('wrap_turn', {})
@@ -237,12 +265,18 @@ const zoom = computed(() => Math.max(0.5, Math.min(1, (vw.value - 24) / DESIGN_W
           <DialogDescription data-testid="jg-wrap-text">
             {{ promptText }}
           </DialogDescription>
+          <p
+            v-if="turnNote.line" class="text-sm" :class="turnNote.blocked ? 'text-destructive' : 'text-foreground'"
+            data-testid="jg-wrap-check" role="status"
+          >
+            {{ turnNote.line }}
+          </p>
         </DialogHeader>
         <DialogFooter>
           <Button variant="outline" data-testid="jg-wrap-stay" @click="stayHere">
             Stay here
           </Button>
-          <Button data-testid="jg-wrap-turn" @click="doTurn">
+          <Button data-testid="jg-wrap-turn" :disabled="turnNote.blocked" @click="doTurn">
             Turn 360°
           </Button>
         </DialogFooter>

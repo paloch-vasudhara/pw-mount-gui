@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   createJogSender, fmtAz, fmtEl, fmtSize, jogDisabledReason, jogStatus, keyToPad, sizeAtEnd, speedAtEnd,
-  isTurning, stepBlocked, stepSize, stepSpeed, STEP_SIZES, JOG_SPEEDS, wrapPromptText, wrapPromptVisible, WRAP_TITLE,
+  isTurning, turnCheckNote, stepBlocked, stepSize, stepSpeed, STEP_SIZES, JOG_SPEEDS, wrapPromptText, wrapPromptVisible, WRAP_TITLE,
 } from '../../app/utils/jog-modal'
 import type { ControlSnapshotLike } from '../../app/utils/mount-control'
 
@@ -171,6 +171,26 @@ describe('wrap-turn prompt (T3.4e)', () => {
     expect(isTurning(null)).toBe(false)
     expect(jogStatus({ ...b, snapshot: { turn: { from_deg: 270, to_deg: -90 } } })).toEqual({ text: 'Turning 360° to -90°…', tone: 'normal' })
     expect(jogStatus({ ...b, reason: 'Busy', refusal: 'x', snapshot: { turn: { to_deg: 10.5 } } }).text).toBe('Turning 360° to 10.5°…')
+  })
+  it('a no-detour refusal of the turn shows on the status line', () => {
+    const r = 'Slew path passes within 15° of the Sun; no safe detour'
+    expect(jogStatus({ ...b, refusal: r, snapshot: { jog_limit: lim } })).toEqual({ text: r, tone: 'danger' })
+  })
+  it('turn dry-check note (T3.5f)', () => {
+    expect(turnCheckNote({ kind: 'ok', detour: { duration_s: 41.6, side: 'east' } })).toEqual({ line: 'Turn detours around the Sun (about 42 s)', blocked: false, detour: true })
+    expect(turnCheckNote({ kind: 'refused', reason: 'No safe detour', code: 'sun_no_detour' })).toEqual({ line: 'No safe detour', blocked: true, detour: false })
+    expect(turnCheckNote({ kind: 'refused', reason: 'x' }).blocked).toBe(true)
+    expect(turnCheckNote({ kind: 'ok' })).toEqual({ line: null, blocked: false, detour: false })
+    expect(turnCheckNote({ kind: 'ok', detour: null }).line).toBeNull()
+    expect(turnCheckNote({ kind: 'pending' })).toEqual({ line: null, blocked: false, detour: false })
+    expect(turnCheckNote({ kind: 'unreachable' })).toEqual({ line: null, blocked: false, detour: false })
+    // the straight-turn estimate gives way to the detour duration (supervisor, T3.5 browser pass)
+    const lim = { jog_limit: { dir: 1, limit_deg: 300, est_s: 20 } } as unknown as Parameters<typeof wrapPromptText>[0]
+    expect(wrapPromptText(lim)).toContain('(about 20 s)')
+    expect(wrapPromptText(lim, true)).not.toContain('about 20 s')
+    const src = readFileSync('app/components/mount/JogDialog.vue', 'utf8')
+    expect(src).toContain("'/api/mount/check', { cmd: 'wrap_turn', args: {} }")
+    expect(src).toContain(':disabled="turnNote.blocked"')
   })
   it('component wiring: commands, refusal, solid pad', () => {
     const src = readFileSync('app/components/mount/JogDialog.vue', 'utf8')

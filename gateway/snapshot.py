@@ -149,6 +149,14 @@ class TurnInfo(BaseModel):
     to_deg: float
 
 
+class RouteInfo(BaseModel):
+    """T3.5c: a D-SUN detour route is flying (the mount avoids the Sun disc)."""
+
+    active: bool = True
+    sides: list[str] = Field(default_factory=list)  # "cw" / "ccw" per detour, [] = straight line
+    t_end: str  # UTC ISO time the route (incl. the settle wait) ends
+
+
 class MountSnapshot(BaseModel):
     seq: int
     ts_utc: str
@@ -171,6 +179,7 @@ class MountSnapshot(BaseModel):
     step: StepInfo | None = None  # T3.4c: null = no step running
     jog_limit: JogLimitInfo | None = None  # T3.4e: null = no azimuth limit prompt
     turn: TurnInfo | None = None  # T3.4e: null = no wrap turn running
+    route: RouteInfo | None = None  # T3.5c: null = no D-SUN route running
 
 
 def site_key(result: PollResult) -> tuple[float, float, float] | None:
@@ -236,6 +245,7 @@ def build_snapshot(
     step: StepInfo | None = None,
     jog_limit: JogLimitInfo | None = None,
     turn: TurnInfo | None = None,
+    route: RouteInfo | None = None,
 ) -> MountSnapshot:
     """result = last good fetch (or the failed one). down_reason forces DISCONNECTED.
 
@@ -374,4 +384,5 @@ def build_snapshot(
         step=step if connected else None,
         jog_limit=jog_limit if connected else None,
         turn=turn if connected else None,
+        route=route if connected else None,
     )

@@ -419,6 +419,11 @@ class Sequencer:
         v = c.home_check(st)  # the pose may have changed since the caller's check
         if v.reason:
             raise StepError(v.reason)
+        if v.route is not None:  # T3.5c / Q10: the direct path is Sun-blocked: detour to the pose
+            await c.fly_home_route(v.route, self._conn, v.start_sun_sep)
+            v = c.home_check(await self._fresh())  # re-check from where the route ended
+            if v.reason:
+                raise StepError(v.reason)
         c.homing_begin(v)  # monitor: actual-limit watch only (the real path is unknown, P12)
         try:
             await c.writer.find_home()

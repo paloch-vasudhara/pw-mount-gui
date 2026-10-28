@@ -639,6 +639,12 @@ class JogController:
         limit_s = turn.plan.est_s * 1.5 + 10.0
         while self.turn is turn:
             await asyncio.sleep(WATCH_PERIOD_S)
+            if svc.route is not None:  # T3.5c: a D-SUN route flies the sweep: not timed, not idle
+                # (t0 follows the clock: the final goto of a truncated sweep is sent right as the
+                # route ends, and a status that predates it must not read as "arrived")
+                turn.t0 = time.monotonic()
+                idle_t = None
+                continue
             now = time.monotonic()
             el = now - turn.t0
             if el > limit_s:

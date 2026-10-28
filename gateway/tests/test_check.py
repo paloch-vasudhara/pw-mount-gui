@@ -19,7 +19,7 @@ from gateway.control import (
     R_STALLED,
     R_STARTING,
 )
-from gateway.safety import R_NO_AZ, R_PATH_SUN, R_SITE, R_SUN, r_below
+from gateway.safety import R_NO_AZ, R_SITE, R_SUN, r_below
 
 from .conftest import FakePwi4
 from .test_control import TOKEN, Win, audit_lines, running, up_radec, wait_for
@@ -97,7 +97,13 @@ def test_check_bad_input_is_422(body):
 def test_ok_altaz_and_radec_with_observed_target():
     with running() as (tc, fake, app):
         d = check(tc, "goto_altaz", ALTAZ)
-        assert d == {"ok": True, "reason": None, "code": None, "target": {"alt": 45.0, "az": 125.0}}
+        assert d == {
+            "ok": True,
+            "reason": None,
+            "code": None,
+            "target": {"alt": 45.0, "az": 125.0},
+            "detour": None,
+        }
         ra, dec = up_radec()
         d = check(tc, "goto_radec_j2000", {"ra_h": ra, "dec_deg": dec})
         assert d["ok"] is True and d["reason"] is None
@@ -131,7 +137,10 @@ def test_below_lim_el_and_sun_and_path(monkeypatch):
         assert fake.writes == []
     monkeypatch.setenv("PW_TEST_SUN_ALTAZ", "45,150")
     with running() as (tc, fake, _):
-        parity(tc, "goto_altaz", {"alt": 45.0, "az": 180.0}, R_PATH_SUN, "sun_path")
+        # T3.5c: a path through the disc is no longer refused, it is detoured (dry run only here)
+        d = check(tc, "goto_altaz", {"alt": 45.0, "az": 180.0})
+        assert d["ok"] is True and d["reason"] is None and d["code"] == "sun_detour", d
+        assert d["detour"]["side"] in ("cw", "ccw") and d["detour"]["duration_s"] > 10.0
         assert fake.writes == []
 
 

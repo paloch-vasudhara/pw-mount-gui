@@ -30,7 +30,7 @@ from typing import Any
 
 from .audit import AuditLog
 from .commands import Command
-from .control import CommandContext, ControlService, HomeVerdict
+from .control import ROUTE_SETTLE_S, CommandContext, ControlService, HomeVerdict
 from .ephem import Ephem, angular_sep_deg
 from .poller import Poller
 from .settings import (
@@ -83,6 +83,7 @@ R_PATH_SUN = "Slew path passes within 15° of the Sun"
 R_NO_EPHEM = "Ephemeris unavailable (cannot verify target)"
 R_NO_AZ = "Target azimuth is outside the mount's mechanical range"
 R_CORRIDOR = "Mount left the validated slew path"
+R_NO_DETOUR = "Slew path passes within 15° of the Sun; no safe detour"
 
 
 def lookahead_s(speed: float, accel: float) -> float:
@@ -115,6 +116,7 @@ def reason_code(reason: str) -> str | None:
         R_SITE: "site_mismatch",
         R_SUN: "sun_target",
         R_PATH_SUN: "sun_path",
+        R_NO_DETOUR: "sun_no_detour",
         R_NO_EPHEM: "no_ephemeris",
         R_NO_AZ: "no_az",
         "PWI4 not running / not reachable": "no_pwi4",
@@ -259,6 +261,21 @@ class ValidatedGoto:
     start_sun_sep: float | None = None  # None: Sun checks do not apply
     t_begin: float = 0.0
     last_move_t: float = 0.0
+    # T3.5c: a D-SUN route plan. `paths` = [the route corridor]. It ends only at
+    # t_begin + duration_s or by clear(): the mount legitimately waits (LEAD) and holds at the end,
+    # and the predictive Sun rule must not fire on the route's own pass at 16 deg.
+    route: bool = False
+
+
+@dataclass
+class RoutedGoto:
+    """A goto whose predicted path crosses the Sun disc, planned by D-SUN (stored per command id
+    like a ValidatedGoto; the executor takes it)."""
+
+    route: Any  # dsun.Route
+    start: tuple[float, float]  # axis0, axis1 at validation time
+    target: tuple[float, float]  # axis0, axis1 goal
+    start_sun_sep: float | None = None
 
 
 def actual_limit_decision(
@@ -441,6 +458,10 @@ class SafetyEngine:
         self._sun_cache: tuple[float, tuple[float, float, float], tuple[float, float]] | None = None
         self._target_az: dict[str, float] = {}
         self._plans: dict[str, ValidatedGoto] = {}
+        self._routes: dict[str, RoutedGoto] = {}
+        # T3.5c / Q10: HomedGuard.state ("homed" | "overridden" | "not_homed" | None). A HOME is
+        # routed around the Sun only when a home COMPLETED in this connect session.
+        self.homed_state: Any = lambda: None
         if sun_override is not None:
             audit.write("test_sun_override", alt=sun_override[0], az=sun_override[1])
 
@@ -533,13 +554,126 @@ class SafetyEngine:
             low, start_sep = path_min_sun_sep(paths, sun)
             limit = KEEPOUT_DEG if start_sep > KEEPOUT_DEG else start_sep - 0.05
             if low <= limit:
-                return HomeVerdict(R_PATH_SUN, sun_blocked=True, start_sun_sep=start_sep)
+                blocked = HomeVerdict(R_PATH_SUN, sun_blocked=True, start_sun_sep=start_sep)
+                # Q10: detour only with a pose that can be trusted, i.e. a home COMPLETED in
+                # this connect session ("overridden" / stalled / not homed do not count)
+                if self.homed_state() != "homed":
+                    return blocked
+                from . import dsun
+
+                res = self.plan_detour(
+                    (a0.position_degs, a1.position_degs), (tgt0, h_alt), sun, lim, a0, a1
+                )
+                if isinstance(res, dsun.NoRoute):
+                    return blocked
+                return HomeVerdict(None, False, start_sep, route=res)
         return HomeVerdict(None, False, start_sep)
 
     # -- command gate (ControlService.check)
 
     def take_plan(self, cmd: Command) -> ValidatedGoto | None:
         return self._plans.pop(cmd.id, None)
+
+    def take_route(self, cmd: Command) -> RoutedGoto | None:
+        return self._routes.pop(cmd.id, None)
+
+    @staticmethod
+    def _axis_params(a0: Any, a1: Any) -> tuple[AxisParams, AxisParams]:
+        return (
+            AxisParams(
+                a0.max_velocity_degs_per_sec or 20.0, a0.acceleration_degs_per_sec_sqr or 20.0
+            ),
+            AxisParams(
+                a1.max_velocity_degs_per_sec or 20.0, a1.acceleration_degs_per_sec_sqr or 20.0
+            ),
+        )
+
+    def plan_detour(
+        self,
+        start: tuple[float, float],
+        target: tuple[float, float],
+        sun: tuple[float, float],
+        lim: float,
+        a0: Any,
+        a1: Any,
+    ) -> Any:
+        """D-SUN route for a slew the predictor flagged as crossing the disc: a Route, or a
+        dsun.NoRoute. When the planner straight axis-space line is clear (it returns None) the
+        per-axis dog-leg of the predictor is what crosses: fly the straight line as a route
+        (force=True), NEVER the plain goto."""
+        from . import dsun
+
+        p0, p1 = self._axis_params(a0, a1)
+        lo, hi = a0.min_mech_position_degs, a0.max_mech_position_degs
+        rng = (lo if lo is not None else -1e9, hi if hi is not None else 1e9)
+        max1 = a1.max_mech_position_degs if a1.max_mech_position_degs is not None else 90.0
+        res = dsun.plan_route(start, target, sun, lim, p0, p1, rng, max1)
+        if res is None:
+            res = dsun.plan_route(start, target, sun, lim, p0, p1, rng, max1, force=True)
+        return res
+
+    @staticmethod
+    def detour_info(route: Any) -> dict[str, Any]:
+        from . import dsun
+
+        return {
+            "duration_s": round(route.duration_s + dsun.LEAD_S + ROUTE_SETTLE_S, 1),
+            "side": ",".join(route.sides) if route.sides else "straight",
+        }
+
+    def final_check(self, st: Any, cmd: Command) -> str | None:
+        """The short final goto after a route (and the rest of a truncated wrap_turn sweep):
+        judged like a goto from the ACTUAL pose, with the same predictor and recovery rule.
+        Stores the validated plan for `goto_started` (the monitor)."""
+        site = self.pwi4_site(st) if st is not None else None
+        m = st.mount if st is not None else None
+        if site is None or m is None or m.altitude_degs is None or m.azimuth_degs is None:
+            return "PWI4 not running / not reachable"
+        a0, a1 = m.axis0, m.axis1
+        if None in (a0.position_degs, a1.position_degs):
+            return "Mount position unavailable (cannot verify the final move)"
+        lim = self.lim_el()
+        if cmd.name in ("goto_altaz", "wrap_turn"):
+            t_alt, t_az = cmd.args["alt"], cmd.args["az"]
+        else:
+            if not self.ephem.available:
+                return R_NO_EPHEM
+            t_alt, t_az = self.ephem.radec_j2000_altaz(site, cmd.args["ra_h"], cmd.args["dec_deg"])
+        if t_alt < lim:
+            return r_below(lim)
+        if cmd.name == "wrap_turn":
+            tgt0 = cmd.args["target0"]
+        elif None not in (a0.min_mech_position_degs, a0.max_mech_position_degs):
+            tgt0 = axis0_target(
+                a0.position_degs, t_az, a0.min_mech_position_degs, a0.max_mech_position_degs
+            )
+            if tgt0 is None:
+                return R_NO_AZ
+        else:
+            return None
+        sun = self.sun_altaz(site)
+        use_sun = sun is not None and not sun_shortcut(sun[0], lim, m.altitude_degs)
+        tau = getattr(m, "slew_time_constant", None) or SLEW_TAU_DEFAULT_S
+        p0, p1 = self._axis_params(a0, a1)
+        start = (a0.position_degs, a1.position_degs)
+        paths = predict_paths(start, (tgt0, t_alt), p0, p1, tau)
+        start_sep = None
+        if use_sun:
+            if sun_sep(t_az, t_alt, sun) <= KEEPOUT_DEG:
+                return R_SUN
+            low, start_sep = path_min_sun_sep(paths, sun)
+            if low <= (KEEPOUT_DEG if start_sep > KEEPOUT_DEG else start_sep - 0.05):
+                return R_PATH_SUN
+        self._plans[cmd.id] = ValidatedGoto(
+            start=start,
+            target=(tgt0, t_alt),
+            paths=paths,
+            duration_s=max(len(p) for p in paths) * PATH_SAMPLE_S,
+            start_sun_sep=start_sep,
+        )
+        if len(self._plans) > 32:
+            self._plans.pop(next(iter(self._plans)))
+        return None
 
     def pop_target_az(self, cmd: Command) -> float | None:
         return self._target_az.pop(cmd.id, None)
@@ -593,6 +727,34 @@ class SafetyEngine:
                 sep = sun_sep(az + d_az * f, alt + d_alt * f, sun)
                 if sep <= KEEPOUT_DEG and sep < now - 1e-6:
                     return R_SUN
+        return None
+
+    def _route_goto(
+        self,
+        cmd: Command,
+        ctx: CommandContext,
+        start: tuple[float, float],
+        target: tuple[float, float],
+        sun: tuple[float, float],
+        lim: float,
+        a0: Any,
+        a1: Any,
+        start_sep: float | None,
+    ) -> str | None:
+        """The predictor flagged the path (T3.5): detour planner instead of R_PATH_SUN. Returns
+        None (allowed, route stored / reported) or the refusal reason."""
+        from . import dsun
+
+        res = self.plan_detour(start, target, sun, lim, a0, a1)
+        if isinstance(res, dsun.NoRoute):
+            # start / target inside the disc: the recovery / target rules keep the old refusal
+            return R_NO_DETOUR if res.reason == "no_detour" else R_PATH_SUN
+        ctx.code = "sun_detour"
+        ctx.detour = self.detour_info(res)
+        if not ctx.dry:
+            self._routes[cmd.id] = RoutedGoto(res, start, target, start_sep)
+            if len(self._routes) > 32:
+                self._routes.pop(next(iter(self._routes)))
         return None
 
     def _check_motion(self, cmd: Command, ctx: CommandContext) -> str | None:
@@ -672,7 +834,9 @@ class SafetyEngine:
                 # to the Sun than where the mount already is.
                 limit = KEEPOUT_DEG if start_sep > KEEPOUT_DEG else start_sep - 0.05
                 if low <= limit:
-                    return R_PATH_SUN
+                    return self._route_goto(
+                        cmd, ctx, start, (tgt0, t_alt), sun, lim, a0, a1, start_sep
+                    )
             if not ctx.dry:
                 self._plans[cmd.id] = ValidatedGoto(
                     start=start,
@@ -726,6 +890,27 @@ class SafetyMonitor:
         plan.t_begin = plan.last_move_t = time.monotonic()
         self.plan = plan
 
+    def begin_route(
+        self,
+        corridor: list[tuple[float, float]],
+        target: tuple[float, float],
+        duration_s: float,
+        start_sun_sep: float | None,
+        start: tuple[float, float],
+    ) -> None:
+        """A D-SUN route is about to be uploaded: watch the actual limits and the route corridor
+        until t_begin + duration_s (LEAD + route + settle), regardless of idle / arrival."""
+        self.begin(
+            ValidatedGoto(
+                start=start,
+                target=target,
+                paths=[corridor],
+                duration_s=duration_s,
+                start_sun_sep=start_sun_sep,
+                route=True,
+            )
+        )
+
     def clear(self) -> None:
         """New command / STOP / link loss: back to the predictive rules."""
         self.plan = None
@@ -744,14 +929,22 @@ class SafetyMonitor:
             self._task = None
 
     def velocity(self) -> tuple[float, float] | None:
-        """(v_alt, v_az) from the newest sample vs one at least VEL_WINDOW_S older."""
+        """(v_alt, v_az) from the newest sample vs one at least VEL_WINDOW_S older.
+
+        v_az is the azimuth AXIS rate (axis-0 position, continuous) when reported: the reported
+        azimuth flips by 180 deg when axis 1 passes the zenith (the sim allows 91 deg), and that
+        spike once inflated the speed-dependent look-ahead to ~16 s and fired a false Lim EL stop
+        at alt 87 (Phase 3 end, test_stall_pwi4sim). Fallback: the wrapped azimuth difference."""
         if len(self._hist) < 2:
             return None
-        t, alt, az, _, _ = self._hist[-1]
-        for t0, alt0, az0, _, _ in reversed(self._hist):
+        t, alt, az, ax0, _ = self._hist[-1]
+        for t0, alt0, az0, ax00, _ in reversed(self._hist):
             if t - t0 >= VEL_WINDOW_S:
                 dt = t - t0
-                daz = (az - az0 + 180.0) % 360.0 - 180.0
+                if math.isfinite(ax0) and math.isfinite(ax00):
+                    daz = ax0 - ax00
+                else:
+                    daz = (az - az0 + 180.0) % 360.0 - 180.0
                 return (alt - alt0) / dt, daz / dt
         return None
 
@@ -766,7 +959,10 @@ class SafetyMonitor:
         t = self.poller.last_good_t
         if t != self._last_t:
             self._last_t = t
-            self._hist.append((t, m.altitude_degs, m.azimuth_degs, 0.0, 0.0))
+            ax0 = m.axis0.position_degs
+            self._hist.append(
+                (t, m.altitude_degs, m.azimuth_degs, math.nan if ax0 is None else ax0, 0.0)
+            )
         return st, t
 
     def _check_stall(self, st: Any, t: float) -> None:
@@ -818,10 +1014,18 @@ class SafetyMonitor:
             now = time.monotonic()
             if math.hypot(vel[0], vel[1]) > 0.05:
                 plan.last_move_t = now
-            dist = math.hypot(axes[0] - plan.target[0], axes[1] - plan.target[1])
-            idle = now - plan.last_move_t > PLAN_STILL_S and now - plan.t_begin > 1.0
-            expired = now - plan.t_begin > plan.duration_s * 1.5 + 10.0
-            if dist < ARRIVED_DEG or idle or expired:
+            if plan.route:  # a route plan ends by the clock (or clear()) only
+                done = now - plan.t_begin > plan.duration_s
+            else:
+                dist = math.hypot(axes[0] - plan.target[0], axes[1] - plan.target[1])
+                idle = now - plan.last_move_t > PLAN_STILL_S and now - plan.t_begin > 1.0
+                expired = now - plan.t_begin > plan.duration_s * 1.5 + 10.0
+                # Arrived = close AND settled (Phase 3 end): ending the plan while the mount still
+                # closes in on a target just above Lim EL handed it to the predictive rule with a
+                # lagging velocity, which could stop a legal goto to Lim EL + 0.1 in its last step.
+                settled = math.hypot(vel[0], vel[1]) <= 0.05
+                done = (dist < ARRIVED_DEG and settled) or idle or expired
+            if done:
                 self.plan = None  # ends; the predictive rules take over (tracking, drift)
             else:
                 return validated_decision(m.altitude_degs, axes, plan, lim, sun, m.azimuth_degs)

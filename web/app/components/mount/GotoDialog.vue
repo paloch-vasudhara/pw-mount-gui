@@ -14,7 +14,7 @@ import { useMountStore } from '@/stores/mount'
 import type { AngleFormat } from '@/utils/angle-format'
 import {
   activateGroup, applyTransformResult, buildGotoCommand, buildTransformRequest, checkBody, editField, elevationInvalid, EL_MAX, EL_MIN,
-  gotoStatus, initialState, observeState, parseCheck, quickCheck, startSlewTrack,
+  gotoStatus, initialState, isRouting, observeState, parseCheck, quickCheck, startSlewTrack,
   type CheckResult, type GotoField, type GotoGroup, type GotoState, type SlewTrack,
 } from '@/utils/goto-modal'
 
@@ -49,6 +49,7 @@ const status = computed(() => gotoStatus({
   sending: sending.value,
   slew: slew.value,
   state: store.snapshot?.state,
+  routing: isRouting(store.snapshot as Parameters<typeof isRouting>[0]),
   check: checkShown.value,
   now: store.now,
 }))

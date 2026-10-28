@@ -61,6 +61,10 @@ def set_override(state: str, reason: str | None = None) -> None:
     _override = (state, reason)
 
 
+def get_override() -> tuple[str, str | None] | None:
+    return _override
+
+
 def clear_override() -> None:
     global _override
     _override = None

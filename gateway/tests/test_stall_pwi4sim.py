@@ -36,8 +36,6 @@ from gateway.tests.test_control_pwi4sim import (  # noqa: F401  (pwi is a fixtur
 from gateway.tests.test_sequences_pwi4sim import start_gateway
 from gateway.tests.test_track_pwi4sim import (
     SUN_FAR,
-    ephem,
-    site_of,
     status,
     wait_arrived,
 )
@@ -103,11 +101,12 @@ def freeze_time(samples, idx: int) -> float | None:
 @pytest.mark.parametrize("axis", [0, 1])
 def test_gateway_stops_a_mount_stalled_at_its_mechanical_limit(pwi, tmp_path, axis):
     s0 = pwi.status()
-    sun_alt, sun_az = ephem().sun_altaz(site_of(s0))
-    base_alt = 20.0 if abs(20.0 - sun_alt) >= abs(72.0 - sun_alt) else 72.0
-    # axis 1: the climb runs far from the Sun in azimuth. axis 0: axis 0 reads 150 deg inside a
-    # wrap window [0, 360), so an offset of +180 deg puts the target at 330 > the +300 limit.
-    base_az = (sun_az + 120.0) % 360.0 if axis == 1 else 150.0
+    # Fixed pose (Phase 3 end fix): the gateway's Sun is pinned far (SUN_FAR), so the real Sun is
+    # irrelevant. The old real-Sun choice (alt 20 when the Sun is high) made the to-pose descent
+    # trip the gateway's (correct) predictive Lim EL stop. Alt 45 is well clear of Lim EL.
+    # Axis 0 reads 150 deg inside a wrap window [0, 360), so +180 deg puts the target at 330 >
+    # the +300 limit.
+    base_alt, base_az = 45.0, 150.0
     wrap0 = s0.mount.axis0_wrap_range_min_degs
     pwi.mount_stop()
     pwi.mount_tracking_off()

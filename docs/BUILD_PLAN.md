@@ -54,7 +54,7 @@ Each task `Tn.m` runs the same loop. The supervisor (main session) owns this fil
 | Poller / state machine | `gateway/tests/test_gateway_pwi4sim.py` |
 | Harness / sim_guard | `tools/pwi4_harness/tests/` |
 
-- **Flaky list** (fix at the phase end): `test_safety.py::test_monitor_lets_validated_goto_reach_lim_el_plus_margin[0.1]` (unit, under load); `test_gateway_pwi4sim.py::test_goto_stop_state_sequence`.
+- **Flaky list** (fix at the phase end): empty after the Phase 3 end (10-28; see the "Phase 3 end, Tier 3" log).
 
 **PWI4 testing:** mount-control work is tested against **PWI4 in simulation mode** (user-confirmed, O3). Never point automated tests at a PWI4 instance connected to the real mount; real-mount sessions are user-run checks only.
 
@@ -1073,6 +1073,101 @@ Runs after the user commits T3.2 + T3.3, before T3.4.
 - red elevation boxes and the disabled SLEW with reasons;
 - a step while one is running is ignored.
 
+### T3.5 — D-SUN Sun-avoidance routing (spec, 2026-10-27)
+
+**User decisions (10-27):**
+- **Q10, HOME:** route HOME through D-SUN **only when the mount is homed in this connect session** (e.g. a HOME or a disconnect after an earlier home). At connect, or whenever not homed / stalled, the pose cannot be trusted (P16c), so today's skip-with-warning (connect) / confirm (disconnect) stays.
+- **Q11, Go To:** SLEW stays enabled. The status line reads "Path detours around the Sun (+N s)" before the click and "Avoiding the Sun" while routing.
+- **Q12, State:** SLEWING with `state_reason` "Avoiding the Sun". The final state is the goto's normal one.
+
+**Goal:** a slew whose predicted path passes within 15° of the Sun is **routed around the disc** instead of refused (§4 "D-SUN"). This applies to `goto_altaz`, `goto_radec_j2000`, the T3.4e `wrap_turn` and HOME. A clear slew is unchanged: it stays a plain PWI4 goto. Jog and step keep refuse/stop (manual motion gets no detours).
+
+**What stays as it is:**
+- a **target** inside the disc or below Lim EL is still refused (`sun_target` / `below_lim_el`);
+- the Sun shortcut;
+- the recovery rule: a start inside the disc that never gets closer is allowed with no detour;
+- the not-homed / stalled guard, the lock, link loss, STOP and the monitor.
+
+**Planner (pure, `gateway/dsun.py`):**
+1. **Nominal route.** The axis-space line from the start `(axis0, alt)` to the target `(tgt0, alt)`, with axis 0 unwrapped as `axis0_target` / `target0` gives it. For `wrap_turn` this is the 360° sweep. Sample it densely (≤ 0.25° steps).
+2. **Detect.** Find each contiguous interval where the Sun separation is below **R = 16°** (15° + O7 margin). The Sun is fixed at plan time; the Sun moves ≤ 0.2° over a 60 s route, which the 1° margin covers. When no sample is below 15° on the predictor's paths, there is no detour: the slew is a plain goto, as today.
+3. **Detour.** For each blocked interval:
+   - take the entry point P_in and the exit point P_out where the nominal route crosses the 16° circle;
+   - project them into the azimuthal-equidistant tangent plane centred on the Sun;
+   - build two candidates along the 16° circle from P_in to P_out, **clockwise and counter-clockwise**, sampled every ≤ 1° of arc;
+   - back-project the points to alt/az, then to axis 0 continuous with the route (no 360° jumps).
+4. **Discard a candidate** if any point is:
+   - below `Lim EL + 0.5°`;
+   - above the **keyhole**, `alt > 88°` or above axis 1's `max_mech`, whichever is lower;
+   - outside axis 0's mechanical range;
+   - or would need an axis rate above `0.8 × vmax` at the chosen route speed (this covers the high-alt azimuth speed-up).
+5. **Pick** the candidate with the shorter route duration. With several blocked intervals (rare), choose per interval.
+6. **Timing.** Assign timestamps along the whole route (nominal parts + arcs):
+   - path speed = `min(cruise, 0.8 × vmax)` per axis;
+   - accelerate and decelerate at the reported accel at the start, the end and sharp corners (> 30° heading change);
+   - `cruise` comes from the T3.5a measurement (default 5°/s);
+   - points every ≤ 0.5 s, plus a lead-in point = the current pose at `t0 + LEAD` (LEAD from T3.5a, default 2 s).
+7. **No valid candidate** for an interval → refuse with `R_NO_DETOUR` = "Slew path passes within 15° of the Sun; no safe detour" (code `sun_no_detour`).
+8. **Output.** `Route(points=[(t_rel, az, alt, axis0)], duration_s, detour_deg, side, intervals)` plus a corridor polyline in axis space for the monitor.
+9. **Unit tests (§4 step 6):**
+   - straight slews through the disc (both sides valid, the cheaper one picked);
+   - Sun near the zenith (the over-zenith side discarded);
+   - Sun near Lim EL (the low side discarded);
+   - both sides blocked → refusal;
+   - a `wrap_turn` sweep at the Sun's altitude;
+   - the high-alt rate constraint;
+   - every route point ≥ 16° − 0.05 from the Sun, ≥ Lim EL, and continuous in axis 0;
+   - timing monotonic, with axis rates ≤ 0.8 × vmax.
+
+**Execution (gateway):**
+- **Safety:** where `_check_motion` / `check_home` return `R_PATH_SUN` today, it calls the planner instead.
+  - On a route: the command is allowed and the engine stores a `RoutedGoto(route, final)` for the command id, like `_plans`.
+  - On no route: `R_NO_DETOUR`.
+  - **The planner returns None** (its straight axis-space line is clear, but the predictor's per-axis dog-leg crosses the disc: about 20 % of the flagged random slews, T3.5b check) → call it again with `force=True` and fly the straight line as a route with no detour. **Never fall back to a plain goto** once the predictor has flagged the slew.
+  - The dry run returns `ok: true, code: "sun_detour", detour: {duration_s, side}`, so the modal can say so.
+- **Executor (`ControlService`, a route job in the command worker; STOP / link loss / safety stop cancel it like any job):**
+  1. `tracking_off`;
+  2. set the wrap window so the whole route's axis-0 range is inside it (P8/P9);
+  3. `custom_path/new altaz` → `add_point_list` (absolute JD = now + LEAD + t_rel) → `apply(update_wrap=0)`;
+  4. wait until the route end time (+ settle) while the monitor watches;
+  5. the final command:
+     - `goto_altaz` → `goto_alt_az(target)` + `tracking_off`, ending STOPPED;
+     - `goto_radec_j2000` → `goto_ra_dec_j2000`, a short final slew that ends TRACKING. The route's last point is the target's alt/az at the route end time;
+     - `wrap_turn` → the existing final goto;
+     - HOME → `find_home` (below).
+  - On any PWI4 error: STOP, then refuse with the error.
+- **Monitor:**
+  - While a route runs, the monitor uses the validated rules (actual Lim EL, actual Sun ≤ 15° → stop) with the route's corridor (2° tolerance) instead of the predictor's paths;
+  - The mount stops if it leaves the corridor;
+  - The stall guard stays active (a frozen axis on a path counts as commanded).
+- **State:**
+  - `SLEWING`, `state_reason` "Avoiding the Sun";
+  - snapshot `route: {active, side, t_end}`;
+  - audit `sun_detour` (start, target, side, duration, detour_deg), `sun_detour_done` / `sun_detour_stopped`.
+- **HOME (Q10):**
+  - When the home path is Sun-blocked **and a home completed in this connect session** (Proceed anyway does not count: an override does not make the pose trustworthy), a D-SUN route takes the mount to the home pose, then `find_home` runs with the existing homing watch.
+  - Not homed / overridden / stalled → today's behaviour (skip with a warning at connect, confirm at disconnect, refuse a standalone HOME with the Sun reason).
+
+**Web:**
+- **Go To modal:** with `code: "sun_detour"`, SLEW stays enabled and the status line reads "Path detours around the Sun (+N s)". `sun_no_detour` is shown as a refusal, but not with the red box, like `sun_path` today.
+- The status line / panel shows "Avoiding the Sun" while routing.
+- The Jog modal's Turn 360° prompt shows the same detour note.
+
+**Briefs:**
+
+| Brief | Kind | Scope | Timebox |
+|---|---|---|---|
+| **T3.5a** | sim measurement, no product code | Custom `altaz` path behaviour on the PWI4 sim, needed by the executor:<ul><li>acquisition when the first point is the current pose at now + LEAD (LEAD 1 / 2 / 4 s);</li><li>following error vs path speed (2 / 5 / 10 / 15°/s) incl. a 16° arc and a 45° corner;</li><li>what happens after the last point (does it hold, stop or extrapolate?);</li><li>the `is_slewing` / `is_tracking` / target fields during the path;</li><li>STOP latency during a path;</li><li>`update_wrap=0` with a route crossing az 0/360 and an axis-0 range beyond 360;</li><li>`goto_alt_az` / `goto_ra_dec_j2000` right after the path ends.</li></ul>Output: `scratchpad/t35a/report.md` + raw JSON; finding P21 | 45 min |
+| **T3.5b** ∥ T3.5a | pure code + unit tests | `gateway/dsun.py` planner + `gateway/tests/test_dsun.py`, no I/O and no wiring; parameters (cruise, LEAD, keyhole, rate fraction) as module constants | 90 min |
+| **T3.5c** | gateway wiring + sim tests | safety / control / monitor / snapshot / audit / HOME integration; FakePwi4 unit tests; `test_dsun_pwi4sim.py` (pinned Sun): a local goto through the disc routed and arrived ≥ 15° all the way; a celestial goto routed then TRACKING; a `wrap_turn` routed; HOME routed; no-detour refusal; STOP mid-route stops within 0.3 s; monitor corridor stop | 90 min |
+| **T3.5d** | web | Go To / Jog prompt texts for `sun_detour` / `sun_no_detour`, "Avoiding the Sun" status; vitest | 45 min |
+
+**Gate (Tier 2 per brief; Tier 3 at the Phase 3 end):**
+- the planner's unit tests;
+- a sim slew through the pinned Sun: minimum measured separation ≥ 15° (target ≥ 15.5°), arrival within 0.01°, route time within 30 % of the plan;
+- the real browser for T3.5d only.
+- **Real-mount checklist:** custom-path following on the L-350; the homing path vs the home-pose route.
+
 ---
 
 ## 7. Progress tracker
@@ -1101,7 +1196,7 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | T3.3 | ✅ | ✅ 10-22 | ✅ 10-22 | ✅ 10-22 | pending (with T3.2; commit together) | TRACK = tracking_on (+ wrap centring, P19); H4 in gateway + `/api/transform` (0.47–0.53″ vs astropy); not-homed guard per connect session + dialog/chip; Pointing Mode STOP/TRACK |
 | T3.3b | ✅ | ✅ 10-27 | ✅ 10-27 | ✅ 10-27 | ✅ 10-27 (with T3.4) | refraction parity (P18), keep PWI4 wrap turn (P19 revert), stall guard (P19a); spec ready (Q5 = PWI4's model) |
 | T3.4 | ✅ | ✅ 10-27 | ✅ 10-27 | ✅ 10-27 | ✅ 10-27 (incl. T3.4d/e) | a: Go To modal + `/api/mount/check` dry run; b: PWI4 jog recording + rate probe (P20); c: Jog modal + jog/step (option A). First task under the new test tiers |
-| T3.5 | ⬜ | | | | | D-SUN |
+| T3.5 | ✅ | ✅ 10-27 | ✅ 10-28 | ✅ 10-28 | ✅ 10-28 (commit with the Phase 3 close) | D-SUN: a probe (P21), b planner, c wiring, d/f web, e sim tests (+ turn-watcher fix); browser pass 10-28 |
 | T4.1 | ⬜ | | | | | |
 | T4.2 | ⬜ | | | | | |
 | T4.3 | ⬜ | | | | | |
@@ -1112,17 +1207,9 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | T6.2 | ⬜ | | | | | |
 | T6.3 | ⬜ | | | | | |
 
-**Resume point (2026-10-27, end of session; compaction next):** Phases 0–2 committed; T3.1 `92bd389`; T3.2 + T3.3 `96ef418`. **T3.3b + T3.4 (incl. T3.4d/e) user-checked 10-27 and committed by the user right after this point** (check `git log`). Next:
-1. **T3.5 D-SUN.** Write the spec first from the approved design (§4 "D-SUN"); split into small briefs under the §1 test tiers. It must route:
-   - gotos (local + celestial; today refused with "Slew path passes within 15° of the Sun");
-   - HOME (today skipped / confirmed when Sun-blocked);
-   - the T3.4e `wrap_turn` (`TODO(T3.5 D-SUN)` in `gateway/safety.py`);
-   - jog stays refuse/stop (no detours for manual motion), unless the spec decides otherwise with the user.
-   - Use PWI4 custom `altaz` paths (P7, `update_wrap=0`, P8) for detours; the D-SUN timing must use the actual axis path (P9, P13).
-2. **Phase 3 end = Tier 3:**
-   - full sim suite ×2, harness, full browser pass of all Phase 3 screens (panel, Details modal, Go To, Jog, stalled/not-homed UX);
-   - fix the flaky list (§1); trim the slow sim tests;
-   - then the Phase 3 user check.
+**Resume point (2026-10-28, Phase 3 closed):** Phases 0–2 committed; T3.1 `92bd389`; T3.2 + T3.3 `96ef418`; T3.3b + T3.4 `06f961b`. **T3.5 + the Phase 3 end (Tier 3) verified 10-28; the user commits them together as the Phase 3 close.** Next:
+1. **Phase 4 (Tracking):** T4.1 spec first, from §5 and the logic sheet. T4.2 includes D-SUN for track segments (§4 step 4; the planner in `gateway/dsun.py` is reusable).
+2. **The real-mount session** (user) whenever available: the checklist below plus D-SUN custom-path following (10°/s arcs, 15°/s straights) and HOME routing vs the real homing path.
 - **Real-mount session checklist** (the user's first session on the real L-350; homing + jog will be tested together):
   - PWI4's real jog behaviour (does a release keep tracking? speeds? P20; option A provisional);
   - the real azimuth mechanical range + wrap behaviour (T3.4e assumed the sim's ±300°);
@@ -1161,6 +1248,7 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | 2026-10-20 | T1.1 | WebSocket can't pass Nitro devProxy (HTTP only) → in dev the page connects straight to the gateway (`runtimeConfig.public.gatewayWs`); token fetch stays proxied; prod = same-origin (gateway serves the app) |
 | 2026-10-20 | A4-i | **Red warnings** (user): Status red on FAULT; Sun Distance red when ≤ 15° (green > 15°). Implemented in T1.4 |
 | 2026-10-27 | T3.4e | Azimuth jog across PWI4's wrap edge swung 360° silently. Option B: the gateway slides PWI4's wrap window along with an azimuth jog (no turn while the axis has mechanical room, sim ±300°); near the real mechanical limit the jog stops with a margin and prompts "turn 360° / stay"; Turn = a goto-like validated reposition (pad dimmed, STOP available; D-SUN routing in T3.5 like gotos); Stay = stop at the limit, prompt again on the next jog that way | user |
+| 2026-10-27 | T3.5 Q10–Q12 | D-SUN HOME routing only when the mount completed a home this session (pose trusted); otherwise skip/confirm as today. Go To: SLEW enabled with a detour note. State during a detour: SLEWING + "Avoiding the Sun" | user |
 | 2026-10-27 | T3.4 user check | JOG mode always ends STOPPED (also from TRACK: jog = move to a place); STEP from TRACKING always ends TRACKING (step = offset a track; re-enable tracking if PWI4 dropped it). Jog STEP-running buttons dimmed solid, not translucent. Go To: a click anywhere in a group activates it; computed local El red for a failing celestial target; the inactive group live-updates after edits (bug: it did not). Go To + Sun guard: user-verified clean | user |
 | 2026-10-27 | process | Test tiers: sub-tasks run only the touched units + new/changed sim tests once (non-sim full pytest once); the full sim suite ×2 + full browser pass only at the end of a main phase; timeboxes; progress notes; split mixed sub-tasks | user |
 | 2026-10-26 | T3.4 | Q6 dry-run check; Q7 Go To modal stays open with a status line; Q8 jog while stopped = direct axis rates while held, no tracking_on, rate back to zero on release / disconnect; Q9 speeds = mount-axis rates | user |
@@ -1207,6 +1295,7 @@ Agreement (first 50 satellites × 7 epochs): TEME position diff max 1.4e-7 km; a
 | P18 | **PWI4's reported alt/az include atmospheric refraction** (T3.3 sim cross-check: PWI4 alt/az vs H4 of PWI4's own J2000 RA/Dec differ by 13–77″, matching Bennett refraction within 30″ in altitude; azimuth part < 20″). H4 and PWI4's apparent RA/Dec carry no refraction | The safety Lim EL check of an RA/Dec target (H4, unrefracted) is slightly stricter than PWI4's reported altitude (≈ 3.5′ at 15°): safe direction. T3.4 Go To modal: decide whether the computed local pair is shown refracted (as PWI4 reports) or not; real-mount check |
 | P19 | **`tracking_on` after a goto that changed the axis-0 wrap window and was stopped mid-slew slews the axis back into the window (~20°/s, up to 360°)** (T3.3 sim, full suite only; reproduced with direct sim calls) | Fixed: before `tracking_on` the gateway centres the wrap window on the current azimuth (`_prepare_wrap`), so TRACK holds the current pointing (Q1 parity). Real-mount check: the same behaviour with cable wrap |
 | P20 | **PWI4's own jog (Move Mount), recorded on the sim 10-27 while the user jogged:**<ul><li>the sim jog never moves the mount;</li><li>the offset-rate fields stay 0, so PWI4's jog uses an internal path that is not in the HTTP API (the public API has no jog / axis-velocity endpoint);</li><li>**a jog press on a stopped mount turns tracking on**: 5 tracking starts vs the user's 2 Track presses;</li><li>tracking ended on the user's STOPs, not visibly on release.</li></ul>**API probe:** `axis0_set_rate_arcsec_per_sec` does nothing on a stopped mount; while tracking it is exact (6.05° in 3 s at 2°/s incl. sidereal) | **T3.4 Q8 = option A (user 10-27):**<ul><li>jog from STOPPED = `tracking_on` + axis rate offset while held; on release (or a keep-alive timeout / disconnect) the rate goes to zero and the mount stops (`stop` + `tracking_off`), ending STOPPED;</li><li>before `tracking_on` the gateway checks axis 0 is inside its wrap window (P19), otherwise it refuses "Wrap out of range: re-home or Go To first";</li><li>while TRACKING: rate offsets only, tracking continues.</li></ul>**Real-mount session:** re-check PWI4's jog behaviour (does a release keep tracking? the speeds?) together with homing; the mechanics may change then |
+| P21 | **Custom alt/az path (sim, T3.5a, 10-27):**<ul><li>`apply(update_wrap=0)` takes 0.06–0.11 s; the mount waits still until the first point's time, then follows the polyline;</li><li>straight lines: cross-track 0.000, mean error 0.02° at 5°/s, ≤ 0.06° at 10–15°/s;</li><li>curves add the chord sagitta (v·dt)²/(8R) + lag: r = 16° arc 0.05° / 0.21° at 5 / 10°/s with 0.5 s points; a 45° corner peaks at 0.10° / 0.23°, gone in ≈ 1 s;</li><li>a first point in the past: first-order catch-up (tau ≈ 0.5 s); a far first point: slewed to at ≤ 17°/s;</li><li>during the path `is_tracking` True, `is_slewing` False; **after the last point the mount holds the last alt/az with `is_tracking` still True** (not sidereal);</li><li>STOP freezes the sim at once (≤ 30 ms), tracking off;</li><li>**an axis-0 route crossing the wrap-window edge unwinds ≈ 346° mid-path even with `update_wrap=0`** (supervisor re-read the raw trace: +111 → −235); with the wrap min set so the window holds the whole route it follows continuously.</li></ul> | D-SUN executor:<ul><li>LEAD 2 s, first point = the current pose;</li><li>cruise 5°/s, points every 0.5 s (planner as is);</li><li>set the wrap min so the whole route's axis-0 range (+ margin) is inside the window, before apply; a route spanning ≥ 358° (`wrap_turn`) cannot fit: the path stops 2° short of the window edge and the final goto finishes;</li><li>wait route end + 2 s, then the final command (`tracking_off` is needed: the path hold reports tracking);</li><li>completion by the route clock + position, never by the flags;</li><li>real mount: STOP coasts v²/(2a).</li></ul> |
 
 Harness note: `08_watchdog.explicit_stop_latency_s` is mis-measured in the supervisor run (includes the silent period); conclusion unaffected — fix opportunistically.
 
@@ -1687,6 +1776,96 @@ _Differences between the as-built app and the logic sheet / concept renders, wit
     - real browser: hold → right at 10°/s from 255° → stopped 291.7° → prompt (text OK) → Turn → "Turning 360° to −68.3°…", pad dimmed → same pointing → jog works after.
   - `PWI4.cfg` unchanged.
 - **For T3.5:** route `wrap_turn` through D-SUN like gotos. Known edge: a failed `wrap_turn` after the wrap write leaves the window moved (now harmless: the next jog re-centres).
+
+### T3.5 log (2026-10-27)
+- **T3.5b, planner** (`gateway/dsun.py` + `tests/test_dsun.py`, pure). The worker took ~11 min.
+  - Sides are "cw" / "ccw" (by bearing from the Sun).
+  - An endpoint inside 16° (but outside 15°) uses its radial projection onto the circle.
+  - An arc is discarded for: Lim EL + 0.5, the keyhole (88° / axis-1 max), the axis-0 range, a different axis-0 winding (this catches the over-zenith arcs), or a rate limit (0.8 × vmax).
+  - Timing: trapezoidal, with corners > 30° slowed to 1°/s; resampled every 0.5 s.
+- **Supervisor Tier 2:**
+  - 22 tests pass, ruff clean; the full non-sim pytest by the worker: 430 pass.
+  - **Independent check** (3000 random slews, interpolating between route points):
+    - min Sun separation 15.95° when the endpoints are ≥ 16.2° from the Sun; 15.13° when an endpoint itself is ~15.1° (by design);
+    - max axis rate 5°/s; plan time ≤ 35 ms.
+  - **Found:** about 20 % of the predictor-flagged slews have a clear straight line (the predictor's per-axis dog-leg crosses, the line does not), where the planner returns None.
+  - **Fixed:** `plan_route(..., force=True)` returns the timed straight line (test added). T3.5c must use it and never send a plain goto for a flagged slew.
+- **T3.5a, sim probe** (worker ~18 min; scripts and raw JSON in scratchpad `t35a/`): finding P21.
+  - Supervisor check: `PWI4.cfg` unchanged (40a4c3f4…); PWI4 left stopped, tracking off, wrap min restored.
+  - The wrap-edge unwind was confirmed in the raw trace.
+- **T3.5d, web texts** (worker ~3 min):
+  - `goto-modal.ts`: `parseCheck` detour, `detourLine`, `isRouting`, "Avoiding the Sun…" follow line; `sun_no_detour` without the red box;
+  - `GotoDialog.vue` passes `routing`; `mount-control.ts` type `route`.
+  - **Deviation:** the Jog modal's Turn 360° prompt sends `wrap_turn` without a dry check, so no "+N s" note there; a `sun_no_detour` refusal already shows.
+  - The panel already shows `state_reason`.
+  - Supervisor Tier 2: diff reviewed; typecheck 0, lint 0 errors (11 old warnings), vitest 105 in the 5 touched specs.
+  - The real browser pass waits for T3.5c (it needs the gateway).
+- **T3.5c, gateway wiring** (worker ~32 min):
+  - **Files:** `safety.py` (planner call + `force`, `RoutedGoto` / `_routes`, `R_NO_DETOUR` → `sun_no_detour`, dry run `sun_detour` + `detour`, `final_check` of the short final leg, route plan flag + `begin_route`, HOME routing only when `homed`); `control.py` (custom-path writer methods, `route_wrap_plan`, `fly_route` / `_route_job` / `_route_end` / `fly_home_route`); `app.py` (hooks, `/api/mount/check` `detour`); `sequences.py` (`_home` flies the route, re-checks, then `find_home`); `snapshot.py` `RouteInfo`; `state.get_override`; `jog._watch_turn` does not time out during a route.
+  - **Tests:** new `test_dsun_wiring.py` (17) and `test_dsun_pwi4sim.py` (4); 3 old tests now expect a detour instead of `sun_path`.
+  - **Worker additions** (not in the spec, accepted):
+    - the ack is sent when the route starts (the 5 s ack timeout);
+    - while a route flies, other motion is refused with "Avoiding the Sun; press STOP first" (code `slewing`);
+    - the route is refused with "Mount moved since the check; try again" when the pose moved more than 2° since the check;
+    - wrap: a route spanning ≤ 357° uses `w = lo − 1`; a longer one (360° turn) is cut 2° short and the final goto finishes it;
+    - celestial routes go to the alt/az at plan time, and the final `goto_ra_dec_j2000` closes the drift (0.1°).
+- **Supervisor Tier 2:**
+  - diff reviewed against the §6 contract;
+  - ruff clean; full non-sim pytest 448 pass;
+  - `test_dsun_pwi4sim.py` once: 3/4. **`test_no_detour_is_refused` failed:** a test bug, the target was exactly 180° away, so PWI4 may sweep the other way (away from the Sun) and a plain goto is correct (supervisor reproduced it: predictor min 21°). Fixed with a 170° target; it then passed.
+  - **Sim numbers** (matching the worker's):
+    - local goto through the pinned Sun: min Sun separation from `/status` **15.938°** (plan 16.0), arrival 0.0006°, motion 20.6 s vs plan 19.4 + 2 s settle, SLEWING mid-route, ends STOPPED with tracking off;
+    - celestial: 15.939°, ends TRACKING, 0.109° pointing error;
+    - STOP mid-route frozen in 0.063 s, no final goto sent.
+  - `PWI4.cfg` unchanged; PWI4 left stopped, tracking off.
+- **2026-10-28, closing T3.5:**
+  - **T3.5e, sim tests** (worker): `test_wrap_turn_is_routed`, `test_home_is_routed_when_homed`, `test_home_not_routed_when_overridden` added to `test_dsun_pwi4sim.py`.
+    - **Product bug found + fixed** (`jog._watch_turn`): during a route the turn watcher's clock under-counted, so a truncated turn was reported done before its final 2° goto had moved (end 0.17° off). Now `t0` follows the clock while a route flies, and the end error is 0.0002°.
+    - Supervisor run of the 3 tests, once: pass.
+      - Routed turn: min Sun separation 15.946°, plan 75 s / total 83.5 s, end error ≤ 0.0004°, axis 0 −68 → 292 with no reversal.
+      - HOME routed only when homed: min separation 15.947°, final pose ≤ 0.008°.
+  - **T3.5f, Jog prompt check** (worker): one dry check of `wrap_turn` per prompt; "Turn detours around the Sun (…)" or the refusal with Turn disabled.
+  - **Real browser pass** (supervisor, throwaway Nuxt 13270 + gateway 18733, Sun pinned; 1920 and 1280×600):
+    - Go To: "Path detours around the Sun", SLEW enabled, no red box → "Avoiding the Sun…" → "Arrived (STOPPED)";
+    - no-detour: the reason shown, SLEW disabled, no red box;
+    - Jog limit prompt with the detour note → the routed turn → STOPPED;
+    - no page errors, no overflow.
+  - **Supervisor fixes from the pass:**
+    1. "+N s" read as extra time but N is the whole route → "(about N s)"; the turn prompt drops its straight-turn "about 20 s" when a detour applies;
+    2. the panel status line said "TRACK: Slewing" during a route → "TRACK: Avoiding the Sun" (Q12).
+    - Tests updated; web typecheck 0 / lint 0 errors / vitest 106; re-run in the browser: OK.
+
+
+### Phase 3 end, Tier 3 (2026-10-28)
+- **Setup notes:**
+  - The user moved the PWI4 sim site and the app location (lat 0.12, lon 115.92) so the real Sun stays high.
+  - The first full sim run (27 failures) was invalid: the user's own 8400 gateway was running against the same sim, and its (correct) monitor stopped the tests' slews. Rerun after the user stopped it.
+  - `PWI4.cfg` was rewritten by PWI4 at the user's site change (03:53:59Z, before every Tier 3 run): **new baseline SHA-256 `4406df60…e2683a2`**.
+- **Found and fixed:**
+  1. **Monitor, false Lim EL stop near the zenith (product):** the sim lets axis 1 reach 91°. Passing 90° flips the REPORTED azimuth by 180°, the monitor's v_az spiked, and the speed-dependent look-ahead grew to ~16 s: a stop at alt 87 with v_alt −6 (predicted −12°). `SafetyMonitor.velocity` now uses the axis-0 position (continuous, physically bounded); unit test added.
+  2. **Monitor, plan ended too early (product; the flaky unit test `test_monitor_lets_validated_goto_reach_lim_el_plus_margin[0.1]`):** a validated goto's watch ended within 0.2° of the target while still descending, handing a target at Lim EL + 0.1 to the predictive rule with a lagging velocity. It now ends on arrival only when settled (≤ 0.05°/s). Under parallel load: before 2/6 failed, after 12/12 passed.
+  3. **Tests still depending on the real Sun** (now high at the new site): `test_stall_pwi4sim` (alt 20 base when the Sun is high → the gateway's correct predictive stop on the descent; now a fixed 45/150) and `test_monitor_stops_setting_sidereal_track` (a real-Sun precondition, although the gateway's Sun is pinned; removed).
+  4. **Tests out of date since D-SUN:** `test_jog_pwi4sim::test_wrap_turn_refused_when_the_sun_is_on_its_path` → `..._is_routed` (accepted as a detour, STOP ends it); `test_safety_pwi4sim::test_sun_refusals_with_test_override` (path crossing → routed).
+- **Results** (product code final before both runs):
+  - **full sim suite: run A 56/56 (20.7 min); run B 55/56** (the failure was fix 3's real-Sun precondition; the fixed test then passed);
+  - harness tests 17/17; PWI4 harness all scenarios ok (`tools/pwi4_harness/out/20261028T062219Z`);
+  - non-sim pytest 458; ruff clean; web typecheck 0, lint 0 errors (11 old warnings), vitest 393/393.
+- **Full browser pass** (throwaway Nuxt 13270 + gateway 18733, 1920 and 1280×600 @1.5):
+  - not-homed chip/dialog → Proceed → Details → TRACK/STOP → Go To local (Arrived) and celestial (Tracking) → Jog hold (STOPPED) / Step → HOME (HOMING → homed) → DISCONNECT (confirm, BUSY steps) → CONNECT (BUSY, homes) → stall (STALLED — HOME REQUIRED, Home-only dialog) → HOME clears it;
+  - D-SUN screens from the 10-28 T3.5 pass; no page errors;
+  - at 1280×600 @1.5 the Details modal scrolls inside its frame (controls reachable); the jog dialog's guide line touches the edge (scrollWidth flag only, as in T3.4).
+- **Browser-script lesson:** wait ≥ 3 s after closing a scripted browser that held control before driving the sim directly (its correct link-loss stop).
+- **Flaky list:** `test_monitor_lets_validated_goto_reach_lim_el_plus_margin[0.1]` fixed (fix 2). `test_goto_stop_state_sequence` passed in all 3 full runs (A, B, the diagnostic 1b): closed.
+- **Slowest sim tests** (trim later, not blocking): `test_wrap_turn_is_routed` 109 s, `test_track_from_stopped_is_sidereal_and_stop_holds` 102 s, `test_h4_vs_pwi4_reported_altaz` 84 s.
+
+- **D-SUN speed-up (user 10-28, after the Tier 3 run):** the 5°/s route felt too slow.
+  - **User choice:** arcs 10°/s, straight parts 15°/s (`dsun.ARC_CRUISE_DEG_S` / `CRUISE_DEG_S`; per segment, from `_assemble`'s arc flags), points every 0.25 s (`POINT_DT_S`), end wait 1 s (`control.ROUTE_SETTLE_S`).
+  - The axis-rate cap (0.8 × vmax), the acceleration ramps, the corner slowdown and the monitor rules are unchanged.
+  - **Checks:**
+    - unit tests updated where they hard-coded the old speed (96 D-SUN / wrap / check tests pass); non-sim pytest 458; ruff clean;
+    - supervisor random check (3000 slews, between-point interpolation): min Sun separation 15.949°, max rate 15.00°/s, plan ≤ 34 ms;
+    - D-SUN sim tests + the two routed-path sim tests once: 9/9. Local detour **10.1 s planned / 11.4 s actual (was 19.4 / 20.5)**, min Sun separation 15.882° (target ≥ 15.5), arrival 0.0002°.
+  - **Real-mount checklist:** custom-path following at 10 / 15°/s with the real acceleration.
 
 ## 9. Known limitations & risks
 

@@ -3,6 +3,7 @@
 // itself after 300 ms without one), `jog_stop {}` on release; `step {axis, dir, size_arcmin}` once per press.
 import type { CommandAck, ControlHolder } from './mount-socket'
 import { gotoDisabledReason, type ControlSnapshotLike } from './mount-control'
+import type { CheckResult } from './goto-modal'
 
 export const JOG_SPEEDS = [0.5, 1.0, 2.0, 5.0, 10.0] as const
 export const STEP_SIZES = [1, 5, 10, 30, 60] as const // arcmin
@@ -66,10 +67,23 @@ export function wrapPromptVisible(s: JogSnapshotLike | null, dismissed: boolean)
 const fmtNum = (v: number | undefined, d: number): string => (typeof v === 'number' && Number.isFinite(v) ? String(Number(v.toFixed(d))) : '?')
 
 export const WRAP_TITLE = 'Azimuth limit reached'
-export function wrapPromptText(s: JogSnapshotLike | null): string {
+export function wrapPromptText(s: JogSnapshotLike | null, detour = false): string {
   const l = s?.jog_limit
   const way = (l?.dir ?? 1) < 0 ? 'left' : 'right'
-  return `The azimuth axis is at its mechanical limit (±${fmtNum(l?.limit_deg, 1)}°). To keep moving ${way} the mount must turn 360° the other way round (about ${fmtNum(l?.est_s, 0)} s). Turn the mount, or stay here?`
+  // T3.5: a Sun detour has its own duration (turnCheckNote); the straight-turn estimate would contradict it.
+  const est = detour ? '' : ` (about ${fmtNum(l?.est_s, 0)} s)`
+  return `The azimuth axis is at its mechanical limit (±${fmtNum(l?.limit_deg, 1)}°). To keep moving ${way} the mount must turn 360° the other way round${est}. Turn the mount, or stay here?`
+}
+
+/**
+ * T3.5f: what the dry check of `wrap_turn` adds to the prompt. A routed turn shows the detour line; any
+ * refusal shows its reason and blocks the Turn button; ok-without-detour / pending / unreachable add
+ * nothing (the real command still gets the gateway verdict).
+ */
+export function turnCheckNote(c: CheckResult): { line: string | null, blocked: boolean, detour: boolean } {
+  if (c.kind === 'refused') return { line: c.reason, blocked: true, detour: false }
+  if (c.kind === 'ok' && c.detour) return { line: `Turn detours around the Sun (about ${Math.round(c.detour.duration_s)} s)`, blocked: false, detour: true }
+  return { line: null, blocked: false, detour: false }
 }
 
 const padName = (axis: number, dir: number): string => (axis === 0 ? (dir < 0 ? 'left' : 'right') : (dir < 0 ? 'down' : 'up'))
