@@ -297,3 +297,96 @@ def test_first_failing_row_wins():
     r = track_verdict(pinfo(alt=10.0, peak_alt=12.0, rising=False, t_out=NOW + 1), NOW, LIM)
     assert r[1] == "peak_below_limit"
     assert math.isfinite(NOW)
+
+
+# ------------------------------------------------------------ T4.2f: crossings relative to NOW
+
+# Real Galileo 10 (MEO) over Bangkok: it dips to 0.3 deg WITHOUT setting between a low hump (peak
+# ~14 deg) and the big one (peak 80.25 deg), so the pass is one 10.9 h above-horizon span with
+# two Lim EL segments.
+BKK = (13.1199722222222, 100.920694444444, 12.0)
+BKK_TOPOS = wgs84.latlon(BKK[0], BKK[1], elevation_m=BKK[2])
+GALILEO = (
+    "1 40890U 15045B   26301.02551441  .00000007  00000-0  00000-0 0  9997",
+    "2 40890  54.9099 217.9402 0003273  18.8705 341.1818  1.70472842 69307",
+)
+T_GAL = 1793252760.0  # 2026-10-29 05:46:00 UTC
+LIM_GAL = 10.0
+
+
+def gal_alt(t: np.ndarray) -> np.ndarray:
+    sat = EarthSatellite(*GALILEO, ts=TS)
+    alt, _, _ = (sat - BKK_TOPOS).at(passes._times(TS, t)).altaz()
+    return alt.degrees
+
+
+def gal_info(t, lim=LIM_GAL):
+    return compute_pass(*GALILEO, BKK, lim, t, sun_down, TS)
+
+
+def test_galileo_after_its_peak_is_trackable_with_the_next_exit():
+    info = gal_info(T_GAL)
+    assert info.alt == pytest.approx(76.1, abs=0.1) and not info.rising
+    assert track_verdict(info, T_GAL, LIM_GAL) == (None, None, "track")
+    t = np.arange(T_GAL - 6 * 3600, T_GAL + 8 * 3600, 1.0)
+    alt = gal_alt(t)
+    d = alt - LIM_GAL
+    down = np.nonzero((d[:-1] >= 0) & (d[1:] < 0) & (t[:-1] > T_GAL))[0]
+    ref_out = float(t[down[0]] + (-d[down[0]] / (d[down[0] + 1] - d[down[0]])))
+    assert info.t_out == pytest.approx(ref_out, abs=1.0)
+    assert 3.6 * 3600 < info.t_out - T_GAL < 3.7 * 3600  # 3 h 37 min ahead
+    assert info.peak_alt == pytest.approx(80.2526, abs=0.01)
+    assert info.peak_alt == pytest.approx(float(alt.max()), abs=0.01)
+    assert info.t_peak < T_GAL and info.t_in < info.t_peak < info.t_out < info.t_set
+    up = np.nonzero((d[:-1] < 0) & (d[1:] >= 0) & (t[:-1] < T_GAL))[0]
+    ref_in = float(t[up[-1]] + (-d[up[-1]] / (d[up[-1] + 1] - d[up[-1]])))
+    assert info.t_in == pytest.approx(ref_in, abs=1.0)  # the last upward crossing, not the first
+    assert info.t_rise < info.t_in - 3600  # the rise was hours earlier (the low hump)
+
+
+def test_between_humps_the_next_segment_is_pre_position():
+    # the dip between the humps (0 < alt < Lim EL, rising: about -5.5 h .. -4 h from T_GAL)
+    t = np.arange(T_GAL - 5.4 * 3600, T_GAL - 4.2 * 3600, 1.0)
+    now = float(t[len(t) // 2])
+    info = gal_info(now)
+    assert 0.0 < info.alt < LIM_GAL and info.rising
+    reason, code, phase = track_verdict(info, now, LIM_GAL)
+    assert (reason, phase) == (None, "pre_position")
+    tt = np.arange(now, now + 3 * 3600, 0.5)
+    d = gal_alt(tt) - LIM_GAL
+    j = int(np.nonzero((d[:-1] < 0) & (d[1:] >= 0))[0][0])
+    ref_in = float(tt[j] + 0.5 * (-d[j] / (d[j + 1] - d[j])))
+    assert info.t_in == pytest.approx(ref_in, abs=1.0) and info.t_in > now
+    assert info.t_out is not None and info.t_out > info.t_in
+    assert info.peak_alt == pytest.approx(80.2526, abs=0.01)  # the big hump
+
+
+def test_inside_the_low_hump_the_segment_is_the_low_hump():
+    t = np.arange(T_GAL - 10.5 * 3600, T_GAL - 7.5 * 3600, 1.0)
+    alt = gal_alt(t)
+    now = float(t[int(np.argmax(alt))])
+    low = gal_info(now)
+    assert LIM_GAL < low.alt < 15.0
+    assert low.t_in < now < low.t_out < T_GAL - 6 * 3600  # out = the low hump's own exit
+    assert low.peak_alt == pytest.approx(float(alt.max()), abs=0.01)
+    assert track_verdict(low, now, LIM_GAL)[2] == "track"
+
+
+def test_falling_into_the_dip_with_a_rise_ahead_is_pre_position():
+    t = np.arange(T_GAL - 7.5 * 3600, T_GAL - 6.2 * 3600, 1.0)
+    now = float(t[len(t) // 2])
+    info = gal_info(now)
+    assert 0.0 < info.alt < LIM_GAL and not info.rising
+    assert track_verdict(info, now, LIM_GAL)[2] == "pre_position"
+    assert info.t_in > now + 3600  # the climb to the big hump
+
+
+def test_row5_falling_into_a_dip_with_a_climb_ahead_is_not_setting():
+    # below Lim EL, falling, but the next upward Lim EL crossing (t_in) is ahead
+    r = track_verdict(
+        pinfo(alt=10.0, rising=False, t_in=NOW + 500, t_peak=NOW + 900, t_out=NOW + 2000), NOW, LIM
+    )
+    assert r == (None, None, "pre_position")
+    # no climb ahead: still setting
+    r = track_verdict(pinfo(alt=10.0, rising=False, t_in=NOW - 100, t_peak=NOW + 900), NOW, LIM)
+    assert r[1] == "setting"

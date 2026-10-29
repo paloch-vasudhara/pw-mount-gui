@@ -608,3 +608,20 @@ def test_monitor_velocity_uses_the_azimuth_axis_not_the_flipping_azimuth():
     mon._hist.append((0.0, 45.0, 359.0, math.nan, 0.0))
     mon._hist.append((0.5, 45.0, 1.0, math.nan, 0.0))
     assert abs(mon.velocity()[1] - 4.0) < 1e-9
+
+
+def test_track_corridor_is_measured_on_the_sky_near_the_zenith():
+    """Q19 (T4.2d): an object track's corridor scales axis-0 offsets by cos(alt). At alt 87 a
+    10 deg axis-0 lag is ~0.5 deg on the sky (inside 2 deg); in axis space it is 10 deg."""
+    path = [[(0.0, 87.0), (60.0, 87.0)]]
+    lag = (-10.0, 87.0)  # behind the start of the azimuth sweep
+    assert corridor_distance(lag, path) == pytest.approx(10.0)
+    assert corridor_distance(lag, path, sky=True) == pytest.approx(
+        10.0 * math.cos(math.radians(87))
+    )
+    # low altitude: the sky metric stays close to the axis metric (no blanket relaxation)
+    low = [[(0.0, 30.0), (60.0, 30.0)]]
+    assert corridor_distance((-3.0, 30.0), low, sky=True) == pytest.approx(
+        3.0 * math.cos(math.radians(30))
+    )
+    assert corridor_distance((10.0, 33.0), low, sky=True) == pytest.approx(3.0)

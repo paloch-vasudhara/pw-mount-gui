@@ -1,0 +1,5 @@
+[09:44:54.905] pass SYN-S4F: peak 87.99, t_in in 119 s, t_out-t_in 321 s, compute_pass={"t_in": 1793180814.0049405, "t_out": 1793181134.8099802, "t_peak": 1793180973.8846092, "peak": 87.99460259099193, "t_rise": 1793180650.2352092, "t_set": 1793181300.3055587}
+[09:44:54.912] zenith: peak 87.99; ax0 range -212.8..-37.9 over window
+[09:45:03.307] prepositioned: alt 51.095 ax0 -37.892 (wanted alt 51.095 ax0 -37.893) wrap -305.4 settled=True
+[09:50:20.735] saved s4_zenith_follow.json (3173 rows)
+[09:50:20.749] s4_zenith_follow wrap before -305.4 after -300.0

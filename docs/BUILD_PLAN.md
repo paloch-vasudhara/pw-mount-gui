@@ -54,7 +54,7 @@ Each task `Tn.m` runs the same loop. The supervisor (main session) owns this fil
 | Poller / state machine | `gateway/tests/test_gateway_pwi4sim.py` |
 | Harness / sim_guard | `tools/pwi4_harness/tests/` |
 
-- **Flaky list** (fix at the phase end): empty after the Phase 3 end (10-28; see the "Phase 3 end, Tier 3" log).
+- **Flaky list** (fix at the phase end): **empty after the Phase 4 end (10-29)**; both entries below fixed (see the "Phase 4 end, Tier 3" log). History: `test_jog.py::test_keepalive_timeout_stops_a_stopped_origin_jog` (0.297 s vs a 0.3 s floor once under parallel load, T4.2b 10-28; passes alone); `test_track_exec.py::test_pass_sequence_phases_snapshot_monitor_audit_end` (failed once in a combined track_exec + jog run 10-29, then 6/6 + 10/10 green). Fixed 10-29: `test_late_arrival_replans_once_with_a_short_goto` (the fake mount's park jump read as a fast descent by the monitor → 'Cancelled: Below station limit elevation'; the test now waits for a still mount; 10/10).
 
 **PWI4 testing:** mount-control work is tested against **PWI4 in simulation mode** (user-confirmed, O3). Never point automated tests at a PWI4 instance connected to the real mount; real-mount sessions are user-run checks only.
 
@@ -1255,6 +1255,239 @@ Notes:
   - the analysis service stopped → "Satellite data unavailable".
 - No sim test is needed (no PWI4 motion). The check endpoint's mount guards are covered by the FakePwi4 tests.
 
+### T4.2 — Object track workflow: rendezvous, own-path following, stop at Lim EL, D-SUN for passes (spec, 2026-10-28)
+
+**Goal:** TRACK OBJECT works (A1d). The gateway:
+- re-checks the pass (T4.1 rules);
+- moves the mount to a meeting point on the pass (the Lim EL crossing, or a point a little ahead when the object is already up);
+- waits there;
+- follows the satellite with its **own timed alt/az path** (Q17);
+- detours around the Sun inside that path;
+- stops at the Lim EL exit → STOPPED.
+
+**User decisions (10-28):**
+- **Q17 track engine = the gateway's own custom alt/az path** (not `follow_tle`): one mechanism for every pass, the Sun detour inside the path, the wrap under gateway control, the monitor knows the planned path, the path ends exactly at the Lim EL exit. Basis P22: 0.003° on the sim; ≥ 10 000 points; extend with add + apply.
+- **Q18 near-zenith passes:** trackable. When `peak_alt > 87°` the card notes "Near-zenith pass: tracking lags near the peak" (P22: 0.6° lag at 88°).
+
+**Sheet rules applied** (no new decisions):
+- **G5 / A1e:** a new `track_object` while tracking replaces the track.
+- **A5c-iv:** Go To is allowed during an object track and replaces it.
+- **A5c-i:** HOME = stop, then home.
+- **A5b:** TRACK (sidereal) ends the object track.
+- **A5c-iii:** STOP ends it, holding the pose of the moment; jog / step are refused during an object track ("Object tracking; press STOP first").
+- **G3 / A1d-4:** the track ends at Lim EL → STOPPED. **G4:** link loss stops it.
+
+**1. Track planner, `gateway/trackplan.py`** (pure, no I/O; reuses `passes.py` and `dsun.py`):
+- **Track points:**
+  - the object's alt/az from sgp4 (skyfield, as in `passes.py`) every **1 s** (P22), from `t_start` to `t_out`;
+  - **PWI4's refraction applied** (`transforms.refract_alt`): path coordinates are PWI4's refracted alt/az (P22);
+  - the azimuth unwrapped to a continuous axis-0 sequence starting from the axis-0 value nearest the rendezvous pose.
+- **Never-setting objects** (`t_out` None): the first chunk covers 30 min. The executor extends the path every 10 min (add + apply, P22) and stops the track if the object drops below Lim EL.
+- **Rendezvous** (one rule for both phases): `t_r = max(t_in, now + slew_estimate + 3 s)`.
+  - `slew_estimate` uses the existing slew-time model (vmax / accel + approach constant, P13) from the current pose to the object at `t_r`; iterate 3×.
+  - The rendezvous point = the object at `t_r` (refracted). It must be ≥ Lim EL + 0.5 (the D-SUN `LIM_EL_PAD`) and not within 15° of the Sun.
+  - `t_r` must leave ≥ 30 s before `t_out` (Q15). Otherwise refuse "Pass ends in under 30 s".
+- **D-SUN for track segments** (§4 step 4):
+  - Blocked intervals are where the track comes within **16°** of the Sun (R_DETOUR).
+  - For each interval [t_a, t_b], the track points inside it are replaced by an arc on the 16° circle (Sun-centred tangent plane, `dsun` helpers), from the entry point at t_a to the exit point at t_b, timed uniformly over [t_a, t_b], with points every 0.25 s.
+  - Pick the clockwise or counter-clockwise arc: the shorter one that stays ≥ Lim EL + 0.5 and ≤ the keyhole, with axis rates ≤ 0.8 vmax and arc speed ≤ `ARC_CRUISE_DEG_S`.
+  - Neither side usable → **no detour** → refuse "Pass passes within 15° of the Sun; no safe detour" (code `sun_no_detour`).
+  - The Sun position is evaluated at each interval's mid time (it moves 0.004°/s).
+  - A blocked interval that includes `t_r` → the rendezvous moves to the end of that interval. If that leaves < 30 s, refuse.
+- **Zenith note:** `peak_alt > 87°` → note text (Q18). It is not a refusal. A peak above the keyhole is still trackable; the planner does not reshape the track.
+- **Output `TrackPlan`:**
+  - `points` (t, az, alt, axis0);
+  - `t_r`, `rendezvous` (alt, az, axis0), `t_end`;
+  - `detours` [(t_a, t_b, side, length_deg)], `min_sun_sep_deg`;
+  - `notes`, `corridor`.
+- **Budget:** ≤ 100 ms for a 15 min LEO pass with one detour.
+- **Unit tests:**
+  - points vs skyfield + `refract_alt` ≤ 0.001°;
+  - continuity of axis 0 across az 0/360 and through a near-zenith flip;
+  - rendezvous for both phases;
+  - detour clearance ≥ 16° − 0.05 along the arc, cw/ccw choice, no-detour cases (Lim EL, keyhole);
+  - the 30 s rule;
+  - the zenith note.
+
+**2. Verdict additions (T4.1 rules, `passes.py` / `trackcheck.py`):**
+- Row 7 = the plan itself: the T4.1 check now also runs the planner (cached with the pass). A no-detour or rendezvous failure refuses with the reasons above.
+- `/api/mount/check` returns:
+  - `detour`: `{seconds, count}` or null;
+  - `notes`: a list;
+  - `pass.t_r`.
+- The card shows the notes (zenith) under an enabled button. The real command re-runs the same check (row 0 included) before doing anything.
+
+**3. Executor, `ControlService` (`gateway/control.py`; the job pattern of `_route_job`):** `track_object {norad}`.
+- **The sequence:**
+  1. Refuse per the verdict.
+  2. If tracking an object already: end that track (stop) first (G5).
+  3. **Rendezvous goto:** the existing validated `goto_altaz` path to the rendezvous point, including D-SUN routing (`ROUTABLE`). State SLEWING. The goto ends STOPPED (`tracking_off`).
+  4. If the goto arrives after `t_r − LEAD`, re-plan once from the current time. If that fails → STOPPED + reason.
+  5. **Upload the track path** right after arrival:
+     - `tracking_off` → wrap min set so the window holds the plan's axis-0 range (`route_wrap_plan`; a pass spans < 360°);
+     - `custom_path/new altaz` → `add_point_list` (`jd, az, alt`, refracted) → `apply(update_wrap=0)`;
+     - the first point = the current pose at `t_r` (the mount waits still until then, P21).
+  6. The state override is TRACKING:
+     - "Waiting for {name}" until `t_r`;
+     - then "Tracking {name}";
+     - "Avoiding the Sun" during a detour interval.
+  7. **Long tracks:** extend every 10 min (add + apply, no `new`).
+  8. **End:** at `t_end` + 1 s settle → `stop` + `tracking_off` (P21/P22: the path holds the last pose with tracking on) → STOPPED. State reason "Track ended at Lim EL" (cleared by the next command). Audit `track_done`.
+- **Ack:** the command is acked when the rendezvous goto starts. A refusal acks `ok:false` + reason.
+- **Ending a track:**
+  - STOP (from any window): `track_stopped`.
+  - Link loss: the existing G4 stop.
+  - Go To / HOME / TRACK (sidereal): stop the track, then run the command (replaces it; audit `track_replaced`).
+  - `track_object` again: replace.
+  - jog / step / wrap_turn: refused "Object tracking; press STOP first".
+  - A monitor limit stop: `track_stopped` with the limit reason (G3).
+- **Snapshot `track`** (null when idle):
+  - `{norad, name, phase: "slewing"|"waiting"|"tracking"|"detour", t_r, t_end, t_peak, peak_alt, detours, notes}`;
+  - `ended`: `{norad, reason, at}` for 30 s after an end, so the card can show "Track ended at Lim EL".
+- **Audit:** `track_start` (norad, name, TLE epoch, t_r, t_end, detours, min_sun_sep), `track_done`, `track_stopped`, `track_replaced`.
+- **Monitor:**
+  - while a track path runs: a validated plan with the track **corridor** (2°, as for routes) from the upload until `t_end` + settle;
+  - the actual Lim EL / Sun limits stay on (G3);
+  - the predictive look-ahead is OFF for the validated track (it would stop the mount early at the Lim EL exit);
+  - during the wait at the rendezvous the plan's corridor holds the mount still.
+
+**4. Web:**
+- **Track Info card:**
+  - TRACK OBJECT sends `track_object` (WS command with ack). A refusal shows its reason on the reason line.
+  - While this card's NORAD is the snapshot `track`, the button reads **TRACKING** and is disabled (A1e). The reason line shows the phase:
+    - "Slewing to the pass";
+    - "Waiting for the pass — mm:ss" (countdown to `t_r`);
+    - "Tracking — ends in mm:ss";
+    - "Avoiding the Sun";
+    - plus the zenith note when present.
+  - After an end: "Track ended at Lim EL" / the stop reason.
+- **Status line / panel:** TRACKING with the override text; TRACK / STOP behave as A5b.
+- **Jog modal:** pad disabled during an object track with "Object tracking; press STOP first".
+- **Not in T4.2:** the A1e pinning / stacking rules, the × hidden, the Track Target modal and the stale badge (all T4.3).
+
+**5. Sim tests** (`gateway/tests/test_track_object_pwi4sim.py`, Sun pinned with `PW_TEST_SUN_ALTAZ`, a throwaway gateway with `PW_ANALYSIS_URL` → a **TLE stub** HTTP server on a throwaway port serving `/api/sats/{norad}` with synthetic TLEs; the generator from T4.2a `scratchpad/t42a/tlegen.py` moves to `gateway/tests/tlegen.py`):
+
+| Test | Expectation |
+|---|---|
+| Normal pass (object already above Lim EL) | rendezvous ahead on the track; following error ≤ 0.05° after acquisition; ends STOPPED at `t_end` within 2 s, mount ≥ Lim EL throughout; audit start / done |
+| Rising below the limit | SLEWING → TRACKING "Waiting" at the crossing point; the mount still until `t_r`; then follows; never below Lim EL − 0.1 (refracted) |
+| Peak below the limit | refused, `peak_below_limit`, nothing sent to PWI4 |
+| Through the Sun (Sun pinned on the pass) | "Avoiding the Sun" during the interval; measured min separation ≥ 15° (target ≥ 15.5°); back on the object ≤ 0.05° within 3 s after t_b |
+| STOP mid-track | stopped within 0.3 s, STOPPED, `track_stopped` |
+| Go To during a track | track ended, the goto runs |
+| Wrap | the axis-0 wrap min unchanged by the track (no PWI4 self-change; the path has `update_wrap=0`) |
+| Replace (G5) | a second `track_object` ends the first and starts the second |
+| Near-zenith pass (peak ≈ 89°, `tlegen.ZENITH_89`-like) | the axis-0 lag near the peak does NOT trip the 2° corridor (it measures the distance to the path polyline in axis space, not to the time point); back on the object ≤ 0.05° within 5 s after the peak; the card note present |
+
+- Keep each test to one short pass: rise 60–120 s ahead, 20–45° peaks.
+- The user's 8400 gateway must be stopped for sim runs.
+
+**Must not touch:** `pwi4/`, ssa-toolkit, `docs/`, `analysis/`, PWI4 settings. No commits. Throwaway ports only.
+
+**Briefs:**
+
+| Brief | Kind | Scope | Timebox |
+|---|---|---|---|
+| **T4.2b** | pure code + unit tests | `gateway/trackplan.py` + `test_trackplan.py`; verdict row 7 + check fields (`detour`, `notes`, `pass.t_r`) | 90 min |
+| **T4.2c** | gateway wiring + FakePwi4 unit tests | executor, state override, snapshot `track`, ending rules, monitor plan, audit, the WS command; `tlegen.py` + TLE stub helper | 90 min |
+| **T4.2d** | sim tests | `test_track_object_pwi4sim.py` (the table above), once; a second run only if a timing result is within 20 % of its limit | 60 min |
+| **T4.2e** | web | card TRACK / TRACKING / phases / countdown / notes / ended; Jog disabled during an object track; vitest | 45 min |
+
+**Gate (Tier 2):**
+- Diff review.
+- Re-run the new sim tests once.
+- A spot check: one synthetic pass flown on the sim, its recorded pointing vs skyfield + refraction, min Sun separation.
+- Real browser (T4.2e): a pass from click to "Track ended at Lim EL" at 1920 and 1280×600 @1.5.
+- **Real-mount checklist additions:** satellite tracking via custom path on the L-350 (following error, the zenith lag at real axis speeds), the rendezvous wait.
+
+### T4.3 — Card states and stacking (A1e), Track Target modal (A5c-ii), stale-TLE badge (spec, 2026-10-29)
+
+**Goal:**
+- The Track Info panel follows the A1e rules while tracking.
+- MOUNT CONTROL › TRACK TARGET opens the Track Target modal (`concept/Track target Modal.png`): search, filter, pick, track.
+- Objects with an old TLE carry a stale badge.
+
+**User decisions (10-29):**
+- **Q21 stacking:** while A is tracked and B is selected, B's full card sits on top and A collapses to a one-line pinned strip below it (name + phase line). Clicking the strip re-focuses A (B closes).
+- **Q22 search set:** all live (non-decayed) objects: payloads, rocket bodies and debris. Stale TLEs are listed with the badge.
+- **Q23 row selection:** lives in the modal only. The dashboard selection changes only when tracking starts.
+
+**1. Analysis (`analysis/`):**
+- `GET /api/sats/search`: add `country` (exact `country_code`, case-insensitive) and `orbit_group` (`leo` = LEO + SSO, `meo` = MEO, `geo` = GEO + HEO, the A2a mapping). The existing `orbit_class` is kept. Default (no filter) = the 500 latest NORAD ids, newest first, as today.
+- `GET /api/sats/countries` → `[{code, count}]`: the distinct `country_code` of live objects, most common first, null codes left out. Cached with the catalogue (refreshed on its reload).
+- Tests with the fixture source (filters, the mapping, countries). No DB writes.
+
+**2. Track Info panel (A1e), `components/track/`:**
+- **States**, from the selection store `selectedNorad` + the snapshot `track` (phase set = tracking):
+
+| State | Panel shows |
+|---|---|
+| nothing selected, not tracking | "No object selected" (as today) |
+| B selected, not tracking | B's card (as today) |
+| tracking A, nothing selected or A selected | A's card **pinned**: button "TRACKING" (disabled), the × hidden, the phase line (T4.2e) |
+| tracking A, B selected | B's full card + **A strip** below it (📌 name · phase line, e.g. "THAICOM 8 · Tracking — 03:21") |
+| B's TRACK OBJECT while tracking A | B becomes the tracked object (G5 replace); A's strip goes |
+| B closed / deselected while tracking A | A's pinned card returns |
+| A strip clicked | the Sky Viewer selection re-focuses on A (B closes) |
+| track ends (STOP, limit, Goto, Home, TRACK, Sun stop) | A's card stays as a normal selected card when A is the selection; if B is selected at that moment, A is dropped |
+
+- **Every tracking command brings up the tracked object's card:** a successful `track_object` from the card, the modal or (later) Pass Analysis sets the selection to the tracked NORAD.
+- **Layout:**
+  - the strip is one line inside the panel, with ellipsis;
+  - B's card + strip must fit the 1280×600 @1.5 panel; tighten via the existing `@container` block, and if it cannot fit, the strip replaces the card's reason line — report which;
+  - a pure helper `utils/track-panel.ts` (state → what to render) with vitest for every row above.
+- The strip shows the phase line from the snapshot (no extra polling).
+
+**3. Stale-TLE badge:**
+- `components/track/StaleBadge.vue`: a small amber chip "TLE {N} d" when `tle_age_days > 30` (constant `STALE_TLE_DAYS` = 30, shared with the analysis cutoff); `title` = "TLE is {N} days old: the position may be off".
+- **Where:**
+  - on the Track Info card, after the class chip (from `/api/sky/state` `tle_age_days`);
+  - in the Track Target results (EPOCH cell);
+  - later on Pass Analysis results (T5.1).
+- vitest for the threshold.
+
+**4. Track Target modal (A5c-ii), `components/track/TrackTargetDialog.vue`:**
+- Opened by MOUNT CONTROL › TRACK TARGET (enable the button; it follows the same control-panel enabling as GOTO / JOG). The dialog shell and sizing are like the Go To modal.
+- **Tabs:**
+  - SATELLITE (active);
+  - AIRCRAFT: present but disabled, `title` "No ADS-B source configured"; no aircraft content is built.
+- **Satellite filters row:**
+  - search box "Search name or NORAD ID" (Enter = FILTER);
+  - Orbit select: any / LEO / MEO / GEO → `orbit_group`;
+  - Origin select: "any" + the countries from `/api/sats/countries`, with flags (`FlagBadge`), default any;
+  - FILTER and CLEAR buttons (CLEAR resets all and reloads the default list).
+- **Results table** (render): NORAD ID ▼, NAME, ORBIT (`orbit_class`), ORIGIN (flag + code), EPOCH (`YYYY-MM-DD hh:mm:ss` in the dashboard clock's zone, UTC or Local) + the stale badge.
+  - Sortable by any column (click the header; ▼ / ▲); default NORAD ID descending.
+  - At most 500 rows; when 500 come back, a muted footer reads "Showing the first 500 matches — refine the search".
+  - Scrolls inside the modal; row click selects (highlight); a double-click = TRACK SELECTED TARGET.
+  - Loading, "No matches" and an error line ("Satellite data unavailable" when analysis is down; time-limited fetch).
+- **TRACK SELECTED TARGET** (full width, like the render):
+  - enabled from the gateway check (`POST /api/mount/check` `track_object` for the selected row, 1 Hz while a row is selected — `utils/track-verdict.ts`);
+  - the status line below = the reason, the check note (zenith / Sun blocks) or "Ready";
+  - nothing selected → disabled, "Select a target".
+  - Click → `track_object` (WS ack). On ok: the dashboard selection = that NORAD (A1e) and the modal **closes**. On a refusal: the reason on the status line, the modal stays.
+- **Keyboard:** ↑ / ↓ move the selection, Enter tracks, Esc closes.
+- vitest for the pure parts (query building, sorting, the epoch format, the status-line text).
+
+**Must not touch:** `pwi4/`, ssa-toolkit, `docs/`, the gateway (no change needed: `/api/sats/{norad}` serves any non-decayed object; the check / command exist), PWI4 settings. No commits. Throwaway ports only; never the user's 3200 / 8400 / 8410.
+
+**Briefs:**
+
+| Brief | Kind | Scope | Timebox |
+|---|---|---|---|
+| **T4.3a** | analysis | `country` + `orbit_group` search filters, `/api/sats/countries`, tests | 30 min |
+| **T4.3b** ∥ a | web | A1e panel states + strip + `utils/track-panel.ts` + `StaleBadge` on the card; vitest | 60 min |
+| **T4.3c** after a, b | web | Track Target modal + TRACK TARGET button + badge in results; vitest | 75 min |
+
+**Gate (Tier 2):**
+- Diff review.
+- Analysis tests + a DB spot check through a throwaway analysis (counts only: default 500 newest; THAI country filter; the LEO group includes SSO).
+- **Real browser**, throwaway servers + the PWI4 sim + the TLE stub for one synthetic pass, at 1920 and 1280×600 @1.5:
+  - the modal: search / filter / sort, the stale badge, the status line, TRACK SELECTED TARGET closes the modal and brings up the tracked card;
+  - A1e: select B while tracking → B + the A strip; strip click → A; deselect → A pinned; STOP with B selected → A dropped.
+- No new sim test (no new motion).
+- Phase 4 end (Tier 3) after T4.3: full sim suite ×2 (includes the owed `test_track_object_pwi4sim.py` re-run after T4.2f), harness, full browser pass, flaky list.
+
 ---
 
 ## 7. Progress tracker
@@ -1284,9 +1517,9 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | T3.3b | ✅ | ✅ 10-27 | ✅ 10-27 | ✅ 10-27 | ✅ 10-27 (with T3.4) | refraction parity (P18), keep PWI4 wrap turn (P19 revert), stall guard (P19a); spec ready (Q5 = PWI4's model) |
 | T3.4 | ✅ | ✅ 10-27 | ✅ 10-27 | ✅ 10-27 | ✅ 10-27 (incl. T3.4d/e) | a: Go To modal + `/api/mount/check` dry run; b: PWI4 jog recording + rate probe (P20); c: Jog modal + jog/step (option A). First task under the new test tiers |
 | T3.5 | ✅ | ✅ 10-27 | ✅ 10-28 | ✅ 10-28 | ✅ 10-28 (commit with the Phase 3 close) | D-SUN: a probe (P21), b planner, c wiring, d/f web, e sim tests (+ turn-watcher fix); browser pass 10-28 |
-| T4.1 | ✅ | ✅ 10-28 | ✅ 10-28 | ✅ 10-28 | pending (visual check at :3200) | a: TLE client + pass maths + rules + check endpoint (real TLEs: crossings 0.00 s, peak ≤ 0.005° vs skyfield); b: live TRACK OBJECT verdict + reason line on the card (browser pass 1920 + 1280×600 @1.5) |
-| T4.2 | ⬜ | | | | | |
-| T4.3 | ⬜ | | | | | |
+| T4.1 | ✅ | ✅ 10-28 | ✅ 10-28 | ✅ 10-28 | ✅ 10-28 (user visual check green) | a: TLE client + pass maths + rules + check endpoint (real TLEs: crossings 0.00 s, peak ≤ 0.005° vs skyfield); b: live TRACK OBJECT verdict + reason line on the card (browser pass 1920 + 1280×600 @1.5) |
+| T4.2 | ✅ | ✅ 10-28 | ✅ 10-29 | ✅ 10-29 | ✅ 10-29 (+ T4.2f fixes, re-checked) | a probe (P22), b planner, c executor, d sim tests 10/10, e web; Q17 own path, Q18 zenith note, Q19 sky-distance corridor; browser pass click → "Track ended at Lim EL" at 1920 + 1280×600 @1.5 |
+| T4.3 | ✅ | ✅ 10-29 | ✅ 10-29 | ✅ 10-29 | ✅ 10-29 (+ T4.3d / T4.3e adjustments, user-checked) | a search filters + countries; b A1e panel + strip + stale badge; c Track Target modal; browser pass 1920 + 1280×600 @1.5 (THAICOM 8 tracked from the modal) |
 | T5.1 | ⬜ | | | | | O4 |
 | T5.2 | ⬜ | | | | | |
 | T5.3 | ⬜ | | | | | O6 |
@@ -1294,8 +1527,8 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | T6.2 | ⬜ | | | | | |
 | T6.3 | ⬜ | | | | | |
 
-**Resume point (2026-10-28, Phase 3 closed):** Phases 0–2 committed; T3.1 `92bd389`; T3.2 + T3.3 `96ef418`; T3.3b + T3.4 `06f961b`. **T3.5 + the Phase 3 end (Tier 3) verified 10-28; the user commits them together as the Phase 3 close.** Next:
-1. **Phase 4 (Tracking):** T4.1 spec written 10-28 (§6, Q13–Q16 answered); T4.1 ✅ verified 10-28 (§8 T4.1a / T4.1b logs); the user's visual check at :3200 next, then the T4.2 spec. T4.2 includes D-SUN for track segments (§4 step 4; the planner in `gateway/dsun.py` is reusable).
+**Resume point (2026-10-29, Phase 4 COMPLETE, user-checked):** Phases 0–3 committed; T4.1 `1d76170`. **T4.2 (+ T4.2f) and T4.3 (+ T4.3d / T4.3e) are verified and user-checked; the user commits them as the Phase 4 close.** Next:
+1. **Phase 5 (Analysis modals), T5.1 Pass Analysis lite (A2b-i) spec first**: optical visibility per O4, the live [Track] button (reuse `/api/mount/check` `track_object`, `afterTrackStarted`, `StaleBadge`), the pass list vs ssa-toolkit. Read the logic sheet A2b-i and `concept/Pass Analysis.png`.
 2. **The real-mount session** (user) whenever available: the checklist below plus D-SUN custom-path following (10°/s arcs, 15°/s straights) and HOME routing vs the real homing path.
 - **Real-mount session checklist** (the user's first session on the real L-350; homing + jog will be tested together):
   - PWI4's real jog behaviour (does a release keep tracking? speeds? P20; option A provisional);
@@ -1307,7 +1540,8 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
   - real acceleration vs the jog look-ahead / limit margins;
   - refraction match (P18);
   - PWI4's wrap turn on `tracking_on` (P19);
-  - `PWI4.cfg` behaviour.
+  - `PWI4.cfg` behaviour;
+  - satellite tracking via the custom path (following error, the zenith lag at real axis speeds, the rendezvous wait).
 
 ---
 
@@ -1335,6 +1569,10 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | 2026-10-20 | T1.1 | WebSocket can't pass Nitro devProxy (HTTP only) → in dev the page connects straight to the gateway (`runtimeConfig.public.gatewayWs`); token fetch stays proxied; prod = same-origin (gateway serves the app) |
 | 2026-10-20 | A4-i | **Red warnings** (user): Status red on FAULT; Sun Distance red when ≤ 15° (green > 15°). Implemented in T1.4 |
 | 2026-10-27 | T3.4e | Azimuth jog across PWI4's wrap edge swung 360° silently. Option B: the gateway slides PWI4's wrap window along with an azimuth jog (no turn while the axis has mechanical room, sim ±300°); near the real mechanical limit the jog stops with a margin and prompts "turn 360° / stay"; Turn = a goto-like validated reposition (pad dimmed, STOP available; D-SUN routing in T3.5 like gotos); Stay = stop at the limit, prompt again on the next jog that way | user |
+| 2026-10-29 | T4.3 Q21–Q23 | A1e stacking: B's full card + a one-line pinned strip for the tracked A (strip click re-focuses A); Track Target search lists all live objects (stale with the badge); a modal row selection stays in the modal (the dashboard selection changes when tracking starts) | user |
+| 2026-10-29 | T4.2 Q20 | A slow object (GEO / MEO) that drifts into the Sun disc later (a blocked stretch > 10 min) is tracked until the 16° entry and ends STOPPED "Track ended: Sun approaching" (card note "Sun blocks the track in N min"); refused only with < 30 s left. LEO passes keep the D-SUN detour / no-detour refusal | user |
+| 2026-10-29 | T4.2 Q19 | Object-track corridor measured on the sky (axis-0 offsets × cos alt), 2° kept; gotos / D-SUN slews keep the axis-space corridor. An 89° pass then tracks through the zenith (lag ≈ 2.1°, back in ≈ 6.4 s) instead of a corridor stop | user |
+| 2026-10-28 | T4.2 Q17–Q18 | Satellites are followed with the gateway's own timed alt/az path (sgp4 + PWI4 refraction), not `follow_tle`; the Sun detour sits inside the path, the wrap stays under gateway control, the path ends at the Lim EL exit. Near-zenith passes (peak > 87°) are trackable with a card note (the azimuth axis lags near the peak) | user |
 | 2026-10-28 | T4.1 Q13–Q16 | TLE fetched by the gateway from the analysis service by NORAD ID (`PW_ANALYSIS_URL`), the browser sends only the ID; TRACK OBJECT disabled while the object is within 15° of the Sun (later Sun crossings → D-SUN in T4.2); disabled with < 30 s left above Lim EL; stale TLEs (> 30 d) trackable with the badge | user |
 | 2026-10-27 | T3.5 Q10–Q12 | D-SUN HOME routing only when the mount completed a home this session (pose trusted); otherwise skip/confirm as today. Go To: SLEW enabled with a detour note. State during a detour: SLEWING + "Avoiding the Sun" | user |
 | 2026-10-27 | T3.4 user check | JOG mode always ends STOPPED (also from TRACK: jog = move to a place); STEP from TRACKING always ends TRACKING (step = offset a track; re-enable tracking if PWI4 dropped it). Jog STEP-running buttons dimmed solid, not translucent. Go To: a click anywhere in a group activates it; computed local El red for a failing celestial target; the inactive group live-updates after edits (bug: it did not). Go To + Sun guard: user-verified clean | user |
@@ -1384,6 +1622,7 @@ Agreement (first 50 satellites × 7 epochs): TEME position diff max 1.4e-7 km; a
 | P19 | **`tracking_on` after a goto that changed the axis-0 wrap window and was stopped mid-slew slews the axis back into the window (~20°/s, up to 360°)** (T3.3 sim, full suite only; reproduced with direct sim calls) | Fixed: before `tracking_on` the gateway centres the wrap window on the current azimuth (`_prepare_wrap`), so TRACK holds the current pointing (Q1 parity). Real-mount check: the same behaviour with cable wrap |
 | P20 | **PWI4's own jog (Move Mount), recorded on the sim 10-27 while the user jogged:**<ul><li>the sim jog never moves the mount;</li><li>the offset-rate fields stay 0, so PWI4's jog uses an internal path that is not in the HTTP API (the public API has no jog / axis-velocity endpoint);</li><li>**a jog press on a stopped mount turns tracking on**: 5 tracking starts vs the user's 2 Track presses;</li><li>tracking ended on the user's STOPs, not visibly on release.</li></ul>**API probe:** `axis0_set_rate_arcsec_per_sec` does nothing on a stopped mount; while tracking it is exact (6.05° in 3 s at 2°/s incl. sidereal) | **T3.4 Q8 = option A (user 10-27):**<ul><li>jog from STOPPED = `tracking_on` + axis rate offset while held; on release (or a keep-alive timeout / disconnect) the rate goes to zero and the mount stops (`stop` + `tracking_off`), ending STOPPED;</li><li>before `tracking_on` the gateway checks axis 0 is inside its wrap window (P19), otherwise it refuses "Wrap out of range: re-home or Go To first";</li><li>while TRACKING: rate offsets only, tracking continues.</li></ul>**Real-mount session:** re-check PWI4's jog behaviour (does a release keep tracking? the speeds?) together with homing; the mechanics may change then |
 | P21 | **Custom alt/az path (sim, T3.5a, 10-27):**<ul><li>`apply(update_wrap=0)` takes 0.06–0.11 s; the mount waits still until the first point's time, then follows the polyline;</li><li>straight lines: cross-track 0.000, mean error 0.02° at 5°/s, ≤ 0.06° at 10–15°/s;</li><li>curves add the chord sagitta (v·dt)²/(8R) + lag: r = 16° arc 0.05° / 0.21° at 5 / 10°/s with 0.5 s points; a 45° corner peaks at 0.10° / 0.23°, gone in ≈ 1 s;</li><li>a first point in the past: first-order catch-up (tau ≈ 0.5 s); a far first point: slewed to at ≤ 17°/s;</li><li>during the path `is_tracking` True, `is_slewing` False; **after the last point the mount holds the last alt/az with `is_tracking` still True** (not sidereal);</li><li>STOP freezes the sim at once (≤ 30 ms), tracking off;</li><li>**an axis-0 route crossing the wrap-window edge unwinds ≈ 346° mid-path even with `update_wrap=0`** (supervisor re-read the raw trace: +111 → −235); with the wrap min set so the window holds the whole route it follows continuously.</li></ul> | D-SUN executor:<ul><li>LEAD 2 s, first point = the current pose;</li><li>cruise 5°/s, points every 0.5 s (planner as is);</li><li>set the wrap min so the whole route's axis-0 range (+ margin) is inside the window, before apply; a route spanning ≥ 358° (`wrap_turn`) cannot fit: the path stops 2° short of the window edge and the final goto finishes;</li><li>wait route end + 2 s, then the final command (`tracking_off` is needed: the path hold reports tracking);</li><li>completion by the route clock + position, never by the flags;</li><li>real mount: STOP coasts v²/(2a).</li></ul> |
+| P22 | **Satellite tracking on the sim (T4.2a, 10-28; synthetic ISS-like TLEs over the sim site; raw data `scratchpad/t42a/raw/`; supervisor re-checked the minimum altitudes and the wrap changes):**<ul><li>**`follow_tle` goes straight to the object's CURRENT position, with no altitude floor.** Pre-positioned at the 15° crossing point:<ul><li>call at t_in − 5 s: min 14.62°, acquired (< 0.05°) in 1.5 s;</li><li>call at t_in: no dip (15.06°), error 0.0006° at once;</li><li>call at t_in + 5 s: 1.5 s to acquire.</li></ul></li><li>From far away (180° in axis 0): acquired in 11.2 s; the altitude never went below the object's own.</li><li>Following error: 0.003° mean, 0.007° max against PWI4's refracted position (a constant ≈ 0.04° against geometric).</li><li>**`follow_tle` rewrites the axis-0 wrap min within 0.1 s, by tens of degrees, clamped at −300** (P17 confirmed). No unwind was seen, because the axis was already inside the new window.</li><li>**Custom altaz path along a pass** (`update_wrap=0`, wrap set beforehand): 0.003° mean, 0.015° max (0.006° after 3 s); 1 s points as good as 0.5 s.<ul><li>Path coordinates are PWI4's refracted alt/az.</li><li>Holds the last pose with `is_tracking` True after the last point.</li><li>Accepts ≥ 10 000 points in one `add_point_list` (110 ms).</li><li>**`add_point_list` + `apply(update_wrap=0)` without `new` extends a running path seamlessly**; `add_point_list` alone does nothing.</li></ul></li><li>**Near-zenith pass (peak 87.99°):** axis 0 demanded 28–29°/s and was saturated at 20.4°/s, with the same result for `follow_tle` and for a custom path. Peak error 0.62°, back < 0.05° in 3.8 s; no flip or unwind. A peak of about 89° would demand about 56°/s (not measured).</li><li>STOP during `follow_tle`: 28 ms, no coast (sim).</li></ul> | T4.2:<ul><li>a `follow_tle` hand-off must be called at t_in, not earlier, from the pre-positioned pose;</li><li>re-read the wrap after `follow_tle`;</li><li>a custom path can carry a whole pass (and its D-SUN detour) and can be extended for long tracks;</li><li>a custom path needs PWI4's refraction applied to the sgp4 alt (T3.3b model);</li><li>near-zenith passes lag near the peak;</li><li>real-mount checklist: tracking on the L-350, axis rates near the zenith.</li></ul> |
 
 Harness note: `08_watchdog.explicit_stop_latency_s` is mis-measured in the supervisor run (includes the silent period); conclusion unaffected — fix opportunistically.
 
@@ -2024,6 +2263,249 @@ _Differences between the as-built app and the logic sheet / concept renders, wit
   - Fix: an `@container (max-height: 160px)` block tightens the card gap / padding.
   - Result: card bottom = frame bottom (179 / 179) with the reason line. 1920 is unchanged (screenshots checked).
 - Re-ran typecheck 0, lint 0 errors, vitest 406.
+
+### T4.2a / T4.2b log (2026-10-28)
+
+**T4.2a probe (Sonnet, about 55 min):** finding P22. Supervisor re-check from the raw data:
+- minimum altitude in the 15 s after the `follow_tle` call: 14.62° (t_in − 5 s), 15.06° (t_in), 15.65° (far);
+- the wrap min changed at the call;
+- the sim was left disconnected with wrap −180, and `PWI4.cfg` is unchanged.
+
+Its scripts were moved out of the repo (session scratchpad) so `ruff check .` stays clean; the raw data stays in `scratchpad/t42a/raw/`.
+
+**T4.2b planner (Sonnet, about 27 min):**
+- New `gateway/trackplan.py`: `plan_track`, `extend_track`, `TrackPlan`, `TrackRefusal`, `TrackMount`, `TrackSetup`, `mount_from_status`, `slew_estimate_s`.
+- New `gateway/tests/tlegen.py` (fixed `PEAK_70` / `ZENITH_89` TLEs) and `test_trackplan.py` (27 tests).
+- Row 7 in `TrackChecker` (plan cached 10 s, replanned on > 0.5° pose change); `SafetyEngine.sun_altaz_at`.
+- The check adds `detour {seconds, count}`, `notes`, `pass.t_r`.
+- Non-sim 577 passed, 1 timing flake (jog keepalive, on the flaky list).
+- **Accepted deviations:**
+  - arcs follow the Sun's motion (exactly 16° all along);
+  - the arc floor / ceiling relaxes to the arc's own end altitudes;
+  - a pass ending within 15° of the Sun is refused;
+  - long finite passes are chunked too (30 min);
+  - chunks never end inside a Sun interval;
+  - whole-second times.
+
+**Supervisor Tier 2** (independent skyfield + `refract_alt` check, `PEAK_70` / `ZENITH_89` at the test site):
+
+| Case | Plan ms | Track error vs skyfield + refraction | Min Sun separation | Notes |
+|---|---|---|---|---|
+| 70° pass, pre-position | 14 | 0.00000° | — | `t_r` = t_in + 4 s, by design (rendezvous ≥ Lim EL + 0.5); `t_end` = t_out exactly |
+| 89° zenith pass | 18 | 0.00000° | — | zenith note; an axis-0 step of 55° per 0.5 s near the peak (demand ≫ 20°/s; the lag is accepted under Q18) |
+| Sun on the track after the peak | 34 | ≤ 0.0011° | 16.000° | ccw 50° arc, rates ≤ 1.0°/s |
+| Sun on the track before the peak | 30 | ≤ 0.0021° | 16.000° | ccw 50° arc |
+| Sun 3° off the track | 42 | ≤ 0.0004° | 16.000° | ccw 48° arc |
+| Already up (now = peak − 30 s) | 10 | 0.00000° | — | `t_r` = now + 7.3 s |
+
+- The corridor metric is axis-space distance to the polyline (not to the time point), so a zenith lag should not trip it. The near-zenith sim test was added to the T4.2d table to prove it.
+- Touched tests re-run: 142 passed; ruff clean.
+
+### T4.2c pause (2026-10-28, end of day)
+
+- **Paused at about 10 %.** The user asked to stop for the day; the worker paused at a safe point.
+- **Changed so far:** `gateway/trackcheck.py` only. `TrackCheck` gained `plan` / `setup` / `tle` (executor use, not in the check body), and `evaluate(..., fresh=False)` can skip the plan cache to re-plan after the rendezvous slew.
+- **Supervisor check:** `import gateway.app` OK; `test_check_track` / `test_trackplan` / `test_check` 85 passed; ruff + format clean; no processes left.
+- **Settled design** (full text in `scratchpad/t42c/notes.txt`):
+  - **Shared verdict:** `ControlService.track_verdict(cmd, conn_id, fresh)` = row 0 + a `track_eval` hook set by `app.py`. The check endpoint uses it with `conn_id` None; the real command runs it in a thread.
+  - **Clock seams:** `track_clock` / `track_sleep`.
+  - **Rendezvous goto:** an internal `goto_altaz` with `target0` (the plan's axis-0), through the normal job + D-SUN routing. The wrap min is set to `target0 − 180`, because the planner's axis-0 turn can differ by 360° from the nearest turn.
+  - **Arrival and re-plan:** arrival = within 0.3° and still. Late → re-plan once with `fresh`; one short extra goto if the new rendezvous is > 0.5° away.
+  - **Upload:** `tracking_off` → wrap from `route_wrap_plan` → monitor `begin_route(route=True)` (look-ahead off) → `new` / `add_point_list` (jd = unix / 86400 + 2440587.5) / `apply(0)`.
+  - **Long tracks:** extend (add + apply) when < 20 min remain, checked at least every 10 min. A refused extension ends the track at the chunk end. `SafetyMonitor.extend_route`.
+  - **Ending rules:**
+    - STOP / link loss / limit → `track_stopped`;
+    - Go To / `track_object` / sidereal TRACK / HOME / disconnect → `track_replaced`;
+    - jog / step / wrap_turn → "Object tracking; press STOP first" (`object_tracking`);
+    - "Track ended at Lim EL" override, kept until the next command; snapshot `ended` for 30 s.
+  - **Snapshot `track`:** `{norad, name, phase, t_r, t_end, t_peak, peak_alt, detours[{t_a, t_b, side}], notes, ended}`.
+  - **Audit:** start / done / stopped / replaced / replan.
+  - **`tests/tle_stub.py`:** `http.server` thread.
+- **Next steps (in order):**
+  1. `target0` (`safety` / `control`).
+  2. Verdict refactor + `app.py`.
+  3. Snapshot + poller.
+  4. `trackexec.py`.
+  5. Ending rules.
+  6. `tle_stub.py`.
+  7. Tests.
+  8. Full non-sim pytest + ruff.
+- **Accepted deviation:** in steady state a long track is extended every ≈ 30 min (a new chunk when < 20 min remain), not every 10 min.
+
+### T4.2c / T4.2d / T4.2e log (2026-10-29)
+
+**T4.2c executor (fresh Sonnet worker, about 27 min, from the pause notes):**
+- New `gateway/trackexec.py` (`TrackExecutor`), `tests/tle_stub.py`, `tests/test_tle_stub.py`, `tests/test_track_exec.py` (20).
+- Edited: `control.py` (`track_verdict` shared by the check and the command, `_track_command`, `target0` goto + `_goto_wrap`, the ending rules), `safety.py` (`target0`, `extend_route`), `jog.py` (`object_tracking` refusal), `snapshot.py` / `poller.py` (`track`), `app.py`.
+- Supervisor: diff + executor read against the design; the full non-sim suite 600 passed; ruff clean.
+
+**T4.2e web (Sonnet, about 3 min, in parallel):**
+- `utils/track-state.ts` (`trackCardState`, `phaseLine`, `fmtCountdown`); the card click → `track_object`;
+- TRACKING label + phase line + countdown; ended reason; zenith note;
+- Jog pad disabled "Object tracking; press STOP first";
+- vitest 416.
+
+**T4.2d sim tests (Sonnet, about 35 min):** `gateway/tests/test_track_object_pwi4sim.py`, 10 tests. Worker run 8/9, failing at 89°.
+- **Supervisor fixes after the worker:**
+  1. **Q19 (user):** the object-track corridor is measured on the sky (`corridor_distance(..., sky=True)`, `ValidatedGoto.sky`, `begin_route(sky=)`); unit test `test_track_corridor_is_measured_on_the_sky_near_the_zenith`.
+  2. **Rendezvous:** the fixed-point iteration was replaced by a scan for the first reachable grid time (`trackplan.reachable`). Near the zenith the iteration oscillated onto unreachable points → "Missed the pass". The planner spot check is unchanged.
+  3. **The `pwi` fixture** compares `PWI4.cfg` by content only (PWI4 re-saves the same bytes on a disconnect).
+  4. **The Sun-row test** pins the Sun 20 s after the peak of a pass rising 90 s ahead. Pinned "75 s from now", it fell before t_r when the rig was slow, and the planner correctly moved the rendezvous past the interval.
+  5. **The zenith recovery limit** is 5 s at 88° and 8 s at 89° (≈ 180° of axis 0 at 20°/s against a 3–4 s transit).
+- **Supervisor full re-run** (Tier 2), 9/10 → the Sun row fixed (item 4) and re-run → **10/10**:
+
+| Row | Result |
+|---|---|
+| normal | following error ≤ 0.0065°, min alt 15.061°, STOPPED ≈ 1.1 s after `t_end` |
+| rising | waiting still at the crossing point; following error ≤ 0.0047°; min alt 15.61° |
+| peak below | refused `peak_below_limit`, no motion |
+| through the Sun | detour 61.8 s; separation 15.998° in the detour, 15.83° minimum over the run |
+| STOP | 0.08 s |
+| Go To | `track_replaced` |
+| wrap | constant after the upload |
+| replace | ok |
+| zenith 88° | peak error 0.62°, back in 3.9 s |
+| zenith 89° | peak error 2.11°, back in 6.4 s, no corridor stop |
+
+**Supervisor browser pass** (throwaway gateway 18733 + TLE stub + Nuxt 13270, PWI4 sim; script `t42_gate/` in the session scratchpad):
+- select → TRACK OBJECT enabled → click → TRACKING "Slewing to the pass" (SLEWING);
+- → "Waiting for the pass — 01:03 … 00:06" (TRACKING);
+- → "Tracking — ends in 04:12 … 00:02";
+- Jog modal "Object tracking; press STOP first";
+- → STOPPED, "Track ended at Lim EL";
+- audit `track_start` / `track_done`;
+- 1920 and 1280×600 @1.5: the card inside its frame (177 / 179), no overflow, no console errors;
+- the sim was left disconnected, `PWI4.cfg` unchanged.
+
+### T4.2f log (2026-10-29, the user's live check)
+
+**User check:** all listed cases clean. Two findings:
+
+1. **MEO high in the sky refused "Pass ends in under 30 s" (bug).**
+   - Galileo 40890 at site 13.12 / 100.92, Lim EL 10, 05:46 UTC.
+   - The above-horizon span was 16 h with two humps (a 14° hump, then a dip to 0.3° without setting, then the 80° hump). `compute_pass` took the first Lim EL in/out inside the span, so `t_out` was 7.8 h in the past.
+   - The T4.2b note had flagged this as an HEO corner; MEO shows it is common.
+2. **GEO with the Sun drifting closer refused "no safe detour" (too strict).**
+   - THAICOM 8: the blocked stretch is about 2 h, which the 30 min chunking could not fit.
+
+**Fix (Sonnet, about 14 min):**
+- **`passes.py`:** Lim EL crossings are relative to now (the last up-crossing before now / the next down-crossing after now; below Lim EL: the next up-crossing before the set). Row 5 "setting" no longer fires while an up-crossing lies ahead.
+- **`trackplan.py`:** a blocked stretch > `SUN_HOLD_S` 600 s ends the plan at the 16° entry (`end_reason` "Track ended: Sun approaching", note "Sun blocks the track in N min"). A rendezvous inside such a stretch is refused `sun_no_detour`.
+- **`trackexec.py`:** the plan's end reason is used for the override / snapshot / audit, and `t_end` is the stop time.
+- 613 non-sim tests passed.
+
+**Supervisor re-check** (independent repro with the real TLEs, throwaway analysis 18710):
+- **Galileo:** allowed 05:40–08:40, `t_out` ≈ 3.6 h ahead at 05:46 (the worker's brute force agrees ±1 s); `peak_below_limit` only at 09:40 (7.3°).
+- **THAICOM:**
+  - allowed 05:40–05:55 with "Sun blocks the track in 18 … 3 min" (16° entry within 0.07 s of a brute force);
+  - refused at 05:58 (< 30 s) and 06:01 (inside 16°);
+  - refused `sun` while within 15°;
+  - allowed again from 07:40.
+- Touched tests 110 passed; ruff clean.
+- The THAICOM planning takes about 280 ms (a long Sun lattice); it is cached 10 s, so acceptable.
+- **Sim re-run of `test_track_object_pwi4sim.py` still owed:** it needs the user's 8400 down; it is part of the Phase 4 end (Tier 3).
+- **User re-check 10-29: cleared.** Open item, noted by the user, fix only if required: a GEO whose position the Sun disc is about to cover (the 15–16° band, the rendezvous inside the long Sun stretch) shows "Pass passes within 15° of the Sun; no safe detour" instead of "Sun blocks the track in …". A clearer reason, e.g. "Sun is about to cover the target", is a one-line change in `trackplan.py` (the `sun_no_detour` rendezvous refusal).
+
+### T4.3 log (2026-10-29)
+
+**T4.3a analysis (Sonnet, about 7 min):** `GET /api/sats/search` gains `country` (exact, case-insensitive) and `orbit_group` (leo = LEO + SSO, meo, geo = GEO + HEO; else 422); new `GET /api/sats/countries` (live objects, count desc, cached until the catalogue reload); 11 tests.
+
+**DB spot check (counts only, throwaway 18710):**
+- default 500, NORAD descending;
+- THAI = the render's 8 objects;
+- the LEO group = LEO + SSO;
+- 98 countries (US 10 857, PRC 3 190, …);
+- `_LIVE` = active and never decayed, with no object-type filter (Q22 holds; the newest 500 happen to be payloads).
+
+**T4.3b panel (Sonnet, about 2 min):**
+- New `utils/track-panel.ts` (the A1e table), `StaleBadge.vue` + `utils/tle-stale.ts`.
+- The selection store's state poll follows the main card (`cardNorad`); `afterTrackStarted()`.
+- The pinned card hides the ×; the strip button is `track-strip`.
+- **The user asked for care with the vertical space. Supervisor browser measurement (injected track state, no gateway):**
+  - at 1280×600 @1.5 the card + strip was **3 px over** the frame (the `overflow: hidden` wrapper hid it);
+  - fixed with a tighter row gap / strip margin in the stripped short-panel block and a 0.12em row gap in the 160 px block;
+  - after the fix: strip 176.7 / frame 179.1; pinned card 177.1 / 179.1; scrollHeight = clientHeight (nothing hidden); 1920: strip 281 / 330;
+  - the strip now shrinks the name first, so the phase / countdown stays visible.
+
+**T4.3c modal (Sonnet, about 5 min):**
+- New `TrackTargetDialog.vue`, `utils/track-target.ts` (query, sort, epoch format, status, keyboard) + vitest.
+- TRACK TARGET enabled with GOTO's rule.
+- web tests 449.
+
+**Supervisor browser pass** (throwaway analysis 18710 + gateway 18733, Sun pinned far, + Nuxt 13270, PWI4 sim; script `t43_gate/` in the session scratchpad), at 1920 and 1280×600 @1.5:
+- **Modal:**
+  - the default list: 500 + the footer, 2 stale badges;
+  - "THAICOM" → 3; Origin THAI → 8 with 1 stale (TMSAT-1, "TLE 227 d");
+  - sort by NAME;
+  - the AIRCRAFT tab disabled;
+  - row → "Ready";
+  - TRACK SELECTED TARGET → the modal closes, card TRACKING THAICOM 8;
+  - the modal fits the viewport (1280: 12–588 of 600).
+- **A1e:**
+  - B selected → B card + "📌 THAICOM 8 · Tracking";
+  - strip click → A;
+  - deselect → A pinned (× hidden);
+  - STOP with B selected → A dropped;
+  - audit `track_start` / `track_stopped`;
+  - no console errors.
+- **Note:** the dev-only Nuxt badge overlaps the modal status line at 1280 (not present in the built app).
+
+### T4.3d log (2026-10-29, the user's visual adjustments before the Phase 4 close)
+
+**User requests (reviewed as a change summary first):**
+1. Track Target table rows showed above the sticky header (large screen, no scaling).
+2. The Origin list: a blank flag slot for flag-less items; full owner names in the LIST only (user A: the closed box + the table keep the codes); searchable.
+3. Track Info: the card must not shrink with the tracking strip; the strip (a minimized tracking card, one line, user C) is added under it; the space is reserved all the time (user B); small screens get the room from the left column.
+
+**Worker (Sonnet, about 5 min), web only:**
+- Table: `border-collapse: separate`, the scroll box without padding, an opaque sticky `th`.
+- Origin: a custom type-to-filter combobox (`tt-origin`, `tt-origin-search`, `tt-origin-{CODE}`); `utils/owner-names.ts` (about 165 SATCAT owner names, the fallback = the code; vitest); `filterOwners`; the table cell keeps the code with the full name as a tooltip.
+- Track Info: `--strip-reserve` 26 px subtracted from the card's `--u`; an always-rendered `.strip-slot`; the left column `minmax(var(--ti-min) = 196px, 0.87fr)`; the Filters floors lowered slightly.
+- web tests 454.
+
+**Supervisor browser measurement** (sim + throwaway servers, a real THAICOM 8 track; `t43d_gate/` in the session scratchpad):
+- **Table:**
+  - at 1920 @1.0 and 1280 @1.5, scrolled 157 px, probes 1 / 3 / 6 px under the box top all hit the header (no row above it).
+- **Origin:**
+  - 99 items, all names start at the same x (flag-less TBD / ITSO / ABS / ISS aligned);
+  - "chi" → PRC / ROC / CHBZ / CHLE; "thai" → THAI, Enter → the box shows THAI → 8 rows.
+  - **Fixed by the supervisor:** the 340 px list (anchored left) overflowed the dialog's right edge and scrolled the dialog sideways at 1920 (title cut). It is now right-aligned to the Origin box: list 875–1215 inside the dialog 530–1390, no scroll offset.
+- **Track Info:**
+  - the card height without / with the strip is identical (1920: 198.3 / 198.3; 1280 @1.5: 114.5 / 114.5, 9 px font);
+  - strip bottom 277.3 / frame 329.9 (1920), 193.5 / 203.0 (1280).
+- **Filters:** the content fits (Tools bottom = the panel bottom; tree 185 ≤ 198; no scroll) at both sizes.
+- The pinned card 177.1 / 203 at 1280.
+
+**Gates:** typecheck 0, lint 0 errors, vitest 454.
+
+### T4.3e (2026-10-29, the user's last Phase 4 change)
+
+- **Change:** with a track running and nothing selected, the pinned tracked card is clickable (pointer cursor, title "Show the tracked object in the Sky Viewer"); a click selects the tracked object (the Sky Viewer focus mode), the same as the strip under a selected card. A normal selected card's click does nothing. Supervisor change in `TrackCard.vue` (`refocusable`, `onCardClick`, `.card.refocus`).
+- **Browser check** (track state injected, no gateway):
+  - pinned + nothing selected → `data-refocus` true → click → selection 41552, refocus false;
+  - B selected + strip → a card click changes nothing;
+  - strip click → A;
+  - deselect → pinned / clickable again.
+- typecheck 0, lint 0 errors, vitest 454.
+
+### Phase 4 end, Tier 3 (2026-10-29)
+
+The user stopped 8400 / 3200 / 8410 (PWI4 kept running) and gave a 150 min budget (08:05–10:35 UTC). `PWI4.cfg` baseline is now `b714321830fb…` (the user's site change to 13.12° N / 100.92° E; Lim EL 10 in the app).
+
+| Step | Result |
+|---|---|
+| T4.3 browser pass | ✅ (see the T4.3 log) |
+| Full sim suite run A | 61 / 66 in 36.5 min: all 56 Phase 3 tests pass; 5 object-track tests failed on following error 0.43–0.61° (limit 0.05°); the rendezvous error was 0.0° |
+| Investigation | <ul><li>run alone: the normal pass 0.004° max (twice), also right after the stall module;</li><li>PWI4 vs the PC clock: 6–17 ms;</li><li>no stray offset type in the tests;</li><li>conclusion: the test's yardstick. The sampler stamped each /status at its return, so a slow answer under load read as a pointing error for a 0.5–1°/s LEO</li></ul> |
+| Fixes | <ul><li>(test) samples take the midpoint of the call, and calls slower than 0.15 s are skipped (counted in RESULTS);</li><li>**(product) `trackexec._upload` resets the axis offsets** after `tracking_off`. A STEP made while sidereal TRACKING keeps its offset (T3.4 design), and it would have shifted a later object track</li></ul> |
+| Full sim suite run B | **66 / 66** in 35.7 min |
+| PWI4 harness | 10 / 10 scenarios ok; harness tests 17 / 17; the sim left disconnected |
+| Non-sim | 624 passed, 77 skipped; ruff + format clean |
+| Web | typecheck 0, lint 0 errors (11 old warnings), vitest 449 |
+| Flaky list | <ul><li>`test_jog` keepalive: t0 is now taken before the send (the timer starts when the gateway accepts the jog);</li><li>`test_track_exec` pass sequence: waits for the "Track ended" override instead of reading it at once;</li><li>8 / 8 green together → **list empty**</li></ul> |
+| Full browser pass | the Phase 4 screens were covered by the T4.2 pass (click → "Track ended at Lim EL", Jog disabled) and the T4.3 pass (modal + A1e with a real THAICOM 8 track, after T4.2f) at 1920 and 1280×600 @1.5; Phase 3 screens unchanged since its Tier 3 |
+
+**Open item (user, fix if required):** a GEO about to be covered by the Sun disc shows "no safe detour" instead of "Sun blocks the track in …" (T4.2f log).
 
 ## 9. Known limitations & risks
 

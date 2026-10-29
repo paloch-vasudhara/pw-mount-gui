@@ -1,0 +1,1 @@
+t43b notes: panel helper + strip + stale badge

@@ -157,6 +157,34 @@ class RouteInfo(BaseModel):
     t_end: str  # UTC ISO time the route (incl. the settle wait) ends
 
 
+class TrackDetourInfo(BaseModel):
+    t_a: float  # Unix seconds
+    t_b: float
+    side: str  # "cw" / "ccw"
+
+
+class TrackEndedInfo(BaseModel):
+    norad: int
+    reason: str
+    at: float  # Unix seconds
+
+
+class TrackInfo(BaseModel):
+    """T4.2c: the object track (null = none). Times are Unix seconds (floats). Only `ended` is set
+    for 30 s after a track ended (the other fields are null then)."""
+
+    norad: int | None = None
+    name: str | None = None
+    phase: str | None = None  # slewing | waiting | tracking | detour
+    t_r: float | None = None  # the rendezvous time
+    t_end: float | None = None  # the Lim EL exit (null: unknown yet, a never-setting object)
+    t_peak: float | None = None
+    peak_alt: float | None = None
+    detours: list[TrackDetourInfo] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+    ended: TrackEndedInfo | None = None
+
+
 class MountSnapshot(BaseModel):
     seq: int
     ts_utc: str
@@ -180,6 +208,7 @@ class MountSnapshot(BaseModel):
     jog_limit: JogLimitInfo | None = None  # T3.4e: null = no azimuth limit prompt
     turn: TurnInfo | None = None  # T3.4e: null = no wrap turn running
     route: RouteInfo | None = None  # T3.5c: null = no D-SUN route running
+    track: TrackInfo | None = None  # T4.2c: null = no object track (and none ended lately)
 
 
 def site_key(result: PollResult) -> tuple[float, float, float] | None:
@@ -246,6 +275,7 @@ def build_snapshot(
     jog_limit: JogLimitInfo | None = None,
     turn: TurnInfo | None = None,
     route: RouteInfo | None = None,
+    track: TrackInfo | None = None,
 ) -> MountSnapshot:
     """result = last good fetch (or the failed one). down_reason forces DISCONNECTED.
 
@@ -385,4 +415,5 @@ def build_snapshot(
         jog_limit=jog_limit if connected else None,
         turn=turn if connected else None,
         route=route if connected else None,
+        track=track if connected else None,
     )

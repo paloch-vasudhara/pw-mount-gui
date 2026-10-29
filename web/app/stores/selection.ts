@@ -4,8 +4,11 @@
 // While something is selected the live state (az/el/range/illumination) is polled at 1 Hz from
 // /api/sky/state (time-limited fetch, stopped on deselect).
 import { defineStore } from 'pinia'
-import { ref, shallowRef } from 'vue'
+import { computed, ref, shallowRef, watch } from 'vue'
 import { useSkyStore, type SkyState } from './sky'
+import { useMountStore } from './mount'
+import { trackPanel } from '../utils/track-panel'
+import type { ObjectTrackLike } from '../utils/track-state'
 
 const POLL_MS = 1000
 
@@ -20,25 +23,40 @@ export const useSelectionStore = defineStore('selection', () => {
   async function poll(norad: number, g: number) {
     // maxAge 0: the card wants a fresh value every second (the hover tooltip shares the cache)
     const s = await sky.fetchState(norad, 0)
-    if (g === gen && selectedNorad.value === norad && s) state.value = s
+    if (g === gen && s) state.value = s
   }
 
-  function select(norad: number) {
-    if (selectedNorad.value === norad) return
-    deselect()
-    selectedNorad.value = norad
-    const g = ++gen
-    void poll(norad, g)
-    timer = setInterval(() => void poll(norad, g), POLL_MS)
-  }
+  // A1e: the main card's NORAD (the pinned tracked object when nothing/itself is selected, else the
+  // selection). The state poll follows it.
+  const mount = useMountStore()
+  const panel = computed(() => trackPanel(
+    selectedNorad.value, (mount.snapshot?.track ?? null) as ObjectTrackLike | null, mount.now / 1000,
+  ))
+  const cardNorad = computed(() => panel.value.main?.norad ?? null)
 
-  function deselect() {
+  watch(cardNorad, (n) => {
     gen += 1
     if (timer) clearInterval(timer)
     timer = null
-    selectedNorad.value = null
     state.value = null
+    if (n === null) return
+    const g = gen
+    void poll(n, g)
+    timer = setInterval(() => void poll(n, g), POLL_MS)
+  }, { immediate: true })
+
+  function select(norad: number) {
+    selectedNorad.value = norad
   }
 
-  return { selectedNorad, state, select, deselect }
+  function deselect() {
+    selectedNorad.value = null
+  }
+
+  /** Every successful track_object (card, modal, Pass Analysis) brings up the tracked object's card. */
+  function afterTrackStarted(norad: number) {
+    select(norad)
+  }
+
+  return { selectedNorad, cardNorad, panel, state, select, deselect, afterTrackStarted }
 })

@@ -11,7 +11,7 @@ import { useGatewayApi } from '@/composables/useGatewayApi'
 import { useMountStore } from '@/stores/mount'
 import { parseCheck, type CheckResult } from '@/utils/goto-modal'
 import {
-  createJogSender, DEFAULT_SPEED, DEFAULT_STEP, fmtAz, fmtEl, fmtSize, fmtSpeed, isTurning, jogStatus, keyToPad,
+  createJogSender, jogGateReason, DEFAULT_SPEED, DEFAULT_STEP, fmtAz, fmtEl, fmtSize, fmtSpeed, isTurning, jogStatus, keyToPad,
   sizeAtEnd, speedAtEnd, stepBlocked, stepSize, stepSpeed, turnCheckNote, WRAP_TITLE, wrapPromptText, wrapPromptVisible, type JogMode, type JogSnapshotLike, type Pad,
 } from '@/utils/jog-modal'
 
@@ -38,11 +38,12 @@ const sender = createJogSender(
   (h) => { held.value = h },
 )
 
-const disabled = computed(() => props.gateReason !== null)
+const gate = computed(() => jogGateReason(props.gateReason, snap.value))
+const disabled = computed(() => gate.value !== null)
 const turning = computed(() => isTurning(snap.value))
 const blocked = computed(() => disabled.value || turning.value || (mode.value === 'step' && stepBlocked(snap.value, pending.value)))
 const status = computed(() => jogStatus({
-  reason: props.gateReason, refusal: refusal.value, mode: mode.value, snapshot: snap.value, held: held.value, pending: pending.value,
+  reason: gate.value, refusal: refusal.value, mode: mode.value, snapshot: snap.value, held: held.value, pending: pending.value,
 }))
 
 // T3.4e: wrap-turn prompt. `dismissed` hides it after a refused turn (jog_limit stays); jogging again or a new limit re-arms it.

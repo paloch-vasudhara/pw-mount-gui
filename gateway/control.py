@@ -83,7 +83,7 @@ ROUTABLE = frozenset({"goto_altaz", "goto_radec_j2000", "wrap_turn"})  # T3.5c: 
 HOMED_GATED = frozenset(
     {"goto_altaz", "goto_radec_j2000", "jog", "step", "wrap_turn", "track_object"}
 )
-R_TRACK_NA = "Object tracking arrives in T4.2"
+R_OBJECT_TRACK = "Object tracking; press STOP first"  # T4.2c: jog / step / turn refused
 CODE_HOME_BLOCKED = "home_blocked_confirm"  # disconnect: home is blocked, ask the user once
 _REASON_CODES: dict[str, str] = {
     R_SHUTTING: "shutting_down",
@@ -103,11 +103,19 @@ _REASON_CODES: dict[str, str] = {
     R_NO_ROOM: "no_room",
     R_TURN: "turn_in_progress",
     R_ROUTING: "slewing",
+    R_OBJECT_TRACK: "object_tracking",
 }
 
 
 class Pwi4Error(Exception):
     pass
+
+
+def _track_eval_missing(norad: int, site: Any, status: Any, fresh: bool) -> Any:
+    """Default `track_eval` (no TrackChecker attached): the pass check is not available."""
+    from .trackcheck import TrackCheck
+
+    return TrackCheck("Object tracking not available", "not_available")
 
 
 class Pwi4Writer:
@@ -349,6 +357,8 @@ class _Job:
     )
     cancelled_reason: str | None = None
     task: asyncio.Task | None = None
+    finished: asyncio.Event = field(default_factory=asyncio.Event)  # set when the job is over
+    error: str | None = None  # a PWI4 error that ended the job after its ack (T4.2c)
 
 
 class ControlService:
@@ -381,6 +391,13 @@ class ControlService:
         self.route_final_check: Callable[[Command], str | None] = lambda cmd: None
         self.route_sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep
         self.route: ActiveRoute | None = None
+        # T4.2c object track: the clock and the wait of the executor (test seams), the pass check
+        # (set by app.py: TrackChecker.evaluate with the safety engine's inputs), and the monitor's
+        # route-plan extension.
+        self.track_clock: Callable[[], float] = time.time
+        self.track_sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep
+        self.track_eval: Callable[[int, Any, Any, bool], Any] = _track_eval_missing
+        self.route_extend: Callable[..., None] = lambda *a, **k: None
         self._route_set_override = False
         self._route_prev: tuple[str, str | None] | None = None
         self.holder: str | None = None
@@ -401,6 +418,9 @@ class ControlService:
         from .jog import JogController  # local: jog imports this module
 
         self.jogc = JogController(self)
+        from .trackexec import TrackExecutor  # local: trackexec imports this module
+
+        self.trackx = TrackExecutor(self)
         self.homed = HomedGuard(audit)
         self.homed.connecting = lambda: (
             self.seq.active and self.seq.info is not None and self.seq.info.name == "connect"
@@ -500,6 +520,8 @@ class ControlService:
             return self._ack(conn_id, exc.cmd_id, exc.cmd, False, exc.reason)
 
         name = cmd.name
+        if name not in ("stop", "take_control", "release_control"):
+            self.trackx.clear_ended_override()  # "Track ended at Lim EL" lasts until a command
         if name == "stop":
             return await self._stop_command(conn_id, cmd)
         if name == "take_control":
@@ -524,8 +546,8 @@ class ControlService:
         if name in ("jog", "jog_stop", "step", "wrap_turn", "wrap_turn_cancel"):
             return await self.jogc.handle(conn_id, cmd)
 
-        if name == "track_object":  # T4.1: validated, the verdict is /api/mount/check; T4.2 runs it
-            return self._refuse(conn_id, cmd, R_TRACK_NA, "not_available")
+        if name == "track_object":  # T4.2c: the verdict is /api/mount/check's (track_verdict)
+            return await self._track_command(conn_id, cmd)
 
         # ---- motion commands
         reason = self._motion_refusal(conn_id, cmd)
@@ -533,6 +555,11 @@ class ControlService:
             return self._refuse(conn_id, cmd, reason)
         if self.holder is None:
             self._set_holder(conn_id, "first_command")
+        if self.trackx.active:  # Go To / sidereal TRACK replace an object track; off ends it
+            if name == "tracking" and not cmd.args["on"]:
+                await self._end_track("track_stopped", "Tracking turned off")
+            else:
+                await self._end_track("track_replaced", f"Replaced by {name}")
         job = _Job(cmd, conn_id)
         try:
             self._queue.put_nowait(job)
@@ -550,6 +577,77 @@ class ControlService:
     ) -> dict[str, Any]:
         self._audit_cmd(conn_id, cmd, False, reason, **({"code": code} if code else {}))
         return self._ack(conn_id, cmd.id, cmd.name, False, reason, code)
+
+    # ------------------------------------------------------------------ object track (T4.2c)
+
+    def track_verdict(
+        self, cmd: Command, conn_id: str | None, fresh: bool = False
+    ) -> tuple[MotionVerdict, dict[str, Any], Any]:
+        """THE verdict of `track_object`, shared by POST /api/mount/check (`conn_id` None) and the
+        real command: row 0 (the mount guards, `_motion_verdict`), then the pass rules and the
+        track plan (`track_eval`, the TrackChecker). Blocking (TLE fetch, sgp4): run in a thread.
+        Returns (verdict, check-body extras, the TrackCheck or None when row 0 refused)."""
+        v = self._motion_verdict(cmd, conn_id)
+        extra: dict[str, Any] = {"pass": None, "tle_age_days": None, "notes": []}
+        tc = None
+        if v.reason is None:
+            site = self.poller.pwi4_site()
+            if site is None:
+                return MotionVerdict(R_NO_PWI4, "no_pwi4"), extra, None
+            tc = self.track_eval(cmd.args["norad"], site, self.fresh_status(), fresh)
+            v = MotionVerdict(tc.reason, tc.code, tc.target, tc.detour)
+            extra = {"pass": tc.pass_info, "tle_age_days": tc.tle_age_days, "notes": tc.notes}
+        return v, extra, tc
+
+    async def _track_command(self, conn_id: str, cmd: Command) -> dict[str, Any]:
+        """TRACK OBJECT: the verdict again (fresh plan), then the rendezvous goto through the
+        normal job queue (validated, D-SUN routed); acked when that goto has started. The
+        executor (trackexec.py) takes it from there."""
+        v, _, tc = await asyncio.to_thread(self.track_verdict, cmd, conn_id, True)
+        reason, code = v.reason, v.code
+        if reason is None:  # the state may have changed while the check ran
+            reason = self._gateway_refusal(cmd, conn_id)
+            code = self._code_of(reason) if reason else None
+        if reason is None and (tc is None or tc.plan is None or tc.setup is None):
+            reason, code = R_NO_PWI4, "no_pwi4"
+        if reason:
+            return self._refuse(conn_id, cmd, reason, code)
+        if self.holder is None:
+            self._set_holder(conn_id, "first_command")
+        if self.trackx.active:  # A1e / G5: the new track replaces the running one
+            await self._end_track("track_replaced", "Replaced by a new track")
+        rdv = tc.plan.rendezvous
+        goto = Command(
+            f"{cmd.id}:rdv",
+            "goto_altaz",
+            {"alt": rdv.alt, "az": rdv.az % 360.0, "target0": rdv.axis0},
+        )
+        gv = self._motion_verdict(goto, conn_id)
+        if gv.reason:
+            return self._refuse(conn_id, cmd, gv.reason, gv.code)
+        job = _Job(goto, conn_id)
+        try:
+            self._queue.put_nowait(job)
+        except asyncio.QueueFull:
+            return self._refuse(conn_id, cmd, R_BUSY)
+        self.trackx.begin(conn_id, cmd, tc, job)
+        try:
+            ok, reason = await asyncio.wait_for(asyncio.shield(job.future), ACK_TIMEOUT_S)
+        except TimeoutError:
+            ok, reason = False, "Command timed out"
+        if not ok:
+            self.trackx.end("track_stopped", reason, quiet=True)
+            return self._refuse(conn_id, cmd, reason or "Command failed")
+        self._audit_cmd(conn_id, cmd, True, None)
+        return self._ack(conn_id, cmd.id, cmd.name, True, None)
+
+    async def _end_track(self, event: str, reason: str) -> None:
+        """End the running object track from a command that replaces it: the track's records
+        first (sync), then a STOP so the mount leaves its path before the new command."""
+        self.trackx.end(event, reason)
+        self.motion_cleared()
+        with contextlib.suppress(Pwi4Error):
+            await self._stop_requests()
 
     # ------------------------------------------------------------------ not-homed guard (T3.3)
 
@@ -592,6 +690,7 @@ class ControlService:
             return self._refuse(conn_id, cmd, reason, code)
         if self.holder is None:
             self._set_holder(conn_id, "first_command")
+        self.trackx.end("track_replaced", f"Replaced by {cmd.name}")  # the sequence stops the mount
         self.seq.start(cmd, conn_id)
         self._audit_cmd(conn_id, cmd, True, None)
         return self._ack(conn_id, cmd.id, cmd.name, True, None)
@@ -608,8 +707,8 @@ class ControlService:
             return R_OTHER_HAS_CONTROL, None
         if self.seq.active:
             return self.seq.busy_reason(), None
-        if self._current is not None or not self._queue.empty():
-            return R_WORKER_BUSY, None
+        if not self.trackx.active and (self._current is not None or not self._queue.empty()):
+            return R_WORKER_BUSY, None  # (a track's rendezvous job is ended by the sequence)
         if name == "connect":
             return None, None  # PWI4 may be down: the sequence starts it
         status = self.fresh_status()
@@ -724,7 +823,7 @@ class ControlService:
             cmd.name == "tracking" and cmd.args.get("on")
         )
         if starts_tracking and snap is not None:
-            if snap.state == "SLEWING":
+            if snap.state == "SLEWING" and not self.trackx.slewing:
                 return R_SLEWING
         return self.jogc.refusal(cmd, status)
 
@@ -738,11 +837,13 @@ class ControlService:
         while True:
             job = await self._queue.get()
             if job.cancelled_reason:
+                job.finished.set()
                 continue
             self._current = job
             job.task = asyncio.create_task(self._execute(job))
             await asyncio.wait({job.task})  # a cancelled job task must not kill the worker
             self._current = None
+            job.finished.set()
             if not job.future.done():
                 reason = job.cancelled_reason or "Command failed"
                 job.future.set_result((False, reason))
@@ -758,7 +859,7 @@ class ControlService:
                 # P15: PWI4's goto_alt_az does not end tracking; a local Az/El goto must end
                 # STOPPED (logic sheet A5c-iv), so tracking goes off first.
                 await self.writer.tracking_off()
-                await self._prepare_wrap(cmd.args["az"])
+                await self._goto_wrap(cmd)
                 await self.writer.goto_alt_az(cmd.args["alt"], cmd.args["az"])
                 self.motion_commanded = True
                 self.goto_started(cmd)
@@ -795,6 +896,7 @@ class ControlService:
             if not job.future.done():
                 job.future.set_result((True, None))
         except Pwi4Error as exc:
+            job.error = str(exc)
             if not job.future.done():
                 job.future.set_result((False, str(exc)))
         except asyncio.CancelledError:
@@ -916,7 +1018,7 @@ class ControlService:
             self.motion_cleared()
             if cmd.name == "goto_altaz":
                 await self.writer.tracking_off()
-                await self._prepare_wrap(cmd.args["az"])
+                await self._goto_wrap(cmd)
                 await self.writer.goto_alt_az(cmd.args["alt"], cmd.args["az"])
             elif cmd.name == "wrap_turn":
                 await self.writer.tracking_off()
@@ -974,6 +1076,18 @@ class ControlService:
             }
         self.audit.write("track_start", client=conn_id, id=cmd.id, **pos)
 
+    async def _goto_wrap(self, cmd: Command) -> None:
+        """Wrap window of a goto_altaz: the nearest representation of its azimuth (P8/P9), or the
+        axis-0 representation the command names (`target0`: the track rendezvous, T4.2c)."""
+        t0 = cmd.args.get("target0")
+        if t0 is None:
+            await self._prepare_wrap(cmd.args["az"])
+            return
+        st = self.fresh_status()
+        cur = st.mount.axis0_wrap_range_min_degs if st is not None else None
+        if cur is None or abs(cur - (t0 - 180.0)) >= WRAP_MIN_EPS_DEG:
+            await self.writer.set_axis0_wrap_range_min(t0 - 180.0)
+
     async def _prepare_wrap(self, target_az: float) -> None:
         """P8/P9: set the axis-0 wrap minimum so the nearest representation is taken."""
         st = self.fresh_status()
@@ -999,11 +1113,13 @@ class ControlService:
             except asyncio.QueueEmpty:
                 break
             job.cancelled_reason = reason
+            job.finished.set()
             if not job.future.done():
                 job.future.set_result((False, reason))
             n += 1
         self.motion_cleared()
         self.jogc.on_cancel(reason)
+        self.trackx.on_cancel(reason)
         if self.seq.active:  # connect / disconnect / home end with STOP, link loss, safety stop
             self.seq.cancel(reason)
             n += 1

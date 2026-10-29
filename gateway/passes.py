@@ -3,8 +3,9 @@ timescale and the Sun come in as arguments.
 
 `compute_pass` finds the CURRENT pass of an Earth satellite over a site with geometric alt/az
 (the same as the Sky Viewer card and chunks; PWI4's refracted altitude is slightly higher, so
-this is the safe side, P18): rise / set (alt = 0), the first Lim EL crossings and the peak, all
-refined to ~0.05 s. `track_verdict` is the rule table beneath the live TRACK OBJECT button.
+this is the safe side, P18): rise / set (alt = 0), the Lim EL crossings of the current (or, below
+Lim EL now, the next) Lim EL segment relative to NOW, and that segment's peak, all refined to
+~0.05 s. `track_verdict` is the rule table beneath the live TRACK OBJECT button.
 """
 
 from __future__ import annotations
@@ -42,8 +43,10 @@ R_TOO_SHORT = "Pass ends in under 30 s"
 
 @dataclass(frozen=True)
 class PassInfo:
-    """The current pass (Unix seconds; None = not applicable). `alt` / `az` / `rising` /
-    `sun_sep` describe the object NOW and are refreshed by `refresh_now` every check."""
+    """The current pass (Unix seconds; None = not applicable). `t_in` / `t_out` / `t_peak` /
+    `peak_alt` describe the current Lim EL segment (the next one when below Lim EL now).
+    `alt` / `az` / `rising` / `sun_sep` describe the object NOW and
+    are refreshed by `refresh_now` every check."""
 
     alt: float
     az: float
@@ -207,9 +210,37 @@ def compute_pass(
     A = np.concatenate([ba[::-1], [alt0], fa])
     n0 = len(bo)
     rise_found, set_found = bool(A[0] < 0.0), bool(A[-1] < 0.0)
-    lo = 1 if rise_found else n0  # first sample of the pass (or of the forward window)
+    lo = 1 if rise_found else 0  # first sample of the above-horizon span in the window
     hi = len(T) - 2 if set_found else len(T) - 1
-    pk_lo = lo if set_found else n0  # peak: the whole pass, or the forward window if no set
+    # Lim EL crossings are relative to NOW (T4.2f): the object may dip below Lim EL and come back
+    # without setting (MEO / HEO / some GEO), so the "current segment" is the one around now (or
+    # the next one when below Lim EL now), not the first crossing of the whole span.
+    d = A - lim_el
+    up_all = lo + np.nonzero((d[lo:hi] < 0) & (d[lo + 1 : hi + 1] >= 0))[0]
+    down_all = lo + np.nonzero((d[lo:hi] >= 0) & (d[lo + 1 : hi + 1] < 0))[0]
+    k_in = k_out = None
+    if alt0 >= lim_el:
+        prev = up_all[up_all < n0]
+        if prev.size:
+            k_in = int(prev[-1])
+        nxt = down_all[down_all >= n0]
+        if nxt.size:
+            k_out = int(nxt[0])
+    else:
+        nxt = up_all[up_all >= n0]
+        if nxt.size:
+            k_in = int(nxt[0])
+            after = down_all[down_all > k_in]
+            if after.size:
+                k_out = int(after[0])
+    # peak: the segment [t_in, t_out] (forward window max if no t_out); without a segment start
+    # the whole span (set found) or the forward window
+    if k_in is not None:
+        pk_lo = k_in + 1
+    else:
+        pk_lo = lo if (set_found and rise_found) else n0
+    pk_hi = k_out if k_out is not None else hi
+    pk_lo = min(pk_lo, pk_hi)
 
     # coarse brackets: (key, t_a, t_b, level, upward)
     br: list[tuple[str, float, float, float, bool]] = []
@@ -217,17 +248,11 @@ def compute_pass(
         br.append(("rise", T[0], T[1], 0.0, True))
     if set_found:
         br.append(("set", T[-2], T[-1], 0.0, False))
-    d = A[lo : hi + 1] - lim_el
-    up = np.nonzero((d[:-1] < 0) & (d[1:] >= 0))[0]
-    down = np.nonzero((d[:-1] >= 0) & (d[1:] < 0))[0]
-    if up.size:
-        k = lo + int(up[0])
-        br.append(("in", T[k], T[k + 1], lim_el, True))
-        down = down[down > up[0]]
-    if down.size:
-        k = lo + int(down[0])
-        br.append(("out", T[k], T[k + 1], lim_el, False))
-    ip = pk_lo + int(np.argmax(A[pk_lo : hi + 1]))
+    if k_in is not None:
+        br.append(("in", T[k_in], T[k_in + 1], lim_el, True))
+    if k_out is not None:
+        br.append(("out", T[k_out], T[k_out + 1], lim_el, False))
+    ip = pk_lo + int(np.argmax(A[pk_lo : pk_hi + 1]))
     pa, pb = T[max(ip - 1, 0)], T[min(ip + 1, len(T) - 1)]
 
     grids = [_grid(a - FINE_PAD_S, b + FINE_PAD_S) for _, a, b, _, _ in br]
@@ -241,7 +266,7 @@ def compute_pass(
         pos += len(g)
     t_peak, peak_alt = _vertex(grids[-1], fine_alt[pos:])
     t_in = out.get("in")
-    if t_in is None and rise_found and d[0] >= 0.0:
+    if t_in is None and rise_found and d[lo] >= 0.0:
         t_in = out["rise"]  # Lim EL at / below the horizon: the pass starts above it
     return replace(
         base,
@@ -268,7 +293,9 @@ def track_verdict(
         return R_PEAK_BELOW, "peak_below_limit", None
     # "past the peak": its time has gone, or (a never-setting object whose forward peak is
     # ahead) it is falling now
-    past_peak = (info.t_peak is not None and info.t_peak <= now) or not info.rising
+    # ... unless an upward Lim EL crossing is still ahead (falling into a dip between two humps)
+    climb_ahead = info.t_in is not None and info.t_in > now
+    past_peak = (info.t_peak is not None and info.t_peak <= now) or not (info.rising or climb_ahead)
     if info.alt < lim_el and past_peak:
         return R_SETTING, "setting", None
     if info.t_out is None:

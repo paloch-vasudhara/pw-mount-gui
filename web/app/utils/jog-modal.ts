@@ -4,6 +4,7 @@
 import type { CommandAck, ControlHolder } from './mount-socket'
 import { gotoDisabledReason, type ControlSnapshotLike } from './mount-control'
 import type { CheckResult } from './goto-modal'
+import { isObjectTrackActive, OBJECT_TRACKING_JOG_REASON } from './track-state'
 
 export const JOG_SPEEDS = [0.5, 1.0, 2.0, 5.0, 10.0] as const
 export const STEP_SIZES = [1, 5, 10, 30, 60] as const // arcmin
@@ -47,7 +48,14 @@ export function jogDisabledReason(
   return gotoDisabledReason(s, opts)
 }
 
+/** T4.2: the pad is disabled while an object track runs (the gateway refuses jog / step anyway). */
+export function jogGateReason(gate: string | null, s: { track?: { phase?: string | null } | null } | null): string | null {
+  return gate ?? (isObjectTrackActive(s?.track) ? OBJECT_TRACKING_JOG_REASON : null)
+}
+
 export interface JogSnapshotLike {
+  /** T4.2: object-track workflow (null when idle). */
+  track?: { phase?: string | null } | null
   jog?: { axis?: number, dir?: number, speed?: number } | null
   step?: { axis?: number, dir?: number, size_arcmin?: number } | null
   /** T3.4e: an azimuth jog stopped at the mechanical limit; a 360° turn is offered. */

@@ -1,0 +1,94 @@
+F
+PWI4SIM RESULTS: {
+ "normal": {
+  "t_r_minus_now_at_ack_s": 9.4,
+  "t_end_minus_t_r_s": 149.3,
+  "follow_err_max_deg": 11.0949,
+  "min_alt_deg": 15.061,
+  "end_delay_after_t_end_s": 1.09,
+  "ended": {
+   "norad": 99101,
+   "reason": "Track ended at Lim EL",
+   "at": 1793243526.2779307
+  },
+  "final_state": "STOPPED",
+  "phases": [
+   "slewing",
+   "waiting",
+   "tracking"
+  ],
+  "audit": [
+   "track_start",
+   "track_done"
+  ]
+ },
+ "cfg_before": [
+  1793159639.7852576,
+  "4406df60f130fe0bb8ee12b633f97bf60321d6ee35e15c1de51e8b1f5e2683a2"
+ ],
+ "cfg_after": [
+  1793159639.7852576,
+  "4406df60f130fe0bb8ee12b633f97bf60321d6ee35e15c1de51e8b1f5e2683a2"
+ ]
+}
+
+================================== FAILURES ===================================
+______________________________ test_normal_pass _______________________________
+
+pwi = <pwi4_client.PWI4 object at 0x000001DBFEBC9A60>
+stub = <gateway.tests.tle_stub.TleStub object at 0x000001DBFEBCAE10>
+site = (0.119972222222222, 115.920694444444, 12.0)
+tmp_path = WindowsPath('C:/Users/soar/AppData/Local/Temp/pytest-of-soar/pytest-596/test_normal_pass0')
+
+    def test_normal_pass(pwi, stub, site, tmp_path):
+        """Row 1: the object is already above Lim EL; follows it to Lim EL and stops there."""
+        p = make_pass(stub, site, 20.0, -20.0, "SYN-NORMAL")
+        rig = Rig(pwi, tmp_path, stub)
+    
+        async def go():
+            c = await rig.open()
+            t_cmd = time.monotonic()
+            ack = await c.cmd("track_object", {"norad": p.norad}, timeout=20)
+            assert ack["ok"], ack
+            await c.until(lambda: c.phase in ("waiting", "tracking"), 60, "waiting/tracking")
+            info = dict(c.track)
+            t_r, t_end = info["t_r"], info["t_end"]
+            assert t_r - now_s() < 40
+            await c.until(lambda: c.ended is not None, max(t_end - now_s(), 0) + 25, "track ended")
+            t_seen = c.first(lambda st, rs, tr: tr is not None and tr.get("ended") is not None)
+            await asyncio.sleep(1.5)
+            return c, info, t_cmd, t_seen
+    
+        c, info, t_cmd, t_seen = run(go())
+        try:
+            t_r, t_end = info["t_r"], info["t_end"]
+            errs = follow_errors(rig.smp, p, site, t_r + 3.0, t_end - 0.5)
+            assert len(errs) > 100, len(errs)
+            max_err = max(e for _, e in errs)
+            lowest = min_alt(rig.smp, t_cmd, time.monotonic())
+            end_delay = t_seen + OFF - t_end
+            phases = []
+            for _, _, _, tr in c.snaps:
+                ph = (tr or {}).get("phase")
+                if ph and (not phases or phases[-1] != ph):
+                    phases.append(ph)
+            ev_names = [e["event"] for e in events(rig.g, "track_start", "track_done", "track_stopped")]
+            RESULTS["normal"] = {
+                "t_r_minus_now_at_ack_s": round(t_r - (t_cmd + OFF), 1),
+                "t_end_minus_t_r_s": round(t_end - t_r, 1),
+                "follow_err_max_deg": round(max_err, 4),
+                "min_alt_deg": round(lowest, 3),
+                "end_delay_after_t_end_s": round(end_delay, 2),
+                "ended": c.ended,
+                "final_state": c.state,
+                "phases": phases,
+                "audit": ev_names,
+            }
+>           assert max_err <= FOLLOW_TOL_DEG
+E           assert 11.094863773445532 <= 0.05
+
+gateway\tests\test_track_object_pwi4sim.py:355: AssertionError
+=========================== short test summary info ===========================
+FAILED gateway/tests/test_track_object_pwi4sim.py::test_normal_pass - assert ...
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!
+1 failed in 181.08s (0:03:01)

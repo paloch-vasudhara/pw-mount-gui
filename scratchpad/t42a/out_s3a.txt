@@ -1,0 +1,6 @@
+[09:56:31.072] pass SYN-S3: peak 20.00, t_in in 59 s, t_out-t_in 186 s, compute_pass={"t_in": 1793181450.1568837, "t_out": 1793181636.468422, "t_peak": 1793181543.4457276, "peak": 19.999077015756438, "t_rise": 1793181244.1798358, "t_set": 1793181841.1566179}
+[09:56:42.645] prepositioned: alt 15.061 ax0 -90.033 (wanted alt 15.061 ax0 -90.034) wrap -234.4 settled=True
+[09:56:42.646] s3_path_dt1p0: 187 points over 186.4 s, ax0 range -90.0..-18.7, wrap_min -234.4
+[09:57:27.225] s3_path_dt1p0 new+add 38 ms, apply done at 2.93 s before first point
+[10:01:03.253] saved s3_path_dt1p0.json (2605 rows)
+[10:01:03.266] s3_path_dt1p0 wrap before -234.4 after -234.4

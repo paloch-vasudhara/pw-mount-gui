@@ -234,10 +234,20 @@ def path_min_sun_sep(
     return best, sun_sep(a0 % 360.0, a1, sun)
 
 
-def corridor_distance(pos: tuple[float, float], paths: list[list[tuple[float, float]]]) -> float:
+def corridor_distance(
+    pos: tuple[float, float], paths: list[list[tuple[float, float]]], sky: bool = False
+) -> float:
     """Smallest axis-space distance (deg) from `pos` to any predicted path (polyline through the
-    0.1 s samples) of either timing variant."""
+    0.1 s samples) of either timing variant.
+
+    `sky` (object tracks, Q19): axis-0 offsets are scaled by cos(the mount's altitude), so the
+    distance is the pointing offset on the sky. Near the zenith the azimuth axis lags at its max
+    rate (P22) by many axis degrees that are only ~1 deg on the sky."""
     px, py = pos
+    if sky:
+        k = max(math.cos(math.radians(py)), 0.0)
+        px *= k
+        paths = [[(x * k, y) for x, y in path] for path in paths]
     best = math.inf
     for path in paths:
         if len(path) == 1:
@@ -265,6 +275,8 @@ class ValidatedGoto:
     # t_begin + duration_s or by clear(): the mount legitimately waits (LEAD) and holds at the end,
     # and the predictive Sun rule must not fire on the route's own pass at 16 deg.
     route: bool = False
+    # T4.2 Q19: object tracks measure the corridor on the sky (see corridor_distance)
+    sky: bool = False
 
 
 @dataclass
@@ -332,7 +344,7 @@ def validated_decision(
     hit = actual_limit_decision(alt, az, lim_el, sun, plan.start[1], plan.start_sun_sep)
     if hit is not None:
         return hit
-    dev = corridor_distance(axes, plan.paths)
+    dev = corridor_distance(axes, plan.paths, plan.sky)
     if dev > corridor_tol:
         return R_CORRIDOR, {"deviation_deg": dev, "tolerance_deg": corridor_tol}
     return None
@@ -499,6 +511,18 @@ class SafetyEngine:
         self._sun_cache = (now, site, pos)
         return pos
 
+    def sun_altaz_at(
+        self, site: tuple[float, float, float], t_unix: float
+    ) -> tuple[float, float] | None:
+        """Sun (alt, az) at an arbitrary Unix time (T4.2b track planner; uncached)."""
+        if self.sun_override is not None:
+            return self.sun_override
+        if not self.ephem.available:
+            return None
+        from datetime import UTC, datetime
+
+        return self.ephem.sun_altaz(site, datetime.fromtimestamp(t_unix, UTC))
+
     def home_pose(self) -> tuple[float, float]:
         """(alt, az) of the home pose used for the Sun path check (settings, hand-editable)."""
         if self.store is not None:
@@ -641,7 +665,7 @@ class SafetyEngine:
             t_alt, t_az = self.ephem.radec_j2000_altaz(site, cmd.args["ra_h"], cmd.args["dec_deg"])
         if t_alt < lim:
             return r_below(lim)
-        if cmd.name == "wrap_turn":
+        if "target0" in cmd.args:  # wrap_turn, or the track rendezvous goto (T4.2c)
             tgt0 = cmd.args["target0"]
         elif None not in (a0.min_mech_position_degs, a0.max_mech_position_degs):
             tgt0 = axis0_target(
@@ -807,11 +831,11 @@ class SafetyEngine:
         if None in (a0.position_degs, a1.position_degs):
             return None
         tgt0 = None
-        if cmd.name == "wrap_turn":
+        if cmd.name == "wrap_turn" or (cmd.name == "goto_altaz" and "target0" in cmd.args):
             # T3.4e: the effective command carries the axis-0 target (the OTHER representation of
             # the current azimuth). Judged exactly like a goto: Lim EL / Sun target above, the
             # Sun PATH (the sweep along the whole altitude circle) below.
-            # TODO(T3.5 D-SUN): route the turn through the detour planner instead of refusing.
+            # T4.2c: the track rendezvous goto carries the planner's axis-0 representation too.
             tgt0 = cmd.args["target0"]
         elif None not in (a0.min_mech_position_degs, a0.max_mech_position_degs):
             tgt0 = axis0_target(
@@ -903,9 +927,11 @@ class SafetyMonitor:
         duration_s: float,
         start_sun_sep: float | None,
         start: tuple[float, float],
+        sky: bool = False,
     ) -> None:
         """A D-SUN route is about to be uploaded: watch the actual limits and the route corridor
-        until t_begin + duration_s (LEAD + route + settle), regardless of idle / arrival."""
+        until t_begin + duration_s (LEAD + route + settle), regardless of idle / arrival.
+        `sky`: an object track (corridor measured on the sky, Q19)."""
         self.begin(
             ValidatedGoto(
                 start=start,
@@ -914,8 +940,20 @@ class SafetyMonitor:
                 duration_s=duration_s,
                 start_sun_sep=start_sun_sep,
                 route=True,
+                sky=sky,
             )
         )
+
+    def extend_route(
+        self, corridor: list[tuple[float, float]], target: tuple[float, float], extra_s: float
+    ) -> None:
+        """A long track got its next chunk (T4.2c): the running route plan grows with it."""
+        p = self.plan
+        if p is None or not p.route:
+            return
+        p.paths[0].extend(corridor)
+        p.target = target
+        p.duration_s += extra_s
 
     def clear(self) -> None:
         """New command / STOP / link loss: back to the predictive rules."""

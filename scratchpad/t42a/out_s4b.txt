@@ -1,0 +1,6 @@
+[09:50:31.947] pass SYN-S4P: peak 88.00, t_in in 119 s, t_out-t_in 321 s, compute_pass={"t_in": 1793181151.2134955, "t_out": 1793181472.0197008, "t_peak": 1793181312.1416254, "peak": 88.00626171504994, "t_rise": 1793180985.7176907, "t_set": 1793181635.7892094}
+[09:50:58.454] prepositioned: alt 51.171 ax0 212.837 (wanted alt 51.171 ax0 212.838) wrap -54.7 settled=True
+[09:50:58.455] s4_zenith_path_dt0p5: 181 points over 90.0 s, ax0 range 37.9..212.8, wrap_min -54.7
+[09:54:24.399] s4_zenith_path_dt0p5 new+add 19 ms, apply done at 2.95 s before first point
+[09:56:14.081] saved s4_zenith_path_dt0p5.json (3155 rows)
+[09:56:14.093] s4_zenith_path_dt0p5 wrap before -54.7 after -54.7

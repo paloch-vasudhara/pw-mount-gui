@@ -1,6 +1,27 @@
-# Session handoff — updated 2026-10-28 (Phase 3 closed: T3.5 + Tier 3 verified; user commits; next Phase 4)
+# Session handoff — updated 2026-10-29 (Phase 4 COMPLETE and user-checked; the user commits; next Phase 5 / T5.1)
 
 Read this first, then `docs/BUILD_PLAN.md` (§7 tracker + **resume point**, §6 task specs, §8 logs/findings), then `docs/logic_sheet.txt` as needed.
+
+## START HERE (after compaction / next session)
+
+1. **Check `git log`.** The user commits Phase 4 (T4.2 + T4.2f + T4.3 + T4.3d / T4.3e + the Tier 3 fixes) right after this handoff. If it is still uncommitted, ask before doing anything else.
+2. **Phase 4 is complete:**
+   - Tier 3 10-29: sim ×2 → 66/66, harness 10/10, non-sim 624, web 454;
+   - flaky list empty;
+   - user-checked (BUILD_PLAN §8 "T4.2 … T4.3e" logs, "Phase 4 end, Tier 3").
+3. **Next: Phase 5, T5.1 Pass Analysis lite (A2b-i), spec first.**
+   - Read: logic sheet A2b-i + O4 (optical = above Lim EL, illuminated, Sun below 0°), `concept/Pass Analysis.png`, ssa-toolkit Pass Analysis (read/copy only).
+   - Reuse:
+     - analysis `/api/sats/search` (+ `orbit_group` / `country`);
+     - `gateway/passes.py` maths ideas (now-relative segments);
+     - the web `StaleBadge`, `utils/track-verdict.ts`, `afterTrackStarted()` and the `track_object` check / command for the live [Track] button.
+   - Ask the user the open design questions (AskUserQuestion) before briefing workers.
+4. **Open item** (fix only if the user asks): the GEO "no safe detour" text while the Sun disc approaches (T4.2f log).
+5. **Environment:**
+   - The `PWI4.cfg` baseline is `b714321830fb…` (user site 13.12 / 100.92; app Lim EL 10; timezone Asia/Bangkok).
+   - Sim runs need the user's 8400 stopped (ask).
+   - Keep `.py` files out of the repo `scratchpad/` (`ruff check .`).
+   - Untracked work notes / raw data are in the repo `scratchpad/t4*` (the user's choice to keep or delete).
 
 ## Where we are
 
@@ -61,7 +82,7 @@ Read this first, then `docs/BUILD_PLAN.md` (§7 tracker + **resume point**, §6 
        - two monitor fixes (azimuth-axis velocity; arrival needs a settled mount);
        - tests decoupled from the real Sun.
        - The user commits T3.5 + the phase close together.
-    2. **Next: Phase 4 (Tracking).** Phase 3 committed `3e4f4c5`. T4.1 spec written 10-28 (BUILD_PLAN §6; Q13–Q16: gateway fetches the TLE by NORAD via `PW_ANALYSIS_URL`, Sun-disc rule kept, ≥ 30 s left above Lim EL, stale TLEs trackable). T4.1 verified 10-28 (a: gateway pass check; b: live TRACK OBJECT verdict on the card). Next: the user's visual check at :3200 (restart 8400; 8410 must run), then the T4.2 spec.
+    2. **Next: Phase 4 (Tracking).** Phase 3 committed `3e4f4c5`. T4.1 spec written 10-28 (BUILD_PLAN §6; Q13–Q16: gateway fetches the TLE by NORAD via `PW_ANALYSIS_URL`, Sun-disc rule kept, ≥ 30 s left above Lim EL, stale TLEs trackable). T4.1 verified + user-checked 10-28. T4.2: probe done (P22), spec written (Q17 own path, Q18 zenith note); T4.2b planner verified; next brief T4.2c (wiring). Keep the user 8400 gateway stopped during sim work.
     - `PWI4.cfg` baseline is now `4406df60…e2683a2` (the user's site change).
     - The PWI4 sim site is lat 0.12 / lon 115.92 (user, 10-28).
     - Never run the tests while the user's 8400 gateway is up: its monitor acts on the same sim.

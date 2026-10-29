@@ -9,7 +9,7 @@ from typing import Literal
 from fastapi import FastAPI, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
-from .catalog import LAYERS, default_source
+from .catalog import LAYERS, ORBIT_GROUPS, default_source
 from .chunks import MAX_DURATION_S, STEP_S, Site
 from .db import CatalogUnavailable
 from .service import Service, Unavailable
@@ -88,9 +88,22 @@ def create_app(factory: Callable = default_source) -> FastAPI:
         q: str | None = None,
         orbit_class: str | None = None,
         object_type: str | None = None,
+        country: str | None = None,
+        orbit_group: str | None = None,
         limit: int = Query(500, ge=1, le=500),
     ) -> list[dict]:
-        return db_call(lambda: service.get_source().search(q, orbit_class, object_type, limit))
+        if orbit_group is not None and orbit_group.lower() not in ORBIT_GROUPS:
+            raise HTTPException(422, "orbit_group must be one of leo, meo, geo")
+        return db_call(
+            lambda: service.get_source().search(
+                q, orbit_class, object_type, limit, country=country, orbit_group=orbit_group
+            )
+        )
+
+    # declared before /api/sats/{norad} so the int path does not capture it
+    @app.get("/api/sats/countries")
+    def sats_countries() -> list[dict]:
+        return db_call(lambda: service.countries(lambda: service.get_source().countries()))
 
     @app.get("/api/sats/{norad}")
     def sats_get(norad: int) -> dict:

@@ -1,0 +1,149 @@
+[09:23:33.951] initial wrap/state: {"mount.is_connected": "false", "mount.axis0_wrap_range_min_degs": "-180", "mount.axis0.is_enabled": "false", "mount.axis1.is_enabled": "false"}
+[09:23:34.998] connected; lat/lon (0.119972222222222, 115.920694444444, 12.0); local-vs-resp: 1793179414.9980311 vs 2026-10-28 09:23:34.997886
+[09:23:35.096] status latency 9.7 ms
+[09:23:35.100] custom_path/new: {'pwi4.version': '4.1.0', 'pwi4.version_field[0]': '4', 'pwi4.version_field[1]': '1', 'pwi4.version_field[2]': '0', 'pwi4.version_field[3]': '99', 'response.timestamp_utc': '2026-10-28 09:23:35.099586', 'site.latitude_degs': '0.119972222222222', 'site.longitude_degs': '115.920694444444', 'site.heigh
+[09:23:35.113] add_point_list resp: Method: POST
+Content-type:: application/x-www-form-urlencoded
+Body:
+data=2461341.8925358802%2C100.0%2C30.0%0A2461341.8925474542%2C100.0%2C30.01%0A2461341.8925590282%2C100.0%2C30.02%0A2461341.8925706022%2C100.0%2C30.03%0A2461341.8925821763%2C100.0%2C30.04
+Form:
+data = '2461341.8925358802,100.0,30.0
+2461341.8925474542,100.0,30.01
+2461341.8925590282,100.0,30.02
+2461341.8925706022,100.0,30.03
+2461341.8925821763,100.0,30.04'
+Query:
+
+[09:24:50.671] pass SYN-S1_-5: peak 14.94, t_in in 64 s, t_out-t_in -0 s, compute_pass={"t_in": 1793179555.1324453, "t_out": 1793179856.9301524, "t_peak": 1793179706.503872, "peak": 45.00259924615592, "t_rise": 1793179384.3306189, "t_set": 1793180025.8241498}
+[09:25:01.135] prepositioned: alt 15.061 ax0 195.640 (wanted alt 15.061 ax0 195.640) wrap -23.4 settled=True
+[09:25:50.177] s1_-5 follow_tle at t_in-5 (called 0.00 s relative), took 44 ms
+[09:27:01.794] saved s1_-5.json (1206 rows)
+[09:27:01.808] s1_-5 wrap before -23.4 after -62.7
+[09:27:44.357] pass SYN-S1_+0: peak 45.00, t_in in 64 s, t_out-t_in 302 s, compute_pass={"t_in": 1793179728.664421, "t_out": 1793180029.9682496, "t_peak": 1793179878.8881814, "peak": 45.00331568817603, "t_rise": 1793179559.6793149, "t_set": 1793180200.4891798}
+[09:27:59.354] prepositioned: alt 15.061 ax0 -15.550 (wanted alt 15.061 ax0 -15.550) wrap -155.9 settled=True
+[09:28:48.695] s1_+0 follow_tle at t_in+0 (called -0.00 s relative), took 32 ms
+[09:30:00.310] saved s1_+0.json (1209 rows)
+[09:30:00.322] s1_+0 wrap before -155.9 after -116.9
+[09:30:11.569] pass SYN-S1_+5: peak 15.15, t_in in 65 s, t_out-t_in 37 s, compute_pass={"t_in": 1793179876.0835035, "t_out": 1793179912.506787, "t_peak": 1793179894.2890873, "peak": 15.149941447234097, "t_rise": 1793179609.990448, "t_set": 1793180180.8826544}
+[09:30:22.689] prepositioned: alt 15.061 ax0 -119.628 (wanted alt 15.061 ax0 -119.628) wrap -323.7 settled=True
+[09:31:21.117] s1_+5 follow_tle at t_in+5 (called 0.00 s relative), took 32 ms
+[09:32:32.743] saved s1_+5.json (1300 rows)
+[09:32:32.755] s1_+5 wrap before -323.7 after -300.0
+[09:32:44.805] pass SYN-S2: peak 45.00, t_in in 63 s, t_out-t_in 302 s, compute_pass={"t_in": 1793180028.2640836, "t_out": 1793180330.0615828, "t_peak": 1793180179.6354055, "peak": 45.00244011299334, "t_rise": 1793179857.4621992, "t_set": 1793180498.9556375}
+[09:32:58.032] prepositioned: alt 50.000 ax0 15.641 (wanted alt 50.000 ax0 15.640) wrap -164.4 settled=True
+[09:34:59.900] saved s2_far.json (1218 rows)
+[09:34:59.917] s2_far wrap before -164.4 after -63.0
+[09:35:53.136] pass SYN-S1_+5: peak 15.14, t_in in 64 s, t_out-t_in 35 s, compute_pass={"t_in": 1793180217.171582, "t_out": 1793180252.0478477, "t_peak": 1793180234.6044133, "peak": 15.137389188679357, "t_rise": 1793179950.3515232, "t_set": 1793180521.1514037}
+[09:35:53.136] make_pass retry: got peak 15.14
+[09:36:04.021] pass SYN-S1_+5: peak 15.18, t_in in 64 s, t_out-t_in 40 s, compute_pass={"t_in": 1793180228.3429163, "t_out": 1793180268.1645231, "t_peak": 1793180248.2466543, "peak": 15.179504618926238, "t_rise": 1793179963.8405144, "t_set": 1793180534.9495249}
+[09:36:04.021] make_pass retry: got peak 15.18
+[09:36:15.105] pass SYN-S1_+5: peak 15.14, t_in in 64 s, t_out-t_in 36 s, compute_pass={"t_in": 1793180239.250263, "t_out": 1793180274.5527859, "t_peak": 1793180256.896244, "peak": 15.140795477761978, "t_rise": 1793179972.6309388, "t_set": 1793180543.4559126}
+[09:36:15.111] make_pass retry: got peak 15.14
+[09:36:25.515] pass SYN-S1_+5: peak 15.02, t_in in 65 s, t_out-t_in 15 s, compute_pass={"t_in": 1793180250.4699664, "t_out": 1793180264.9178405, "t_peak": 1793180257.6939838, "peak": 15.02363838896899, "t_rise": 1793179974.0899994, "t_set": 1793180542.492797}
+[09:36:25.516] make_pass retry: got peak 15.02
+[09:36:25.519] EXCEPTION Traceback (most recent call last):
+  File "C:\Users\soar\Desktop\DELV\pw-mount-control\scratchpad\t42a\scen.py", line 180, in <module>
+    globals()[name](*a)
+  File "C:\Users\soar\Desktop\DELV\pw-mount-control\scratchpad\t42a\scen.py", line 65, in s1
+    g = make_pass(peak, 75.0, name="SYN-" + tag.upper(), satnum=99010 + int(off + 10))
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\soar\Desktop\DELV\pw-mount-control\scratchpad\t42a\common.py", line 93, in make_pass
+    raise RuntimeError("no good pass")
+RuntimeError: no good pass
+
+[09:36:36.156] prepositioned: alt 30.000 ax0 100.000 (wanted alt 30.000 ax0 100.000) wrap -80.0 settled=True
+[09:36:36.249] s5_points_600: N=600 add 31 ms (resp 55604 chars, tail ".9007880883,100.0,39.96661101836394\n2461341.9007884748,100.0,39.983305509181974\n2461341.9007888613,100.0,40.0'\r\nQuery:\r\n"), apply 44 ms; first point in 11.9 s
+[09:36:36.252] EXCEPTION Traceback (most recent call last):
+  File "C:\Users\soar\Desktop\DELV\pw-mount-control\scratchpad\t42a\pts.py", line 66, in <module>
+    run("s5_points_%d" % n, n)
+  File "C:\Users\soar\Desktop\DELV\pw-mount-control\scratchpad\t42a\pts.py", line 35, in run
+    rec.event("applied", t=tc)
+  File "C:\Users\soar\Desktop\DELV\pw-mount-control\scratchpad\t42a\common.py", line 178, in event
+    self.events.append(dict(t=time.time(), name=name, **kw))
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: dict() got multiple values for keyword argument 't'
+
+[09:36:48.455] pass SYN-S3: peak 25.00, t_in in 68 s, t_out-t_in 238 s, compute_pass={"t_in": 1793180276.863342, "t_out": 1793180514.0167952, "t_peak": 1793180395.6723473, "peak": 24.998405804292236, "t_rise": 1793180087.683852, "t_set": 1793180701.8340938}
+[09:37:03.737] prepositioned: alt 15.061 ax0 -102.337 (wanted alt 15.061 ax0 -102.337) wrap -234.3 settled=True
+[09:37:03.738] s3_path_dt1p0: 239 points over 237.5 s, ax0 range -102.3..-6.3, wrap_min -234.3
+[09:37:53.926] s3_path_dt1p0 new+add 32 ms, apply done at 2.94 s before first point
+[09:42:21.089] EXCEPTION Traceback (most recent call last):
+  File "C:\Users\soar\Desktop\DELV\pw-mount-control\scratchpad\t42a\scen.py", line 180, in <module>
+    globals()[name](*a)
+  File "C:\Users\soar\Desktop\DELV\pw-mount-control\scratchpad\t42a\scen.py", line 145, in s3
+    run_path(tag, g, g["t_in"], g["t_out"], dt)
+  File "C:\Users\soar\Desktop\DELV\pw-mount-control\scratchpad\t42a\scen.py", line 138, in run_path
+    out, sl = finish(rec, extra, tag, stop_latency=stop)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\soar\Desktop\DELV\pw-mount-control\scratchpad\t42a\scen.py", line 41, in finish
+    return rec.stop(extra), sl
+           ^^^^^^^^^^^^^^^
+  File "C:\Users\soar\Desktop\DELV\pw-mount-control\scratchpad\t42a\common.py", line 220, in stop
+    json.dump(out, f, default=float)
+  File "C:\Users\soar\miniforge3\Lib\json\__init__.py", line 179, in dump
+    for chunk in iterable:
+                 ^^^^^^^^
+  File "C:\Users\soar\miniforge3\Lib\json\encoder.py", line 432, in _iterencode
+    yield from _iterencode_dict(o, _current_indent_level)
+  File "C:\Users\soar\miniforge3\Lib\json\encoder.py", line 406, in _iterencode_dict
+    yield from chunks
+  File "C:\Users\soar\miniforge3\Lib\json\encoder.py", line 439, in _iterencode
+    o = _default(o)
+        ^^^^^^^^^^^
+TypeError: only 0-dimensional arrays can be converted to Python scalars
+
+[09:42:32.565] pass SYN-S3: peak 25.00, t_in in 69 s, t_out-t_in 237 s, compute_pass={"t_in": 1793180621.8876517, "t_out": 1793180859.0618613, "t_peak": 1793180740.2423651, "peak": 25.001348569047703, "t_rise": 1793180434.0770216, "t_set": 1793181048.2344964}
+[09:42:38.478] prepositioned: alt 15.061 ax0 6.507 (wanted alt 15.061 ax0 6.507) wrap -125.5 settled=True
+[09:42:38.480] s3_path_dt0p5: 476 points over 237.3 s, ax0 range 6.5..102.4, wrap_min -125.5
+[09:43:38.958] s3_path_dt0p5 new+add 35 ms, apply done at 2.93 s before first point
+[09:44:45.352] stopnow
+[09:44:54.905] pass SYN-S4F: peak 87.99, t_in in 119 s, t_out-t_in 321 s, compute_pass={"t_in": 1793180814.0049405, "t_out": 1793181134.8099802, "t_peak": 1793180973.8846092, "peak": 87.99460259099193, "t_rise": 1793180650.2352092, "t_set": 1793181300.3055587}
+[09:44:54.912] zenith: peak 87.99; ax0 range -212.8..-37.9 over window
+[09:45:03.307] prepositioned: alt 51.095 ax0 -37.892 (wanted alt 51.095 ax0 -37.893) wrap -305.4 settled=True
+[09:50:20.735] saved s4_zenith_follow.json (3173 rows)
+[09:50:20.749] s4_zenith_follow wrap before -305.4 after -300.0
+[09:50:31.947] pass SYN-S4P: peak 88.00, t_in in 119 s, t_out-t_in 321 s, compute_pass={"t_in": 1793181151.2134955, "t_out": 1793181472.0197008, "t_peak": 1793181312.1416254, "peak": 88.00626171504994, "t_rise": 1793180985.7176907, "t_set": 1793181635.7892094}
+[09:50:58.454] prepositioned: alt 51.171 ax0 212.837 (wanted alt 51.171 ax0 212.838) wrap -54.7 settled=True
+[09:50:58.455] s4_zenith_path_dt0p5: 181 points over 90.0 s, ax0 range 37.9..212.8, wrap_min -54.7
+[09:54:24.399] s4_zenith_path_dt0p5 new+add 19 ms, apply done at 2.95 s before first point
+[09:56:14.081] saved s4_zenith_path_dt0p5.json (3155 rows)
+[09:56:14.093] s4_zenith_path_dt0p5 wrap before -54.7 after -54.7
+[09:56:31.072] pass SYN-S3: peak 20.00, t_in in 59 s, t_out-t_in 186 s, compute_pass={"t_in": 1793181450.1568837, "t_out": 1793181636.468422, "t_peak": 1793181543.4457276, "peak": 19.999077015756438, "t_rise": 1793181244.1798358, "t_set": 1793181841.1566179}
+[09:56:42.645] prepositioned: alt 15.061 ax0 -90.033 (wanted alt 15.061 ax0 -90.034) wrap -234.4 settled=True
+[09:56:42.646] s3_path_dt1p0: 187 points over 186.4 s, ax0 range -90.0..-18.7, wrap_min -234.4
+[09:57:27.225] s3_path_dt1p0 new+add 38 ms, apply done at 2.93 s before first point
+[10:01:03.253] saved s3_path_dt1p0.json (2605 rows)
+[10:01:03.266] s3_path_dt1p0 wrap before -234.4 after -234.4
+[10:01:14.752] pass SYN-S3: peak 20.00, t_in in 59 s, t_out-t_in 187 s, compute_pass={"t_in": 1793181733.9566233, "t_out": 1793181920.9629278, "t_peak": 1793181827.6349497, "peak": 20.00120226589728, "t_rise": 1793181527.1823812, "t_set": 1793182125.5607014}
+[10:01:28.886] prepositioned: alt 15.060 ax0 161.634 (wanted alt 15.061 ax0 161.634) wrap -54.1 settled=True
+[10:01:28.887] s3_path_dt0p5: 376 points over 187.4 s, ax0 range 90.1..161.6, wrap_min -54.1
+[10:02:11.020] s3_path_dt0p5 new+add 33 ms, apply done at 2.94 s before first point
+[10:05:47.995] saved s3_path_dt0p5.json (2590 rows)
+[10:05:48.007] s3_path_dt0p5 wrap before -54.1 after -54.1
+[10:05:54.973] prepositioned: alt 29.999 ax0 100.000 (wanted alt 30.000 ax0 100.000) wrap -80.0 settled=True
+[10:05:55.022] s5_points_600: N=600 add 29 ms (resp 55604 chars, tail ".9211100498,100.0,39.96661101836394\n2461341.9211104363,100.0,39.983305509181974\n2461341.9211108228,100.0,40.0'\r\nQuery:\r\n"), apply 16 ms; first point in 9.0 s
+[10:06:30.090] saved s5_points_600.json (351 rows)
+[10:06:30.101] {"tag": "s5_points_600", "n": 600, "alt_at_t0": 30.0290760631896, "alt_at_end": 39.9996471360036, "alt_max": 39.9999992182208, "alt_last": 39.9999992182208, "trk_at_end_of_path": true, "add_ms": 28.502702713012695, "resp_len": 55604, "notes": {}}
+[10:06:36.318] prepositioned: alt 30.000 ax0 100.000 (wanted alt 30.000 ax0 100.000) wrap -80.0 settled=True
+[10:06:36.410] s5_points_2400: N=2400 add 48 ms (resp 222230 chars, tail "1.9215891496,100.0,39.99166319299708\n2461341.9215892460,100.0,39.99583159649854\n2461341.9215893429,100.0,40.0'\r\nQuery:\r\n"), apply 28 ms; first point in 8.9 s
+[10:07:11.437] saved s5_points_2400.json (351 rows)
+[10:07:11.448] {"tag": "s5_points_2400", "n": 2400, "alt_at_t0": 30.0289191568002, "alt_at_end": 39.9996489150867, "alt_max": 39.9999992580717, "alt_last": 39.9999992580717, "trk_at_end_of_path": true, "add_ms": 47.72758483886719, "resp_len": 222230, "notes": {}}
+[10:07:17.632] prepositioned: alt 30.000 ax0 100.000 (wanted alt 30.000 ax0 100.000) wrap -80.0 settled=True
+[10:07:17.804] s5_points_10000: N=10000 add 110 ms (resp 925904 chars, tail "2461341.9220674722,100.0,39.99799979998\n2461341.9220674955,100.0,39.99899989999\n2461341.9220675183,100.0,40.0'\r\nQuery:\r\n"), apply 29 ms; first point in 8.8 s
+[10:07:52.750] saved s5_points_10000.json (351 rows)
+[10:07:52.762] {"tag": "s5_points_10000", "n": 10000, "alt_at_t0": 30.0276466703756, "alt_at_end": 39.9996371555521, "alt_max": 39.999999286971, "alt_last": 39.999999286971, "trk_at_end_of_path": true, "add_ms": 110.07380485534668, "resp_len": 925904, "notes": {}}
+[10:07:58.989] prepositioned: alt 30.000 ax0 100.000 (wanted alt 30.000 ax0 100.000) wrap -80.0 settled=True
+[10:07:59.050] s5_append_addonly: N=200 add 17 ms (resp 18570 chars, tail ".9225438540,100.0,39.89949748743719\n2461341.9225450172,100.0,39.949748743718594\n2461341.9225461804,100.0,40.0'\r\nQuery:\r\n"), apply 30 ms; first point in 8.9 s
+[10:08:54.112] saved s5_append_addonly.json (551 rows)
+[10:08:54.125] {"tag": "s5_append_addonly", "n": 200, "alt_at_t0": 30.0275376967736, "alt_at_end": 39.9996530007342, "alt_max": 40.0000000514626, "alt_last": 40.0000000514626, "trk_at_end_of_path": true, "add_ms": 16.820192337036133, "resp_len": 18570, "notes": {"add_at": 8.049633264541626}}
+[10:09:00.351] prepositioned: alt 30.000 ax0 100.000 (wanted alt 30.000 ax0 100.000) wrap -80.0 settled=True
+[10:09:00.416] s5_append_addapply: N=200 add 30 ms (resp 18570 chars, tail ".9232540638,100.0,39.89949748743719\n2461341.9232552270,100.0,39.949748743718594\n2461341.9232563903,100.0,40.0'\r\nQuery:\r\n"), apply 32 ms; first point in 8.9 s
+[10:09:55.476] saved s5_append_addapply.json (551 rows)
+[10:09:55.488] {"tag": "s5_append_addapply", "n": 200, "alt_at_t0": 30.0296440100065, "alt_at_end": 40.9570642624243, "alt_max": 49.9999990720185, "alt_last": 49.9999990720185, "trk_at_end_of_path": true, "add_ms": 29.60991859436035, "resp_len": 18570, "notes": {"add_apply_at": 8.0091872215271}}
+[10:10:07.830] pass SYN-S1_+5: peak 45.00, t_in in 63 s, t_out-t_in 302 s, compute_pass={"t_in": 1793182270.8510308, "t_out": 1793182572.6413584, "t_peak": 1793182421.2734303, "peak": 44.99745917382546, "t_rise": 1793182101.9551177, "t_set": 1793182743.4446802}
+[10:10:20.841] prepositioned: alt 15.061 ax0 -55.389 (wanted alt 15.061 ax0 -55.389) wrap -274.9 settled=True
+[10:11:15.872] s1_+5 follow_tle at t_in+5 (called -0.01 s relative), took 36 ms
+[10:11:52.666] stop: request 14.4 ms; first samples [(0.01440286636352539, True, False, -61.84721221118, 21.5201024298178, 0.0, 0.0, 0.0, 0.0), (0.02843475341796875, False, False, -61.84721221118, 21.5201024298178, 0.0, 0.0, 0.0, 0.0), (0.05652737617492676, False, False, -61.84721221118, 21.5201024298178, 0.0, 0.0, 0.0, 0.0)]
+[10:11:54.280] saved s1_+5.json (934 rows)
+[10:11:54.292] s1_+5 wrap before -274.9 after -300.0
+[10:12:23.723] final: {"mount.is_connected": "false", "mount.axis0_wrap_range_min_degs": "-180", "mount.axis0.is_enabled": "false", "mount.axis1.is_enabled": "true", "mount.is_tracking": "false", "mount.is_slewing": "false", "site.latitude_degs": "0.119972222222222", "site.longitude_degs": "115.920694444444"}

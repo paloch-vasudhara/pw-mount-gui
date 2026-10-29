@@ -61,6 +61,7 @@ from .control import (
     R_LINK_CANCELLED,
     R_NO_PWI4,
     R_NO_ROOM,
+    R_OBJECT_TRACK,
     R_OTHER_HAS_CONTROL,
     R_SHUTTING,
     R_STEP,
@@ -301,6 +302,8 @@ class JogController:
     def refusal(self, cmd: Command, status: Any) -> str | None:
         """Jog / step rules of the gateway verdict (after the axes / homed gates)."""
         name = cmd.name
+        if name in ("jog", "step", "wrap_turn") and self.svc.trackx.active:
+            return R_OBJECT_TRACK  # T4.2c: only STOP (or Go To / HOME ...) ends an object track
         other = name in ("goto_altaz", "goto_radec_j2000", "tracking", "wrap_turn", "track_object")
         if self._releasing and (other or name in ("jog", "step")):
             return R_WORKER_BUSY

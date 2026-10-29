@@ -107,6 +107,16 @@ describe('step blocking', () => {
   })
 })
 
+describe('object track gate', () => {
+  it('disables the pad while a track phase is active', async () => {
+    const { jogGateReason } = await import('../../app/utils/jog-modal')
+    expect(jogGateReason(null, { track: { phase: 'waiting' } })).toBe('Object tracking; press STOP first')
+    expect(jogGateReason(null, { track: { phase: null } })).toBeNull()
+    expect(jogGateReason(null, null)).toBeNull()
+    expect(jogGateReason('Busy', { track: { phase: 'tracking' } })).toBe('Busy')
+  })
+})
+
 describe('disabled reasons and status', () => {
   const base: ControlSnapshotLike = {
     state: 'STOPPED', mount: { connected: true }, axes: [{ enabled: true }, { enabled: true }], homed: { state: 'homed' },

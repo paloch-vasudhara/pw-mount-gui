@@ -6,12 +6,12 @@
 import { computed, ref } from 'vue'
 import GotoDialog from '@/components/mount/GotoDialog.vue'
 import JogDialog from '@/components/mount/JogDialog.vue'
+import TrackTargetDialog from '~/components/track/TrackTargetDialog.vue'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { useMountStore } from '~/stores/mount'
 import {
   buildControlView, homedDialogSince, needsHomeConfirm, refusalFromAck,
-  TIP_TRACK_TARGET,
   type ControlSnapshotLike, type Refusal,
 } from '~/utils/mount-control'
 import type { CommandName } from '~/utils/mount-socket'
@@ -26,6 +26,7 @@ const homeQuestion = ref('')
 const pending = ref(false)
 const gotoOpen = ref(false)
 const jogOpen = ref(false)
+const trackTargetOpen = ref(false)
 
 const linkUp = computed(() => store.connection === 'open' && !store.linkStale)
 const view = computed(() => buildControlView(store.snapshot as ControlSnapshotLike | null, {
@@ -164,7 +165,10 @@ const TONE_CLASS = { normal: 'mc-tone-normal', warn: 'mc-tone-warn', danger: 'mc
           >
             HOME MOUNT
           </button>
-          <button type="button" data-testid="mc-track-target" disabled :title="TIP_TRACK_TARGET">
+          <button
+            type="button" data-testid="mc-track-target" :disabled="!view.goto.enabled || pending"
+            :title="view.goto.reason ?? 'Search and track a satellite'" @click="trackTargetOpen = true"
+          >
             TRACK TARGET
           </button>
           <button
@@ -207,6 +211,7 @@ const TONE_CLASS = { normal: 'mc-tone-normal', warn: 'mc-tone-warn', danger: 'mc
 
     <GotoDialog v-model:open="gotoOpen" :gate-reason="view.goto.reason" />
     <JogDialog v-model:open="jogOpen" :gate-reason="view.jog.reason" />
+    <TrackTargetDialog v-model:open="trackTargetOpen" />
 
     <Dialog :open="homedSince !== null" @update:open="(v: boolean) => { if (!v) dismissHomed() }">
       <DialogContent :show-close-button="false" data-testid="mc-homed-dialog">

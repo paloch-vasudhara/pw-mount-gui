@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict
 from .audit import AuditLog
 from .commands import CommandError, validate_command
 from .config import Settings
-from .control import R_NO_PWI4, ControlService, MotionVerdict, Pwi4Writer
+from .control import ControlService, Pwi4Writer
 from .ephem import Ephem
 from .hub import Hub
 from .poller import Poller
@@ -31,6 +31,7 @@ from .settings import Location, SecretStore, SettingsStore, SettingsUpdate, comp
 from .snapshot import site_key
 from .tle import TleSource
 from .trackcheck import TrackChecker
+from .trackplan import mount_from_status
 from .transforms import TRANSFORM_FRAME, AltAzValues, TransformRequest
 
 VERSION = "0.1.0"
@@ -72,7 +73,8 @@ def create_app(
     control = ControlService(Pwi4Writer(settings.pwi4_url, transport), poller, hub, audit)
     safety = SafetyEngine.from_env(poller, store, ephem, audit)
     tle_source = TleSource(settings.analysis_url, tle_transport)
-    track = TrackChecker(tle_source, lambda: ephem.timescale)  # T4.1 TRACK OBJECT verdict
+    # T4.1 TRACK OBJECT verdict; T4.2c: its clock is the control service's (a test seam)
+    track = TrackChecker(tle_source, lambda: ephem.timescale, lambda: control.track_clock())
     control.check = safety.check  # T3.1b: command gate
     control.resolved_az = safety.pop_target_az
     monitor = SafetyMonitor(safety, poller, control)
@@ -104,6 +106,23 @@ def create_app(
     control.route_final_check = lambda cmd: safety.final_check(control.fresh_status(), cmd)
     safety.homed_state = lambda: control.homed.state
     poller.route_provider = control.route_info
+
+    def track_eval(norad: int, site, st, fresh: bool):
+        """The pass check + track plan (rules 1-7) with the safety engine's inputs: the check
+        endpoint and the real track_object command both go through ControlService.track_verdict."""
+        return track.evaluate(
+            norad,
+            site,
+            safety.lim_el(),
+            lambda: safety.sun_altaz(site),
+            mount_from_status(st) if st is not None else None,
+            lambda t: safety.sun_altaz_at(site, t),
+            fresh,
+        )
+
+    control.track_eval = track_eval
+    control.route_extend = monitor.extend_route  # T4.2c: long tracks grow the monitor's plan
+    poller.track_provider = control.trackx.info
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -243,24 +262,14 @@ def create_app(
             cmd = validate_command("check", req.cmd, req.args)
         except CommandError as exc:
             raise HTTPException(status_code=422, detail=exc.reason) from None
-        v = control.dry_check(cmd)
         extra: dict[str, Any] = {}
         if cmd.name == "track_object":
-            # Row 0 (the mount guards) wins; the TLE fetch and the pass rules only run when the
-            # mount could take the command.
-            extra = {"pass": None, "tle_age_days": None}
-            site = poller.pwi4_site()
-            if v.reason is None and site is None:
-                v = MotionVerdict(R_NO_PWI4, "no_pwi4")
-            if v.reason is None:
-                tc = track.evaluate(
-                    cmd.args["norad"],
-                    site,
-                    safety.lim_el(),
-                    lambda: safety.sun_altaz(site),
-                )
-                v = MotionVerdict(tc.reason, tc.code, tc.target)
-                extra = {"pass": tc.pass_info, "tle_age_days": tc.tle_age_days}
+            # The same verdict as the real command (ControlService.track_verdict): row 0 (the
+            # mount guards) wins; the TLE fetch and the pass rules only run when the mount could
+            # take the command.
+            v, extra, _ = control.track_verdict(cmd, None)
+        else:
+            v = control.dry_check(cmd)
         target = None if v.target is None else {"alt": v.target[0], "az": v.target[1]}
         body = {
             "ok": v.reason is None,

@@ -1,0 +1,1 @@
+T4.2e web notes: track-state.ts helper, TrackCard wiring, jog gate

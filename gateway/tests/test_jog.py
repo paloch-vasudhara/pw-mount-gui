@@ -143,11 +143,13 @@ def test_jog_from_stopped_tracking_on_rate_keepalive_silent_then_release(tmp_pat
 def test_keepalive_timeout_stops_a_stopped_origin_jog(tmp_path):
     with running() as (tc, fake, _):
         w = Win(tc)
-        assert w.send("jog", J0, "j1")["ok"]
+        # t0 BEFORE the send: the gateway starts the keepalive timer when it accepts the jog, before
+        # the ack reaches the test (measured after the ack it read 0.297 s under load, Phase 4 end)
         t0 = time.monotonic()
+        assert w.send("jog", J0, "j1")["ok"]
         wait_for(lambda: "/mount/tracking_off" in paths(fake), timeout=2.0)
         dt = time.monotonic() - t0
-        assert KEEPALIVE_TIMEOUT_S <= dt <= KEEPALIVE_TIMEOUT_S + 0.25, dt
+        assert KEEPALIVE_TIMEOUT_S <= dt <= KEEPALIVE_TIMEOUT_S + 0.35, dt
         wait_for(lambda: snap(tc)["jog"] is None)
         assert "mount.is_tracking=false" in fake.text
         w.close()
@@ -317,7 +319,10 @@ def test_shared_refusals_not_homed_axes_disabled_other_window():
 
 def test_slewing_refuses_jog_and_step_but_not_a_running_jog():
     c = JogController(
-        SimpleNamespace(poller=SimpleNamespace(latest=SimpleNamespace(state="SLEWING")))
+        SimpleNamespace(
+            poller=SimpleNamespace(latest=SimpleNamespace(state="SLEWING")),
+            trackx=SimpleNamespace(active=False),
+        )
     )
     st = SimpleNamespace(
         mount=SimpleNamespace(

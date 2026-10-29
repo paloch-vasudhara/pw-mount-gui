@@ -73,7 +73,8 @@ def pwi():
     after = (Path(cfg).stat().st_mtime, hashlib.sha256(Path(cfg).read_bytes()).hexdigest())
     RESULTS["cfg_before"], RESULTS["cfg_after"] = before, after
     print("\nPWI4SIM RESULTS:", json.dumps(RESULTS, indent=1, default=str))
-    assert before == after, "PWI4.cfg changed!"
+    # Content only: PWI4 re-saves its own cfg (same bytes, new mtime) on a disconnect (T4.2d).
+    assert before[1] == after[1], "PWI4.cfg changed!"
 
 
 class Sampler:

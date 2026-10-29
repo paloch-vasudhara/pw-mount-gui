@@ -28,6 +28,8 @@ export interface ControlSnapshotLike {
   /** Not-homed guard (T3.3, Q3); null when the mount is not connected. */
   homed?: HomedInfo | null
   /** T3.5: a Sun-avoiding route (state SLEWING, state_reason "Avoiding the Sun"). */
+  /** T4.2: object-track workflow (null when idle). */
+  track?: { phase?: string | null, norad?: number | null } | null
   route?: { active?: boolean, sides?: string[], t_end?: number } | null
 }
 
@@ -53,7 +55,6 @@ export const REFUSAL_TTL_MS = 12_000
 
 export const CODE_HOME_BLOCKED = 'home_blocked_confirm'
 
-export const TIP_TRACK_TARGET = 'Arrives in T4'
 export const TIP_OTHER_WINDOW = 'Another window has control'
 
 export interface ControlButton {

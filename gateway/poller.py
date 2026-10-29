@@ -83,6 +83,7 @@ class Poller:
         self.jog_limit_provider: Callable[[], Any] = lambda: None
         self.turn_provider: Callable[[], Any] = lambda: None
         self.route_provider: Callable[[], Any] = lambda: None  # T3.5c: the D-SUN route
+        self.track_provider: Callable[[], Any] = lambda: None  # T4.2c: the object track
 
     async def fetch_once(self, now_mono: float | None = None) -> PollResult:
         if self._client is None:
@@ -174,6 +175,7 @@ class Poller:
             jog_limit=self.jog_limit_provider() if live else None,
             turn=self.turn_provider() if live else None,
             route=self.route_provider() if live else None,
+            track=self.track_provider() if live else None,
         )
         if snap.homed is not None and snap.homed.reason == "stalled" and snap.state == "STOPPED":
             snap.state_reason = self.stall_message_provider()
