@@ -1,15 +1,17 @@
 <script setup lang="ts">
-// Tools group (A2b). Analysis tools are present but disabled until Phase 5.
+// Tools group (A2b). Satellite Path Analysis (T5.1c) is live; Initial Orbit Determination stays disabled.
 import { ref } from 'vue'
+import PassAnalysisDialog from '@/components/analysis/PassAnalysisDialog.vue'
 import StationSettingsDialog from '@/components/settings/StationSettingsDialog.vue'
 
 const settingsOpen = ref(false)
+const passesOpen = ref(false)
 </script>
 
 <template>
   <fieldset class="tools-group" data-testid="tools-group">
     <legend>Tools</legend>
-    <button type="button" class="tool-btn" disabled>
+    <button type="button" class="tool-btn" data-testid="open-pass-analysis" @click="passesOpen = true">
       SATELLITE PATH ANALYSIS
     </button>
     <button type="button" class="tool-btn" disabled>
@@ -19,6 +21,7 @@ const settingsOpen = ref(false)
       STATION SETTINGS
     </button>
     <StationSettingsDialog v-model:open="settingsOpen" />
+    <PassAnalysisDialog v-model:open="passesOpen" />
   </fieldset>
 </template>
 

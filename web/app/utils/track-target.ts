@@ -82,6 +82,19 @@ export function sortRows(rows: readonly SatRow[], s: SortState): SatRow[] {
     .map(x => x.r)
 }
 
+/** True when the row is an exact match of the search text (name case-insensitive, COSPAR or NORAD id). */
+export function isExactMatch(r: SatRow, query: string): boolean {
+  const q = query.trim().toUpperCase()
+  if (!q) return false
+  return (r.name ?? '').toUpperCase() === q || (r.cospar ?? '').toUpperCase() === q || String(r.norad) === q
+}
+
+/** Exact matches of the search text on top (stable; the column sort applies within each group). */
+export function exactFirst(rows: readonly SatRow[], query: string): SatRow[] {
+  if (!query.trim()) return [...rows]
+  return [...rows.filter(r => isExactMatch(r, query)), ...rows.filter(r => !isExactMatch(r, query))]
+}
+
 /** `YYYY-MM-DD hh:mm:ss` in the dashboard clock's zone; a dash when missing / unparsable. */
 export function formatEpoch(iso: string | null | undefined, mode: ClockMode, tz?: string | null): string {
   if (!iso) return '—'

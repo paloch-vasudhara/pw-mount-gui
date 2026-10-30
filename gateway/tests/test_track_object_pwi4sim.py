@@ -476,6 +476,59 @@ def test_rising_below_limit_waits(pwi, stub, site, tmp_path):
         run(rig.close())
 
 
+def test_below_horizon_lead_waits_and_tracks(pwi, stub, site, tmp_path):
+    """Q27b: the object is still below 0 deg, its Lim EL crossing ~4 min ahead (inside the 5 min
+    lead): slew to the crossing point, wait, track, end "Track ended at Lim EL"."""
+    p = make_pass(stub, site, 20.0, 255.0, "SYN-LEAD")
+    rig = Rig(pwi, tmp_path, stub)
+
+    async def go():
+        c = await rig.open()
+        alt_cmd, _ = obj_at(p, site, now_s())
+        t_cmd = time.monotonic()
+        ack = await c.cmd("track_object", {"norad": p.norad}, timeout=20)
+        assert ack["ok"], (ack.get("reason"), ack.get("code"))
+        t_wait = await c.until(lambda: c.phase == "waiting", 60, "waiting")
+        info = dict(c.track)
+        wait_state = (c.state, c.reason)
+        await c.until(lambda: c.ended is not None, max(info["t_end"] - now_s(), 0) + 25, "ended")
+        t_seen = c.first(lambda st, rs, tr: tr is not None and tr.get("ended") is not None)
+        await asyncio.sleep(1.0)
+        return c, info, alt_cmd, t_cmd, t_wait, t_seen, wait_state
+
+    c, info, alt_cmd, t_cmd, t_wait, t_seen, wait_state = rig.run(go())
+    try:
+        t_r, t_end = info["t_r"], info["t_end"]
+        t_r_mono = t_r - OFF
+        errs = follow_errors(rig.smp, p, site, t_r + 3.0, t_end - 0.5)
+        max_err = max(e for _, e in errs)
+        lowest = min_alt(rig.smp, t_cmd, time.monotonic())
+        phases = []
+        for _, _, _, tr in c.snaps:
+            ph = (tr or {}).get("phase")
+            if ph and (not phases or phases[-1] != ph):
+                phases.append(ph)
+        RESULTS["lead_below_horizon"] = {
+            "object_alt_at_command_deg": round(alt_cmd, 2),
+            "t_r_minus_t_cross_s": round(t_r - p.t_cross, 2),
+            "waiting_s": round(t_r_mono - t_wait, 1),
+            "follow_err_max_deg": round(max_err, 4),
+            "min_alt_deg": round(lowest, 3),
+            "phases": phases,
+            "ended": c.ended,
+        }
+        assert alt_cmd < 0.0, alt_cmd
+        assert wait_state[0] == "TRACKING" and wait_state[1].startswith("Waiting for")
+        assert phases[:3] == ["slewing", "waiting", "tracking"], phases
+        assert abs(t_r - p.t_cross) < 8.0
+        assert t_r_mono - t_wait > 5.0
+        assert len(errs) > 100 and max_err <= FOLLOW_TOL_DEG
+        assert lowest >= LIM_EL - 0.1
+        assert c.state == "STOPPED" and c.ended["reason"] == "Track ended at Lim EL"
+    finally:
+        run(rig.close())
+
+
 def test_peak_below_limit_is_refused(pwi, stub, site, tmp_path):
     """Row 3: a 30 deg pass with Lim EL raised to 40: refused `peak_below_limit`, nothing sent."""
     p = make_pass(stub, site, 30.0, 30.0, "SYN-LOW")

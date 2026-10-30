@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import time
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -152,6 +153,29 @@ def test_below_horizon_returns_live_fields_only():
     assert track_verdict(info, T0, LIM) == ("Below the horizon", "below_horizon", None)
 
 
+def test_below_horizon_inside_the_lead_returns_the_coming_pass():
+    ref = info_at(LEO, T0 + 78500)  # in the pass: the reference segment
+    for lead in (240.0, 299.0):
+        info = info_at(LEO, ref.t_in - lead)
+        assert info.alt < 0 and info.rising
+        assert info.t_in == pytest.approx(ref.t_in, abs=0.1)
+        assert info.t_out == pytest.approx(ref.t_out, abs=0.1)
+        assert info.t_rise == pytest.approx(ref.t_rise, abs=0.1)
+        assert info.t_set == pytest.approx(ref.t_set, abs=0.1)
+        assert info.t_peak == pytest.approx(ref.t_peak, abs=0.1)
+        assert info.peak_alt == pytest.approx(ref.peak_alt, abs=0.001)
+        assert info.sun_sep_in is not None
+    # beyond the lead: the live fields only, as before
+    info = info_at(LEO, ref.t_in - 360.0)
+    assert info.alt < 0 and info.t_in is None and info.peak_alt is None
+
+
+def test_lead_pass_that_never_reaches_lim_el_is_not_returned():
+    ref = info_at(LEO, T0 + 78500)
+    info = info_at(LEO, ref.t_in - 240.0, lim=ref.peak_alt + 1.0)
+    assert info.t_in is None and info.peak_alt is None
+
+
 def test_sun_separation_uses_sun_fn_and_none_when_unavailable():
     info = compute_pass(*GEO, SITE, LIM, T0, lambda: (info_alt(GEO), 0.0), TS)
     assert info.sun_sep is not None and info.sun_sep < 180
@@ -229,12 +253,32 @@ def pinfo(**kw) -> PassInfo:
 
 
 def test_row2_below_horizon():
-    assert track_verdict(pinfo(alt=-0.01), NOW, LIM) == (
+    assert track_verdict(pinfo(alt=-0.01, t_in=None), NOW, LIM) == (
         "Below the horizon",
         "below_horizon",
         None,
     )
     assert track_verdict(pinfo(alt=0.0), NOW, LIM)[0] != "Below the horizon"  # alt >= 0 passes
+
+
+def test_row2_lead_window():
+    # below 0 deg with the Lim EL crossing 4 min ahead: on to the next rows, pre_position
+    ok = pinfo(alt=-5.0, rising=True, t_in=NOW + 240, t_peak=NOW + 330, t_out=NOW + 420)
+    assert track_verdict(ok, NOW, LIM) == (None, None, "pre_position")
+    assert track_verdict(replace(ok, t_in=NOW + passes.LEAD_S), NOW, LIM)[0] is None
+    for t_in in (NOW + 360, NOW + passes.LEAD_S + 0.5, None):
+        r = track_verdict(replace(ok, t_in=t_in), NOW, LIM)
+        assert r == ("Below the horizon", "below_horizon", None)
+
+
+def test_row3_sun_at_the_meeting_point_for_a_below_horizon_object():
+    ok = pinfo(alt=-5.0, t_in=NOW + 240, t_peak=NOW + 330, t_out=NOW + 420, sun_sep=90.0)
+    # the Sun near where the object is NOW is irrelevant; at the meeting point it decides
+    assert track_verdict(replace(ok, sun_sep=2.0, sun_sep_in=90.0), NOW, LIM)[0] is None
+    r = track_verdict(replace(ok, sun_sep=90.0, sun_sep_in=14.99), NOW, LIM)
+    assert r == ("Within 15° of the Sun", "sun", None)
+    # an object above the horizon keeps using its position now
+    assert track_verdict(pinfo(sun_sep=3.0, sun_sep_in=90.0), NOW, LIM)[1] == "sun"
 
 
 def test_row3_sun_within_15_deg():
@@ -291,7 +335,7 @@ def test_ok_phase_track_vs_pre_position():
 
 def test_first_failing_row_wins():
     # below horizon beats the Sun; the Sun beats the short pass
-    assert track_verdict(pinfo(alt=-1.0, sun_sep=5.0), NOW, LIM)[1] == "below_horizon"
+    assert track_verdict(pinfo(alt=-1.0, t_in=None, sun_sep=5.0), NOW, LIM)[1] == "below_horizon"
     assert track_verdict(pinfo(sun_sep=5.0, peak_alt=5.0, t_out=NOW + 1), NOW, LIM)[1] == "sun"
     # peak below the limit beats setting and the short pass
     r = track_verdict(pinfo(alt=10.0, peak_alt=12.0, rising=False, t_out=NOW + 1), NOW, LIM)

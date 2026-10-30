@@ -1207,8 +1207,8 @@ Runs after the user commits T3.2 + T3.3, before T3.4.
 |---|---|---|---|
 | 0 | the existing motion guards (`_gateway_refusal`: PWI4, mount connected, start-up, link stop, not homed / stalled, site mismatch, slewing / routing, jog) | as today | as today |
 | 1 | TLE fetch failed | "Satellite not found or decayed" / "Satellite data unavailable" | `tle_missing` / `tle_unavailable` |
-| 2 | `alt < 0` | "Below the horizon" | `below_horizon` |
-| 3 | `sun_sep < 15` (the Sun shortcut applies as for gotos) | "Within 15° of the Sun" | `sun` |
+| 2 | `alt < 0` and no Lim EL crossing within `LEAD_S` = 5 min (T5.1b, Q27b: inside the lead the object is trackable, phase `pre_position`) | "Below the horizon" | `below_horizon` |
+| 3 | `sun_sep < 15` (the Sun shortcut applies as for gotos); below 0° inside the lead: the separation at the Lim EL crossing (`sun_sep_in`) | "Within 15° of the Sun" | `sun` |
 | 4 | the pass never reaches Lim EL (`peak_alt < lim_el`) | "Pass peaks below the station limit elevation" | `peak_below_limit` |
 | 5 | `alt < lim_el` and already past the peak | "Setting below the station limit elevation" | `setting` |
 | 6 | time left above Lim EL `< 30 s`: `t_out − max(now, t_in)`, ∞ when `t_out` is None | "Pass ends in under 30 s" | `pass_too_short` |
@@ -1490,6 +1490,121 @@ Notes:
 
 ---
 
+### T5.1 — Satellite Pass Analysis lite (A2b-i), optical visibility (O4), live [Track] button (spec, 2026-10-30)
+
+**Goal:** FILTERS › Tools › SATELLITE PATH ANALYSIS opens the Satellite Pass Analysis modal (`concept/Pass Analysis.png`): pick a satellite, OPTICAL / LINE OF SIGHT, a start–end window, LIST PASSES, a sortable result table, and a live [Track] button on rows that are in progress or about to start.
+
+**User decisions (10-30):**
+- **Q24 darkness:** keep O4. Optical "Visible Duration" = above Lim EL **and** sunlit **and** Sun below 0° at the station. (ssa-toolkit uses civil twilight, −6°. The comparison gate runs our engine at −6° for the optical part.)
+- **Q25 times:** UTC everywhere in the modal (Start / End fields, Rises / Sets columns), as in the render and ssa-toolkit.
+- **Q26 search:** SEARCH opens the Track Target search + table in **picker mode**. Picking a row fills the field "NAME (NORAD)". One search UI in the app.
+- **Q27 / Q27b [Track] timing:** a row gets [Track] when its pass is above Lim EL now **or reaches Lim EL within 5 min**. The 5-minute lead applies **everywhere** (card, Track Target modal, Pass Analysis), so an object still below 0° can be tracked when its Lim EL crossing is ≤ 5 min ahead. The mount slews to the crossing point and waits (the T4.2 workflow).
+
+**1. Analysis: pass engine + endpoint (`analysis/`)**
+- `analysis/passes.py` (pure, no I/O):
+  - geometric alt/az, no refraction (the chunks / state convention);
+  - skyfield + sgp4 with the existing DE421 load (`state.py`);
+  - a coarse 10 s scan, then crossings refined to ≤ 0.5 s and the peak by a parabola vertex. Copy the ideas from `gateway/passes.py`; the analysis service must not import `gateway`.
+- **Passes** = the segments with alt ≥ Lim EL that overlap [start, end].
+  - The scan is padded by 2 h on each side, so a pass in progress at Start shows its true rise and set.
+  - An object above Lim EL through the whole padded window (GEO) is one row with rise / set null ("—"), and its duration is clipped to the window.
+- **Fields per pass:**
+  - `t_rise`, `t_set` (Lim EL crossings, Unix s) and `rise_az`, `set_az`;
+  - `t_peak`, `max_el`;
+  - `duration_s` (the part of the segment inside the window);
+  - OPTICAL: `visible_s` and `visible` = [[t0, t1], …], the sub-intervals where the object is sunlit (`is_sunlit`, DE421) and the Sun's geometric alt < 0°, sampled every 10 s and refined to ≤ 1 s.
+- **OPTICAL drops passes with `visible_s` = 0** (ssa parity).
+- `POST /api/passes`:
+  - body: `{norad, site{lat, lon, alt_m}, lim_el, start_unix, end_unix, mode: "optical"|"los", sun_alt_max: 0}`;
+  - `sun_alt_max` is test-only; the web never sends it;
+  - returns `{name, norad, tle_epoch, tle_age_days, passes[]}`, sorted by rise.
+- **Rules:**
+  - end > start; window ≤ 7 days (422 "Window longer than 7 days");
+  - a 404 when the object is not found or decayed;
+  - stale TLEs are allowed, and `tle_age_days` is returned for the badge;
+  - the computation runs in a worker thread with a 20 s limit (503 "Pass computation timed out").
+- **Tests** with synthetic TLEs (reuse `gateway/tests/tlegen.py` ideas; copy, don't import):
+  - a LEO pass: crossings / peak vs a brute-force 0.1 s skyfield scan, ≤ 0.5 s / ≤ 0.01°;
+  - a two-hump MEO gives two rows;
+  - a GEO row with nulls;
+  - the window clip;
+  - optical: a pass in Earth shadow → dropped, a twilight pass → partial `visible_s`;
+  - validation errors.
+
+**2. Gateway: the 5-minute lead (Q27b) (`gateway/passes.py`, `trackplan.py`, `control.py`)**
+- `LEAD_S = 300`. In `compute_pass`, when alt < 0 now: search forward ≤ `LEAD_S` + the time to climb to Lim EL for the next rise.
+  - If the Lim EL crossing `t_in` is ≤ now + `LEAD_S`, return that pass (rise, in, peak, out, set, as for a pass in progress below Lim EL).
+  - Otherwise return as today ("Below the horizon").
+- `track_verdict`, row 2:
+  - "Below the horizon" applies only when `t_in` is missing or more than `LEAD_S` ahead;
+  - a below-horizon object with `t_in` ≤ `LEAD_S` ahead goes on to the remaining rows, with phase `pre_position`.
+  - The **Sun row for a below-horizon object** uses the separation at the meeting point (`target0`), not the object's position now.
+- The planner / executor already handle the meeting point + wait. Confirm that `plan_track` accepts `alt < 0` now (the meeting point is the Lim EL crossing) and the arrival re-check (`track_eval`) passes.
+- The card phase line stays "Waiting for the pass — mm:ss". The card's TRACK OBJECT becomes enabled up to 5 min before the crossing.
+- **Tests:**
+  - `test_passes.py` rows: below 0°, crossing 4 min ahead → allowed `pre_position`; 6 min ahead → "Below the horizon"; Sun at the meeting point → "Within 15° of the Sun";
+  - one new row in `test_track_object_pwi4sim.py`: a TleStub pass rising 3 min ahead → slew, wait, track, "Track ended at Lim EL".
+- Logic sheet A1d step 1 and the T4.1 rule table get the lead (supervisor doc update).
+
+**3. Web: the modal (`components/analysis/PassAnalysisDialog.vue`, `utils/pass-analysis.ts`)**
+- ToolsGroup: enable SATELLITE PATH ANALYSIS, which opens the modal. The dialog shell is like the Go To / Track Target modals; layout per the render.
+- **Satellite:** a read-only field ("no satellite selected" placeholder; "NAME (NORAD)" + `StaleBadge` once picked) + SEARCH.
+  - SEARCH opens `TrackTargetDialog` with `mode="pick"`:
+    - title "SELECT SATELLITE";
+    - the bottom button "SELECT TARGET", with no gateway check and no status line;
+    - a double-click picks;
+    - it emits `picked(row)` and closes.
+  - The track mode stays unchanged.
+  - Default prefill: the dashboard's selected or tracked object, if any.
+- **Mode:** a SegToggle OPTICAL | LINE OF SIGHT, default OPTICAL.
+- **Start / End:** H1 date-time fields in UTC.
+  - Default Start = now (UTC, to the minute), End = Start + 24 h.
+  - End ≤ Start or a window over 7 days → the field is marked invalid and LIST PASSES is disabled, with the reason as the button's title.
+- **LIST PASSES:** full width; grey when disabled, green when ready (render).
+  - Loading state on the button.
+  - Errors on a muted line in the table area: "Satellite data unavailable", the 422 text, "Pass computation timed out".
+- **Table** (render columns):
+  - Rises (UTC) `YYYY-MM-DD hh:mm:ss`, Rise Az `.1f°`, Max El `.1f°`, Sets (UTC) `hh:mm:ss` (with the date when it differs from the rise), Set Az, Duration / Visible Duration as `mmᴹ ssˢ`, or `hhᴴ mmᴹ` from 1 h;
+  - a GEO row shows "—" for rise / set;
+  - sortable by every column (▼ / ▲), default Rises ascending;
+  - an empty result reads "No passes above Lim EL in this window" (optical: "No visible passes …").
+- **[Track]:**
+  - a column right of the duration column (space always reserved, per the logic sheet);
+  - the button shows on the row whose pass is in progress or whose `t_rise` is ≤ 5 min ahead, re-evaluated at 1 Hz from the client clock;
+  - enabled by the gateway check (`utils/track-verdict.ts`, `/api/mount/check` `track_object` for that NORAD at 1 Hz while the button shows); `title` = the reason or note;
+  - a click sends `track_object` (WS ack), then `afterTrackStarted()` (the dashboard selection = that object, A1e). The modal **stays open** and the row's button turns into a disabled "TRACKING" while that object is tracked.
+- **Limits:** the result is a snapshot. Nothing is recomputed while the modal is open, except the [Track] eligibility and verdict. A pass that has ended loses its button.
+- **vitest:**
+  - window validation;
+  - the duration format;
+  - sorting;
+  - the [Track] eligibility (in progress / ≤ 5 min / ended / GEO);
+  - the picker-mode emit;
+  - request building.
+
+**Must not touch:** `pwi4/`, ssa-toolkit (read/copy only; I1), `docs/`, PWI4 settings. No commits. Throwaway ports only; never the user's 3200 / 8400 / 8410.
+
+**Briefs:**
+
+| Brief | Kind | Scope | Timebox |
+|---|---|---|---|
+| **T5.1a** | analysis | `analysis/passes.py` + `POST /api/passes` + tests | 60 min |
+| **T5.1b** ∥ a | gateway | the 5-min lead (passes / verdict / Sun at the meeting point) + unit rows + 1 sim row | 45 min |
+| **T5.1c** after a | web | Pass Analysis modal, Tools button, Track Target picker mode, [Track] column; vitest | 90 min |
+
+**Gate (Tier 2):**
+- Diff review; analysis + gateway unit tests; the new sim row (×1; the user's 8400 stopped).
+- **ssa-toolkit comparison** (I1 kept): ssa-toolkit's pass engine run read-only in its own environment (`PYTHONDONTWRITEBYTECODE=1`, no files written inside ssa-toolkit; `git status` unchanged afterwards).
+  - Inputs: 3 real TLEs (a LEO, TERRA 25994, a MEO), the user's site, Lim EL 10, 24 h.
+  - LOS: same pass count; rise / set ≤ 2 s; max el ≤ 0.05°; az ≤ 0.1°.
+  - OPTICAL: our engine with `sun_alt_max = −6` vs ssa's observable intervals, ≤ 20 s (cylindrical vs skyfield shadow, ssa's 10 s sampling).
+  - If ssa-toolkit's engine cannot run here: report it; the comparison falls back to the user's side-by-side check.
+- **Real browser**, throwaway servers + the PWI4 sim + the TLE stub, at 1920 and 1280×600 @1.5:
+  - picker → field filled; LIST PASSES in both modes; sorting;
+  - [Track] on a stub pass ≤ 5 min ahead → the mount waits, then tracks; the tracked card comes up and the row shows TRACKING.
+
+---
+
 ## 7. Progress tracker
 
 Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying · ✅ done · ⏸ paused/partial
@@ -1520,15 +1635,15 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | T4.1 | ✅ | ✅ 10-28 | ✅ 10-28 | ✅ 10-28 | ✅ 10-28 (user visual check green) | a: TLE client + pass maths + rules + check endpoint (real TLEs: crossings 0.00 s, peak ≤ 0.005° vs skyfield); b: live TRACK OBJECT verdict + reason line on the card (browser pass 1920 + 1280×600 @1.5) |
 | T4.2 | ✅ | ✅ 10-28 | ✅ 10-29 | ✅ 10-29 | ✅ 10-29 (+ T4.2f fixes, re-checked) | a probe (P22), b planner, c executor, d sim tests 10/10, e web; Q17 own path, Q18 zenith note, Q19 sky-distance corridor; browser pass click → "Track ended at Lim EL" at 1920 + 1280×600 @1.5 |
 | T4.3 | ✅ | ✅ 10-29 | ✅ 10-29 | ✅ 10-29 | ✅ 10-29 (+ T4.3d / T4.3e adjustments, user-checked) | a search filters + countries; b A1e panel + strip + stale badge; c Track Target modal; browser pass 1920 + 1280×600 @1.5 (THAICOM 8 tracked from the modal) |
-| T5.1 | ⬜ | | | | | O4 |
+| T5.1 | ✅ | ✅ 10-30 | ✅ 10-30 | ✅ 10-30 | ✅ 10-30 (+ T5.1d / T5.1e adjustments, user-checked) | O4; Q24–Q27 (5-min lead everywhere); a analysis engine (ssa comparison passed), b gateway lead (sim row passed), c web modal (browser pass 1920 + 1280×600 @1.5, real LEO [Track] → tracking) |
 | T5.2 | ⬜ | | | | | |
 | T5.3 | ⬜ | | | | | O6 |
 | T6.1 | ⬜ | | | | | |
 | T6.2 | ⬜ | | | | | |
 | T6.3 | ⬜ | | | | | |
 
-**Resume point (2026-10-29, Phase 4 COMPLETE, user-checked):** Phases 0–3 committed; T4.1 `1d76170`. **T4.2 (+ T4.2f) and T4.3 (+ T4.3d / T4.3e) are verified and user-checked; the user commits them as the Phase 4 close.** Next:
-1. **Phase 5 (Analysis modals), T5.1 Pass Analysis lite (A2b-i) spec first**: optical visibility per O4, the live [Track] button (reuse `/api/mount/check` `track_object`, `afterTrackStarted`, `StaleBadge`), the pass list vs ssa-toolkit. Read the logic sheet A2b-i and `concept/Pass Analysis.png`.
+**Resume point (2026-10-30, T5.1 COMPLETE, user-checked):** Phases 0–4 committed (Phase 4 `0556991`). **T5.1 (a–e) is verified and user-checked; the user commits it.** Next:
+1. **T5.2 Astrometry lite (A2b-iv), spec first:** read the logic sheet A2b-iv, `concept/Astrometry.png`, `concept/Job Modal.png`, the ssa-toolkit `photometry/` pipeline (read/copy only); ask the user the design questions before briefing workers.
 2. **The real-mount session** (user) whenever available: the checklist below plus D-SUN custom-path following (10°/s arcs, 15°/s straights) and HOME routing vs the real homing path.
 - **Real-mount session checklist** (the user's first session on the real L-350; homing + jog will be tested together):
   - PWI4's real jog behaviour (does a release keep tracking? speeds? P20; option A provisional);
@@ -1569,6 +1684,8 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | 2026-10-20 | T1.1 | WebSocket can't pass Nitro devProxy (HTTP only) → in dev the page connects straight to the gateway (`runtimeConfig.public.gatewayWs`); token fetch stays proxied; prod = same-origin (gateway serves the app) |
 | 2026-10-20 | A4-i | **Red warnings** (user): Status red on FAULT; Sun Distance red when ≤ 15° (green > 15°). Implemented in T1.4 |
 | 2026-10-27 | T3.4e | Azimuth jog across PWI4's wrap edge swung 360° silently. Option B: the gateway slides PWI4's wrap window along with an azimuth jog (no turn while the axis has mechanical room, sim ±300°); near the real mechanical limit the jog stops with a margin and prompts "turn 360° / stay"; Turn = a goto-like validated reposition (pad dimmed, STOP available; D-SUN routing in T3.5 like gotos); Stay = stop at the limit, prompt again on the next jog that way | user |
+| 2026-10-30 | T5.1 user confirmations | Sort arrows ▲ asc / ▼ desc (not the render); a satellite change clears the result, mode / window keep it; reopening recalls the last modal state until a page refresh; rises / sets outside the listed window show "—" (duration clipped to the window); exact search matches first (Track Target + picker) | user |
+| 2026-10-30 | T5.1 Q24–Q27 | Pass Analysis: optical darkness stays O4 (Sun < 0°; the ssa comparison runs ours at −6°); all modal times UTC; SEARCH reuses the Track Target table in picker mode; [Track] on passes in progress or reaching Lim EL within 5 min, and the 5-min lead applies to every TRACK OBJECT (card, modal, Pass Analysis): an object below 0° is trackable when its Lim EL crossing is ≤ 5 min ahead (meeting point + wait) | user |
 | 2026-10-29 | T4.3 Q21–Q23 | A1e stacking: B's full card + a one-line pinned strip for the tracked A (strip click re-focuses A); Track Target search lists all live objects (stale with the badge); a modal row selection stays in the modal (the dashboard selection changes when tracking starts) | user |
 | 2026-10-29 | T4.2 Q20 | A slow object (GEO / MEO) that drifts into the Sun disc later (a blocked stretch > 10 min) is tracked until the 16° entry and ends STOPPED "Track ended: Sun approaching" (card note "Sun blocks the track in N min"); refused only with < 30 s left. LEO passes keep the D-SUN detour / no-detour refusal | user |
 | 2026-10-29 | T4.2 Q19 | Object-track corridor measured on the sky (axis-0 offsets × cos alt), 2° kept; gotos / D-SUN slews keep the axis-space corridor. An 89° pass then tracks through the zenith (lag ≈ 2.1°, back in ≈ 6.4 s) instead of a corridor stop | user |
@@ -2506,6 +2623,98 @@ The user stopped 8400 / 3200 / 8410 (PWI4 kept running) and gave a 150 min budge
 | Full browser pass | the Phase 4 screens were covered by the T4.2 pass (click → "Track ended at Lim EL", Jog disabled) and the T4.3 pass (modal + A1e with a real THAICOM 8 track, after T4.2f) at 1920 and 1280×600 @1.5; Phase 3 screens unchanged since its Tier 3 |
 
 **Open item (user, fix if required):** a GEO about to be covered by the Sun disc shows "no safe detour" instead of "Sun blocks the track in …" (T4.2f log).
+
+### T5.1a / T5.1b log (2026-10-30)
+
+- **T5.1a (worker, verified):**
+  - `analysis/passes.py` + `POST /api/passes` + `analysis/tests/test_passes.py` (11 tests);
+  - vs a 0.1 s brute force: crossings ≤ 0.035 s, peak ≤ 0.00002°;
+  - 3 days ≈ 1 s.
+- **Supervisor ssa-toolkit comparison:**
+  - Run in the `orekit310` conda env, in-process, `PYTHONDONTWRITEBYTECODE`; ssa-toolkit `git status` unchanged; HEAD `84f2ded`.
+  - Inputs: ISS 25544, TERRA 25994, NAVSTAR 86 68791; site 13.12 / 100.92 / 0 m; Lim EL 10; 2026-10-30 00:00Z + 3 d.
+  - **LOS:** pass counts equal (8 / 8 / 7); rise / set ≤ 0.13 s; max el ≤ 0.006°; az ≤ 0.009°.
+  - **OPTICAL at −6°:** the same observable passes (0 / 0 / 4); visible edges ≤ 2.2 s.
+  - **Edge differences (by design):** a pass in progress at Start shows its true rise (ssa clips to Start); a MEO pass setting > 2 h after End has `t_set` null ("—"), where ssa clips to End.
+  - Script: the session scratchpad `t51_cmp/`.
+- **T5.1b (worker, verified):**
+  - `LEAD_S` = 300; `_lead_pass` in `compute_pass`; row 2 / row 3 (`sun_sep_in` = the separation at `t_in`, with the Sun at check time: ≤ ~1.25° drift over 5 min; the planner checks the real Sun path).
+  - `trackcheck` no longer caches pass-less below-horizon entries (the lead window would hide for up to 60 s).
+  - Units for passes / check / plan / exec.
+  - Supervisor re-run of the new sim row `test_below_horizon_lead_waits_and_tracks`:
+    - passed in 455 s;
+    - object at −2.13° at the command; t_r − t_cross 5.3 s; waiting 243 s;
+    - following error ≤ 0.0095°; min alt 15.06 (Lim EL 15);
+    - "Track ended at Lim EL"; the `PWI4.cfg` hash unchanged.
+- **Gates:** non-sim 642 passed; ruff clean.
+- **Docs:** the logic sheet A1d (txt + html) and the T4.1 rule table rows 2 / 3 carry the lead.
+
+### T5.1c log (2026-10-30)
+
+- **Worker deliverables:**
+  - `components/analysis/PassAnalysisDialog.vue`, `utils/pass-analysis.ts`;
+  - the `TrackTargetDialog` `mode="pick"` prop + `picked` emit;
+  - ToolsGroup SATELLITE PATH ANALYSIS enabled;
+  - a `~` alias in `vitest.config.ts`;
+  - 3 new spec files.
+- **Gates (supervisor re-run):** typecheck 0; lint 0 errors (11 old warnings in `components/ui`); vitest 480 (was 454).
+- **Choices the spec left open:**
+  - site + Lim EL from the gateway snapshot (= the Settings location, the same as the Sky Viewer);
+  - a satellite change clears the result; a mode / window change keeps it, and the header follows the listed mode;
+  - reopening resets the modal;
+  - the prefill name comes from `/api/sats/search`;
+  - 404 → "Satellite not found";
+  - one gateway check per listed NORAD, 1 Hz while a [Track] button shows.
+- **Real browser** (throwaway analysis 18710 + gateway 18733, Sun pinned, Nuxt 13270, PWI4 sim):
+  - **1280×600 @1.5:**
+    - dialog 12–588 px of 600; the table area scrolls (336 / 336); no page overflow;
+    - picker: title SELECT SATELLITE, SELECT TARGET disabled until a row is picked, no TRACK / status; it closes and fills "TERRA NOVA (100909)";
+    - LOS listing: 2 rows; the optical listing: "No visible passes above Lim EL in this window";
+    - a mode toggle keeps the listed result;
+    - sort Max El ▲ / ▼ reorders;
+    - the ᴹ ˢ glyphs render in Barlow.
+  - **1920:**
+    - a real LEO (HULIANWANG DIGUI-214, 100973) rising in 222 s: prefilled from the dashboard selection;
+    - [Track] enabled ("Track this object") → click → snapshot slewing → waiting → tracking;
+    - the row reads TRACKING (disabled); the dashboard selection = 100973.
+  - Ports free afterwards; the sim was restored.
+- **For the user to confirm:** the render shows "Rises (UTC) ▼" on the default ascending sort; the app uses ▲ = ascending (the Track Target convention).
+
+### T5.1d (2026-10-30, the user's confirmations before the live check; supervisor changes)
+
+- **A:** keep ▲ = ascending / ▼ = descending (not the render's ▼). **B:** the result rules as built.
+- **C, recall:** reopening the modal recalls the last state (satellite, mode, window, result, sort); a page refresh forgets it.
+  - `utils/pass-analysis-memo.ts` (module scope, not storage);
+  - saved on an open → closed transition only (an immediate watch at mount would otherwise store an empty state);
+  - the dashboard prefill applies only when nothing is recalled.
+- **D, window edges:** a rise before Start or a set after End shows "—" (time and azimuth: `clipToWindow`). Sorting uses the shown values; [Track] keeps the real times. Durations were already clipped by the analysis.
+- **E, exact match first:**
+  - analysis `search` orders exact name / COSPAR / NORAD matches first, so the 500 limit never cuts them (new test with its own bulk DB);
+  - the Track Target table keeps exact matches of the query on top (`exactFirst`).
+- **Gates:** vitest 484; typecheck 0; lint 0 errors; analysis 52; ruff clean.
+- **Browser** (1280×600 @1.5):
+  - "TERRA" picks TERRA (25994);
+  - close → dashboard selection ISS → reopen: TERRA, LOS, 3 rows, "Duration" recalled;
+  - ports free.
+
+### T5.1e (2026-10-30, the user's live check: sizing; supervisor changes)
+
+- **Live check result:** functionally clean (items 2–9). Sizing nudges agreed from a measured proposal.
+- **Applied:**
+  - modal 960 → **820**;
+  - form grid `64 | 272 (field 200 + SEARCH 72; Mode 272) | free | 40 | date suite flush right`, 10 px gaps; the Start / End labels left-aligned, so both suites start at the same x;
+  - table columns = widest content / header + a 20 px gap: Rises 150 (+14 inset), Rise Az 80, Max El 75, Sets 150, Set Az 80, Duration ≥ 125, [Track] 84 (+14); table 774;
+  - Sets always `YYYY-MM-DD hh:mm:ss` (`fmtSet` removed);
+  - a click (or Enter) on the Satellite value field opens the picker.
+- **Measured** (analysis + Nuxt only, the snapshot injected; the user's 8400 was running, so no gateway / PWI4):
+  - 1920 and 1280×600 @1.5: dialog 820, form 774; Start / End labels both at the same x; suites flush with the table edge; columns 164 / 80 / 75 / 150 / 80 / 127 / 98;
+  - no page overflow; the field click opens SELECT SATELLITE.
+- **Gates:** vitest 484; typecheck 0; lint 0 errors.
+- **Follow-up (user):**
+  - Duration column −40 (≥ 85) → modal **780**, table 734;
+  - the "Visible Duration" header overflows into the empty [Track] header (z-index 3), fully readable;
+  - measured at 1920 + 1280×600 @1.5 (both modes).
+- **T5.1 user-checked; the user commits it.**
 
 ## 9. Known limitations & risks
 

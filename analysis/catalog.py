@@ -31,6 +31,7 @@ from sqlalchemy import (
     String,
     Table,
     and_,
+    case,
     func,
     or_,
     select,
@@ -170,12 +171,17 @@ class SqlCatalogSource:
         orbit_group: str | None = None,
     ) -> list[dict]:
         conds = [_LIVE]
+        # exact matches (name, COSPAR, NORAD id) first: the limit never cuts them
+        exact_first = []
         if q and q.strip():
             q = q.strip()
             terms = [_t.name.ilike(f"%{q}%"), _t.cospar_id.ilike(f"%{q}%")]
+            exact = [func.upper(_t.name) == q.upper(), func.upper(_t.cospar_id) == q.upper()]
             if q.isdigit():
                 terms.append(_t.norad_id == int(q))
+                exact.append(_t.norad_id == int(q))
             conds.append(or_(*terms))
+            exact_first.append(case((or_(*exact), 0), else_=1))
         if orbit_class:
             conds.append(_t.orbit_class == orbit_class.upper())
         if object_type:
@@ -187,7 +193,7 @@ class SqlCatalogSource:
         stmt = (
             select(*OBJECT_COLS)
             .where(*conds)
-            .order_by(_t.norad_id.desc())
+            .order_by(*exact_first, _t.norad_id.desc())
             .limit(max(1, min(limit, MAX_SEARCH)))
         )
         with self.engine.connect() as c:

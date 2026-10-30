@@ -664,3 +664,15 @@ def test_peak70_synthetic_pass_plans():
     assert isinstance(info, PassInfo) and info.peak_alt == pytest.approx(70.0, abs=0.5)
     p = ok(PEAK_70, T0 + 100)
     assert p.notes == [] and p.final
+
+
+def test_plan_from_below_the_horizon_meets_at_the_lim_el_crossing():
+    """Q27b: 4 min before the crossing, below 0 deg: the rendezvous is the Lim EL crossing."""
+    ref = info_at(LEO, MAIN_NOW)
+    now = ref.t_in - 240.0
+    info = info_at(LEO, now)
+    assert info.alt < 0 and info.t_in == pytest.approx(ref.t_in, abs=0.1)
+    plan = ok(LEO, now, info=info)
+    assert ref.t_in <= plan.t_r <= ref.t_in + 5.0
+    assert refract_alt(LIM) - 0.01 <= plan.rendezvous.alt <= refract_alt(LIM) + 1.0
+    assert plan.t_end == pytest.approx(ref.t_out, abs=2.0) and plan.final

@@ -4,6 +4,9 @@
 // The row selection lives here only (Q23); the dashboard selection changes when tracking starts.
 // The gateway check (POST /api/mount/check track_object) of the selected row runs at 1 Hz and
 // decides the button + status line; the answer only counts while it matches the selected row.
+// mode="pick" (T5.1c, Pass Analysis SEARCH): the same search + table as a satellite picker. Title
+// SELECT SATELLITE, button SELECT TARGET, no gateway check and no status line; picking (button,
+// double-click, Enter) emits `picked(row)` and closes. Track mode is unchanged.
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { SelectContent, SelectItem, SelectItemText, SelectPortal, SelectRoot, SelectTrigger, SelectViewport } from 'reka-ui'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
@@ -16,12 +19,15 @@ import type { ClockMode } from '~/utils/sky-clock'
 import type { SkySnapshotLike } from '~/utils/sky-chart'
 import {
   ANY, buildSearchQuery, DATA_UNAVAILABLE, DEFAULT_SORT, EMPTY_FILTERS, filterOwners, FOOTER_CAPPED, formatEpoch, isCapped,
-  moveSelection, nextSort, sortRows, targetStatus, type SatRow, type SortKey, type SortState,
+  exactFirst, moveSelection, nextSort, sortRows, targetStatus, type SatRow, type SortKey, type SortState,
 } from '~/utils/track-target'
 import { ownerName } from '~/utils/owner-names'
 import { parseTrackVerdict, UNREACHABLE_VERDICT, type TrackVerdict } from '~/utils/track-verdict'
 
+const props = withDefaults(defineProps<{ mode?: 'track' | 'pick' }>(), { mode: 'track' })
+const emit = defineEmits<{ picked: [row: SatRow] }>()
 const open = defineModel<boolean>('open', { default: false })
+const isPick = computed(() => props.mode === 'pick')
 
 const mount = useMountStore()
 const sel = useSelectionStore()
@@ -47,7 +53,9 @@ const verdict = ref<TrackVerdict | null>(null)
 const tableEl = ref<HTMLElement | null>(null)
 
 const tz = computed<string | null>(() => (mount.snapshot as SkySnapshotLike | null)?.site?.timezone ?? null)
-const sorted = computed(() => sortRows(rows.value, sort.value))
+// exact matches of the search that produced the rows stay on top (user 10-30)
+const rowsQuery = ref('')
+const sorted = computed(() => exactFirst(sortRows(rows.value, sort.value), rowsQuery.value))
 const capped = computed(() => isCapped(rows.value.length))
 const status = computed(() => targetStatus({
   selected: selected.value, verdict: verdict.value, sending: sending.value, ackRefusal: ackRefusal.value,
@@ -68,6 +76,7 @@ async function runSearch(): Promise<void> {
     const body = await res.json() as SatRow[]
     if (my !== searchSeq) return
     rows.value = Array.isArray(body) ? body : []
+    rowsQuery.value = q.value
     if (selected.value !== null && !rows.value.some(r => r.norad === selected.value)) selectRow(null)
   }
   catch {
@@ -142,7 +151,7 @@ function selectRow(n: number | null): void {
   stopVerdict()
   selected.value = n
   ackRefusal.value = null
-  if (n === null) return
+  if (n === null || isPick.value) return
   const g = checkGen
   void runVerdict(n, g)
   checkTimer = setInterval(() => void runVerdict(n, g), 1000)
@@ -169,6 +178,13 @@ async function onTrack(): Promise<void> {
   }
 }
 
+function onPick(): void {
+  const r = rows.value.find(x => x.norad === selected.value)
+  if (!r) return
+  emit('picked', r)
+  open.value = false
+}
+
 // ----- keyboard (Esc is the dialog's own)
 function scrollToSelected(): void {
   void nextTick(() => {
@@ -188,12 +204,14 @@ function onKeydown(e: KeyboardEvent): void {
   if (t?.closest('[data-testid="tt-search"]')) { e.preventDefault(); void runSearch(); return }
   if (t?.closest('button, [role="combobox"]')) return // Enter on a focused button / select keeps its own meaning
   e.preventDefault()
-  void onTrack()
+  if (isPick.value) onPick()
+  else void onTrack()
 }
 
 function onDoubleClick(n: number): void {
   selectRow(n)
-  void nextTick(() => void onTrack())
+  if (isPick.value) onPick()
+  else void nextTick(() => void onTrack())
 }
 
 watch(open, (o) => {
@@ -288,10 +306,10 @@ const orbitLabel = computed(() => ORBITS.find(o => o.value === orbit.value)?.lab
     <DialogContent class="tt-dialog gap-0 p-0" data-testid="tt-dialog" @keydown="onKeydown">
       <div class="tt-head">
         <DialogTitle class="tt-title">
-          TRACK TARGET
+          {{ isPick ? 'SELECT SATELLITE' : 'TRACK TARGET' }}
         </DialogTitle>
         <DialogDescription class="sr-only">
-          Search the satellite catalogue and track the selected target
+          {{ isPick ? 'Search the satellite catalogue and select a satellite' : 'Search the satellite catalogue and track the selected target' }}
         </DialogDescription>
       </div>
 
@@ -414,10 +432,13 @@ const orbitLabel = computed(() => ORBITS.find(o => o.value === orbit.value)?.lab
           </p>
         </div>
 
-        <button type="button" class="tt-go" data-testid="tt-track" :disabled="!status.canTrack" @click="onTrack">
+        <button v-if="isPick" type="button" class="tt-go" data-testid="tt-pick" :disabled="selected === null" @click="onPick">
+          SELECT TARGET
+        </button>
+        <button v-else type="button" class="tt-go" data-testid="tt-track" :disabled="!status.canTrack" @click="onTrack">
           TRACK SELECTED TARGET
         </button>
-        <p class="tt-status" :class="status.tone === 'danger' ? 'tt-status-err' : ''" data-testid="tt-status" role="status">
+        <p v-if="!isPick" class="tt-status" :class="status.tone === 'danger' ? 'tt-status-err' : ''" data-testid="tt-status" role="status">
           {{ status.text }}
         </p>
       </div>

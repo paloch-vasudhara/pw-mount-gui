@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  exactFirst, isExactMatch,
   buildSearchQuery, DEFAULT_SORT, formatEpoch, isCapped, moveSelection, nextSort, sortRows, targetStatus,
   type SatRow,
 } from '../../app/utils/track-target'
@@ -86,5 +87,18 @@ describe('moveSelection', () => {
   it('unknown current / empty', () => {
     expect(moveSelection(n, 1, 1)).toBe(9)
     expect(moveSelection([], null, 1)).toBeNull()
+  })
+})
+
+describe('exactFirst', () => {
+  const row = (norad: number, name: string, cospar: string | null = null): SatRow =>
+    ({ norad, name, cospar, country: null, object_type: null, orbit_class: null, tle_epoch: null, tle_age_days: null })
+  const rows = [row(100909, 'TERRA NOVA'), row(25994, 'TERRA'), row(5, 'X', '1999-068A')]
+  it('puts exact name / NORAD / COSPAR matches on top, keeping the order otherwise', () => {
+    expect(exactFirst(rows, ' terra ').map(r => r.norad)).toEqual([25994, 100909, 5])
+    expect(exactFirst(rows, '5').map(r => r.norad)).toEqual([5, 100909, 25994])
+    expect(exactFirst(rows, '1999-068a').map(r => r.norad)).toEqual([5, 100909, 25994])
+    expect(exactFirst(rows, '').map(r => r.norad)).toEqual([100909, 25994, 5])
+    expect(isExactMatch(rows[0]!, 'TERRA')).toBe(false)
   })
 })

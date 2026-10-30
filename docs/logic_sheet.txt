@@ -84,7 +84,8 @@ A1 - TRACK INFO | Displays the selected object info from the Sky Viewer (A3) win
     A1c. When nothing is selected or an object is deselected, the field shows "No object selected"
 
     A1d. Object tracking workflow (run by the gateway)
-         1. Check the pass: object above 0° and its pass reaches above Lim EL; Sun check (G2).
+         1. Check the pass: object above 0° (or below 0° with its Lim EL crossing at most 5 min
+            ahead) and its pass reaches above Lim EL; Sun check (G2).
          2. If the object is still below Lim EL: compute where the pass crosses Lim EL, slew there
             and wait (status = TRACKING, card shows a countdown to the crossing).
          3. At the crossing time hand the object to PWI4 (follow_tle / custom path).

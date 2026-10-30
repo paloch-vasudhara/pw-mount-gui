@@ -1,27 +1,26 @@
-# Session handoff — updated 2026-10-29 (Phase 4 COMPLETE and user-checked; the user commits; next Phase 5 / T5.1)
+# Session handoff — updated 2026-10-30 (T5.1 COMPLETE and user-checked; the user commits; next T5.2 Astrometry spec)
 
 Read this first, then `docs/BUILD_PLAN.md` (§7 tracker + **resume point**, §6 task specs, §8 logs/findings), then `docs/logic_sheet.txt` as needed.
 
 ## START HERE (after compaction / next session)
 
-1. **Check `git log`.** The user commits Phase 4 (T4.2 + T4.2f + T4.3 + T4.3d / T4.3e + the Tier 3 fixes) right after this handoff. If it is still uncommitted, ask before doing anything else.
-2. **Phase 4 is complete:**
-   - Tier 3 10-29: sim ×2 → 66/66, harness 10/10, non-sim 624, web 454;
-   - flaky list empty;
-   - user-checked (BUILD_PLAN §8 "T4.2 … T4.3e" logs, "Phase 4 end, Tier 3").
-3. **Next: Phase 5, T5.1 Pass Analysis lite (A2b-i), spec first.**
-   - Read: logic sheet A2b-i + O4 (optical = above Lim EL, illuminated, Sun below 0°), `concept/Pass Analysis.png`, ssa-toolkit Pass Analysis (read/copy only).
-   - Reuse:
-     - analysis `/api/sats/search` (+ `orbit_group` / `country`);
-     - `gateway/passes.py` maths ideas (now-relative segments);
-     - the web `StaleBadge`, `utils/track-verdict.ts`, `afterTrackStarted()` and the `track_object` check / command for the live [Track] button.
+1. **Check `git log`.** The user commits T5.1 (Pass Analysis: a analysis engine, b gateway 5-min lead, c web modal, d/e user adjustments) right after this handoff. If it is still uncommitted, ask before doing anything else.
+2. **T5.1 is complete:**
+   - the ssa-toolkit comparison passed;
+   - the lead sim row passed;
+   - browser passes;
+   - the user's live check clean (BUILD_PLAN §8 "T5.1a / T5.1b", "T5.1c", "T5.1d", "T5.1e").
+3. **Next: T5.2 Astrometry lite (A2b-iv), spec first.**
+   - Read the logic sheet A2b-iv, `concept/Astrometry.png` + `concept/Job Modal.png`, and the ssa-toolkit `photometry/` pipeline (read/copy only; O1 says the astrometry pipeline is ported from it).
    - Ask the user the open design questions (AskUserQuestion) before briefing workers.
-4. **Open item** (fix only if the user asks): the GEO "no safe detour" text while the Sun disc approaches (T4.2f log).
-5. **Environment:**
+4. **ssa-toolkit:**
+   - its `.gitignore` has an uncommitted `+database/` line (not ours; reported 10-30; don't touch);
+   - reference runs: conda env `orekit310`, in-process, `PYTHONDONTWRITEBYTECODE=1`, `git status` checked before / after.
+5. **Open item** (fix only if the user asks): the GEO "no safe detour" text while the Sun disc approaches (T4.2f log).
+6. **Environment:**
    - The `PWI4.cfg` baseline is `b714321830fb…` (user site 13.12 / 100.92; app Lim EL 10; timezone Asia/Bangkok).
-   - Sim runs need the user's 8400 stopped (ask).
+   - Sim runs need the user's 8400 stopped (ask). Layout measurements can run with only a throwaway analysis + Nuxt, with the snapshot injected (no gateway / PWI4).
    - Keep `.py` files out of the repo `scratchpad/` (`ruff check .`).
-   - Untracked work notes / raw data are in the repo `scratchpad/t4*` (the user's choice to keep or delete).
 
 ## Where we are
 

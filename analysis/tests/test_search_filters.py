@@ -89,3 +89,15 @@ def test_countries_cached_until_refresh(client):
     assert client.post("/api/sats/refresh").json()["ok"]
     assert svc._countries is None
     assert client.get("/api/sats/countries").json() == first
+
+
+
+def test_exact_match_first_survives_the_limit(tmp_path):
+    # BULK 1 / 10 / 11: NORAD-desc order would put BULK 1 last and a limit of 2 would drop it
+    path = str(tmp_path / "bulk.db")
+    build_sqlite(path, extra_leo=12)
+    with TestClient(create_app(factory_for(path))) as c:
+        _wait_ready(c)
+        r = c.get("/api/sats/search", params={"q": "bulk 1", "limit": 2}).json()
+        assert [x["name"] for x in r] == ["BULK 1", "BULK 11"]
+        assert ids(c, q="25544")[0] == 25544

@@ -24,7 +24,7 @@ ARGS = {"norad": NORAD}
 LEO_NOW = T0 + 78500  # mid-pass of the 62 deg LEO pass (see test_passes)
 PASS_KEYS = {
     "alt", "az", "rising", "sun_sep", "t_rise", "t_in", "t_peak", "peak_alt", "t_out", "t_set",
-    "phase", "t_r",
+    "phase", "t_r", "sun_sep_in",
 }  # fmt: skip
 
 
@@ -110,6 +110,21 @@ def test_pre_position_then_each_rule_row(ref):
         assert d["code"] == "peak_below_limit"
         assert d["reason"] == "Pass peaks below the station limit elevation"
         assert 0 < d["pass"]["peak_alt"] < LIM
+
+
+def test_lead_window_through_the_check_endpoint(ref):
+    """Q27b: below 0 deg, the Lim EL crossing 4 min ahead is allowed (pre_position, the meeting
+    point planned with a wait); 6 min ahead is "Below the horizon"."""
+    with running() as (tc, fake, app):
+        attach(app, Backend(), LEO_NOW)
+        at(app, ref.t_in - 240)
+        d = check(tc, "track_object", ARGS)
+        assert d["target"]["alt"] < 0
+        assert d["ok"] and d["pass"]["phase"] == "pre_position"
+        assert ref.t_in - 1 <= d["pass"]["t_r"] <= ref.t_in + 5  # the meeting point = the crossing
+        at(app, ref.t_in - 360)
+        d = check(tc, "track_object", ARGS)
+        assert (d["ok"], d["code"]) == (False, "below_horizon")
 
 
 def test_sun_row(ref, monkeypatch):

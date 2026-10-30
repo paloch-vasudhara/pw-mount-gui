@@ -33,6 +33,7 @@ FINE_STEP_S = 0.5
 FINE_PAD_S = 5.0  # the fine bracket reaches this far beyond the coarse samples (pipeline error)
 SUN_KEEPOUT_DEG = 15.0  # Q14 (same disc as the gotos)
 MIN_TRACK_S = 30.0  # Q15: PWI4 needs 10-16 s to acquire (P6)
+LEAD_S = 300.0  # Q27b: lead before the Lim EL crossing at which a below-horizon object is trackable
 
 R_BELOW_HORIZON = "Below the horizon"
 R_SUN = "Within 15° of the Sun"
@@ -58,6 +59,9 @@ class PassInfo:
     peak_alt: float | None = None
     t_out: float | None = None
     t_set: float | None = None
+    # the Sun separation of the object at its Lim EL crossing `t_in` (set only for an object that
+    # is below the horizon now and inside the lead window: the meeting point, Q27b)
+    sun_sep_in: float | None = None
 
 
 def _times(ts: Any, t_unix: np.ndarray):
@@ -183,6 +187,42 @@ def _vertex(t: np.ndarray, f: np.ndarray) -> tuple[float, float]:
     return float(t[j] + s * (t[1] - t[0])), float(y1 - 0.25 * (y0 - y2) * s)
 
 
+def _lead_pass(
+    base: PassInfo,
+    line1: str,
+    line2: str,
+    site: tuple[float, float, float],
+    lim_el: float,
+    t_unix: float,
+    sun_fn: Callable[[], tuple[float, float] | None],
+    ts: Any,
+    sat: Any,
+    topos: Any,
+) -> PassInfo:
+    """Below the horizon now (Q27b): when the Lim EL up-crossing is within LEAD_S, the pass
+    starting there (as `compute_pass` returns it for an object in the pass), with the live fields
+    of NOW and the Sun separation at the crossing. Else `base` (the live fields only). Only the
+    short forward window is scanned."""
+    if not math.isfinite(base.alt) or base.alt >= lim_el:
+        return base
+    off = np.arange(COARSE_STEP_S, LEAD_S + 2 * COARSE_STEP_S, COARSE_STEP_S)
+    hit = np.nonzero(_coarse_alt(sat, topos, ts, t_unix + off) >= lim_el)[0]
+    if not hit.size:
+        return base
+    inner = compute_pass(line1, line2, site, lim_el, t_unix + off[hit[0]] + 2.0, sun_fn, ts)
+    if inner.t_in is None or inner.t_in > t_unix + LEAD_S:
+        return base
+    a, z = _altaz(sat, topos, ts, np.array([inner.t_in]))
+    return replace(
+        inner,
+        alt=base.alt,
+        az=base.az,
+        rising=base.rising,
+        sun_sep=base.sun_sep,
+        sun_sep_in=_sep(float(z[0]), float(a[0]), sun_fn),
+    )
+
+
 def compute_pass(
     line1: str,
     line2: str,
@@ -193,14 +233,15 @@ def compute_pass(
     ts: Any,
 ) -> PassInfo:
     """The pass the object is in at `t_unix` (site = (lat, lon_east, height_m)). Below the
-    horizon now: only the live fields (no pass is searched; the verdict is "Below the horizon").
+    horizon now: the pass starting at the Lim EL crossing when that is within LEAD_S (Q27b), else
+    only the live fields (the verdict is "Below the horizon").
     An object that does not rise / set within 12 h gets `t_rise` / `t_set` None; then the peak is
     the highest altitude of the forward 12 h and the Lim EL crossings are those inside it."""
     sat, topos = _make(line1, line2, site, ts)
     alt0, az0, rising = _now(sat, topos, ts, t_unix)
     base = PassInfo(alt0, az0, rising, _sep(az0, alt0, sun_fn))
     if alt0 < 0.0:
-        return base
+        return _lead_pass(base, line1, line2, site, lim_el, t_unix, sun_fn, ts, sat, topos)
 
     if not math.isfinite(alt0):
         raise ValueError("propagation failed")
@@ -285,9 +326,11 @@ def track_verdict(
     """The rule table (rows 2-6 of the T4.1 spec; row 0 = the mount guards and row 1 = the TLE
     fetch are the caller's). Returns (reason, code, phase): the first failing row wins, `phase`
     is "track" / "pre_position" when allowed, else None."""
-    if info.alt < 0.0:
+    if info.alt < 0.0 and (info.t_in is None or info.t_in > now + LEAD_S):
         return R_BELOW_HORIZON, "below_horizon", None
-    if info.sun_sep is not None and info.sun_sep < SUN_KEEPOUT_DEG:
+    # below the horizon (inside the lead): the Sun at the meeting point, not where it is now
+    sun_sep = info.sun_sep_in if info.alt < 0.0 and info.sun_sep_in is not None else info.sun_sep
+    if sun_sep is not None and sun_sep < SUN_KEEPOUT_DEG:
         return R_SUN, "sun", None
     if info.peak_alt is not None and info.peak_alt < lim_el:
         return R_PEAK_BELOW, "peak_below_limit", None

@@ -257,6 +257,32 @@ def test_pass_sequence_phases_snapshot_monitor_audit_end(tmp_path):
         w.close()
 
 
+def test_below_horizon_start_slews_waits_and_tracks(tmp_path):
+    """Q27b: the object is below 0 deg 4 min before its Lim EL crossing; the meeting point is
+    the crossing, the executor slews, waits ("Waiting for ...") and tracks."""
+    with running() as (tc, fake, app), TleStub() as stub:
+        row(stub)
+        rig = Rig(app, fake, stub, start=T0 - 180.0)
+        ctl = app.state.control
+        d = check(tc, "track_object", ARGS)
+        assert d["target"]["alt"] < 0, d
+        assert d["ok"] and d["pass"]["phase"] == "pre_position", d
+        assert d["pass"]["t_r"] == pytest.approx(T0 + 60.0, abs=5.0)  # the crossing
+        rig.pause_at = d["pass"]["t_r"] + 20.0
+        w = Win(tc)
+        ack = w.send("track_object", ARGS, "k1")
+        assert ack["ok"] is True, ack
+        assert rig.wait_paused(), (rig.t, rig.phases)
+        assert rig.phases[:3] == ["slewing", "waiting", "tracking"], rig.phases
+        assert any(o == ("TRACKING", "Waiting for SYN-A") for _, _, o in rig.log)
+        assert ctl.trackx.t.plan.t_r == pytest.approx(d["pass"]["t_r"])
+        rig.resume()
+        wait_for(lambda: not ctl.trackx.active, 10.0)
+        assert len(events(tmp_path, "track_done")) == 1
+        assert not events(tmp_path, "track_stopped")
+        w.close()
+
+
 def test_late_arrival_replans_once_with_a_short_goto(tmp_path):
     with running() as (tc, fake, app), TleStub() as stub:
         row(stub)

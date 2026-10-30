@@ -183,7 +183,7 @@ footer { color: var(--muted); font-size: 13px; margin-top: 28px; }
 
   <h3 id="a1d"><span class="id">A1d</span> Object tracking workflow <span class="ref">run by the gateway</span></h3>
   <ol>
-    <li>Check the pass: above 0°, reaches above Lim EL; Sun check (G2).</li>
+    <li>Check the pass: above 0° (or below 0° with its Lim EL crossing at most 5 min ahead), reaches above Lim EL; Sun check (G2).</li>
     <li>If still below Lim EL: compute the Lim EL crossing point, slew there and <b>wait</b> — status <span class="chip g">TRACKING</span>, card shows a countdown.</li>
     <li>At the crossing time, hand the object to PWI4 (<code>follow_tle</code> for satellites; custom path for aircraft).</li>
     <li>End of path: tracking stops at Lim EL (G3); mount becomes <span class="chip m">STOPPED</span>.</li>

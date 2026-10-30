@@ -169,8 +169,9 @@ class TrackChecker:
             fresh = 0.0 <= now - at < PASS_TTL_S and (info.t_set is None or now < info.t_set)
             if fresh:
                 live = refresh_now(info, tle.line1, tle.line2, site, now, sun_fn, ts)
-                # a pass-less entry (the object was below the horizon) is stale once it rises
-                if info.peak_alt is not None or live.alt < 0.0:
+                # a pass-less entry (the object was below the horizon) is stale once it rises,
+                # and the lead window (Q27b) opens at no fixed time: it is recomputed each check
+                if info.peak_alt is not None:
                     return live
         info = compute_pass(tle.line1, tle.line2, site, lim_el, now, sun_fn, ts)
         with self._lock:
