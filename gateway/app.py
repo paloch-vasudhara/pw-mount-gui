@@ -5,12 +5,15 @@ import contextlib
 import json
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from typing import Any
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict
 
 from .audit import AuditLog
+from .commands import CommandError, validate_command
 from .config import Settings
 from .control import ControlService, Pwi4Writer
 from .ephem import Ephem
@@ -26,10 +29,25 @@ from .security import (
 )
 from .settings import Location, SecretStore, SettingsStore, SettingsUpdate, compute_site_check
 from .snapshot import site_key
+from .tle import TleSource
+from .trackcheck import TrackChecker
+from .trackplan import mount_from_status
+from .transforms import TRANSFORM_FRAME, AltAzValues, TransformRequest
 
 VERSION = "0.1.0"
 AUTH_TIMEOUT_S = 2.0
 WS_UNAUTHORIZED = 4401
+
+
+CHECKABLE = frozenset(
+    {"goto_altaz", "goto_radec_j2000", "jog", "step", "wrap_turn", "track_object"}
+)
+
+
+class CheckRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    cmd: str
+    args: dict[str, Any]
 
 
 def with_control(msg: str, control: dict) -> str:
@@ -43,6 +61,7 @@ def create_app(
     settings: Settings | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
     secrets: SecretStore | None = None,
+    tle_transport: httpx.BaseTransport | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     token = settings.token or new_token()
@@ -53,10 +72,27 @@ def create_app(
     audit = AuditLog(settings.audit_dir)
     control = ControlService(Pwi4Writer(settings.pwi4_url, transport), poller, hub, audit)
     safety = SafetyEngine.from_env(poller, store, ephem, audit)
+    tle_source = TleSource(settings.analysis_url, tle_transport)
+    # T4.1 TRACK OBJECT verdict; T4.2c: its clock is the control service's (a test seam)
+    track = TrackChecker(tle_source, lambda: ephem.timescale, lambda: control.track_clock())
     control.check = safety.check  # T3.1b: command gate
     control.resolved_az = safety.pop_target_az
     monitor = SafetyMonitor(safety, poller, control)
     control.motion_cleared = monitor.clear
+    monitor.jog_probe = control.jogc.probe  # T3.4c: commanded jog rate for the look-ahead / stall
+    poller.jog_provider = control.jogc.jog_info
+    poller.step_provider = control.jogc.step_info
+    poller.jog_limit_provider = control.jogc.limit_info
+    poller.turn_provider = control.jogc.turn_info
+    control.home_check = safety.check_home  # T3.2: HOME gate (Sun path, site, Lim EL)
+    control.homing_begin = monitor.begin_homing
+    control.homing_end = monitor.end_homing
+    control.seq.exe = settings.pwi4_exe
+    control.seq.start_timeout = settings.pwi4_start_timeout_s
+    poller.sequence_provider = control.seq.snapshot_info
+    poller.homed_observer = control.homed.observe  # T3.3 not-homed guard
+    poller.homed_provider = control.homed.info
+    poller.stall_message_provider = control.homed.stall_message
 
     def goto_started(cmd) -> None:
         plan = safety.take_plan(cmd)
@@ -64,6 +100,29 @@ def create_app(
             monitor.begin(plan)
 
     control.goto_started = goto_started
+    # T3.5c D-SUN: stored routes, the monitor's route plan, the final-leg check, the HOME gate
+    control.take_route = safety.take_route
+    control.route_begin = monitor.begin_route
+    control.route_final_check = lambda cmd: safety.final_check(control.fresh_status(), cmd)
+    safety.homed_state = lambda: control.homed.state
+    poller.route_provider = control.route_info
+
+    def track_eval(norad: int, site, st, fresh: bool):
+        """The pass check + track plan (rules 1-7) with the safety engine's inputs: the check
+        endpoint and the real track_object command both go through ControlService.track_verdict."""
+        return track.evaluate(
+            norad,
+            site,
+            safety.lim_el(),
+            lambda: safety.sun_altaz(site),
+            mount_from_status(st) if st is not None else None,
+            lambda t: safety.sun_altaz_at(site, t),
+            fresh,
+        )
+
+    control.track_eval = track_eval
+    control.route_extend = monitor.extend_route  # T4.2c: long tracks grow the monitor's plan
+    poller.track_provider = control.trackx.info
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -83,6 +142,7 @@ def create_app(
             yield
         finally:
             await monitor.stop()
+            tle_source.close()
             await control.shutdown()  # G4 graceful-exit stop
             if task is not None:
                 task.cancel()
@@ -100,6 +160,7 @@ def create_app(
     app.state.safety = safety
     app.state.monitor = monitor
     app.state.audit = audit
+    app.state.track = track
 
     def require_auth(request: Request) -> None:
         """REST guard: per-launch token header + Origin / Sec-Fetch-Site (Host: middleware)."""
@@ -158,6 +219,67 @@ def create_app(
     def site_check_proposed(loc: Location) -> JSONResponse:
         """Check a PROPOSED location against PWI4's cached site. Read-only: nothing is saved."""
         return JSONResponse(compute_site_check(loc, poller.pwi4_site()))
+
+    @app.post("/api/transform", dependencies=[Depends(require_auth)])
+    def transform(req: TransformRequest) -> JSONResponse:
+        """H4 (T3.3, T3.3b): J2000 RA/Dec <-> OBSERVED topocentric alt/az (refracted like PWI4's
+        reported alt/az, P18) at an explicit time. Read-only (no control lock). Default site =
+        PWI4's own site. The response states the frame in `frame`."""
+        if not ephem.available:
+            raise HTTPException(status_code=503, detail="ephemeris unavailable")
+        if req.site is not None:
+            site = (req.site.lat, req.site.lon, req.site.height_m)
+        else:
+            site = poller.pwi4_site()
+            if site is None:
+                raise HTTPException(status_code=503, detail="PWI4 site unavailable")
+        t = req.time()
+        v = req.values
+        if isinstance(v, AltAzValues):
+            ra_h, dec = ephem.altaz_radec_j2000(site, v.alt, v.az, t)
+            result = {"ra_h": ra_h, "dec_deg": dec}
+        else:
+            alt, az = ephem.radec_j2000_altaz(site, v.ra_h, v.dec_deg, t)
+            result = {"alt": alt, "az": az}
+        body = {
+            "dir": req.dir,
+            "t_utc": t.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "site": {"lat": site[0], "lon": site[1], "height_m": site[2]},
+            "result": result,
+            "frame": TRANSFORM_FRAME,
+        }
+        return JSONResponse(body, headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/mount/check", dependencies=[Depends(require_auth)])
+    def check_goto(req: CheckRequest) -> JSONResponse:
+        """Q6 dry run: the verdict a goto would get from the gateway right now, without sending
+        anything to PWI4, taking the lock or writing the audit log. Every refusal that does not
+        depend on WHO sends it is evaluated; the control-lock holder is not (the panel shows
+        control separately)."""
+        if req.cmd not in CHECKABLE:
+            raise HTTPException(status_code=422, detail="not a checkable command")
+        try:
+            cmd = validate_command("check", req.cmd, req.args)
+        except CommandError as exc:
+            raise HTTPException(status_code=422, detail=exc.reason) from None
+        extra: dict[str, Any] = {}
+        if cmd.name == "track_object":
+            # The same verdict as the real command (ControlService.track_verdict): row 0 (the
+            # mount guards) wins; the TLE fetch and the pass rules only run when the mount could
+            # take the command.
+            v, extra, _ = control.track_verdict(cmd, None)
+        else:
+            v = control.dry_check(cmd)
+        target = None if v.target is None else {"alt": v.target[0], "az": v.target[1]}
+        body = {
+            "ok": v.reason is None,
+            "reason": v.reason,
+            "code": v.code,
+            "target": target,
+            "detour": v.detour,
+            **extra,
+        }
+        return JSONResponse(body, headers={"Cache-Control": "no-store"})
 
     @app.websocket("/api/mount/ws")
     async def ws(websocket: WebSocket) -> None:

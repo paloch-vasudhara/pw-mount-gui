@@ -31,6 +31,7 @@ from sqlalchemy import (
     String,
     Table,
     and_,
+    case,
     func,
     or_,
     select,
@@ -47,6 +48,8 @@ LAYERS: dict[str, tuple[str, ...]] = {
 }
 LAYER_OF_CLASS = {cls: layer for layer, classes in LAYERS.items() for cls in classes}
 MAX_SEARCH = 500
+# search `orbit_group` (lowercase) -> orbit_class values (uppercase); same grouping as the layers
+ORBIT_GROUPS = {"leo": ("LEO", "SSO"), "meo": ("MEO",), "geo": ("GEO", "HEO")}
 # Live viewer only: objects whose TLE epoch is older than this are not propagated/drawn (old TLEs
 # on low orbits propagate to nonsense, O-FAST). Evaluated at every catalogue (re)load. Search, GET
 # /api/sats/{norad} and /api/sky/state are NOT filtered.
@@ -113,10 +116,18 @@ class CatalogSource(Protocol):
     def fetch_live(self) -> list[tuple]: ...
 
     def search(
-        self, q: str | None, orbit_class: str | None, object_type: str | None, limit: int
+        self,
+        q: str | None,
+        orbit_class: str | None,
+        object_type: str | None,
+        limit: int,
+        country: str | None = None,
+        orbit_group: str | None = None,
     ) -> list[dict]: ...
 
     def get(self, norad: int) -> dict | None: ...
+
+    def countries(self) -> list[dict]: ...
 
 
 class SqlCatalogSource:
@@ -151,23 +162,38 @@ class SqlCatalogSource:
             return [tuple(r) for r in c.execute(stmt)]
 
     def search(
-        self, q: str | None, orbit_class: str | None, object_type: str | None, limit: int
+        self,
+        q: str | None,
+        orbit_class: str | None,
+        object_type: str | None,
+        limit: int,
+        country: str | None = None,
+        orbit_group: str | None = None,
     ) -> list[dict]:
         conds = [_LIVE]
+        # exact matches (name, COSPAR, NORAD id) first: the limit never cuts them
+        exact_first = []
         if q and q.strip():
             q = q.strip()
             terms = [_t.name.ilike(f"%{q}%"), _t.cospar_id.ilike(f"%{q}%")]
+            exact = [func.upper(_t.name) == q.upper(), func.upper(_t.cospar_id) == q.upper()]
             if q.isdigit():
                 terms.append(_t.norad_id == int(q))
+                exact.append(_t.norad_id == int(q))
             conds.append(or_(*terms))
+            exact_first.append(case((or_(*exact), 0), else_=1))
         if orbit_class:
             conds.append(_t.orbit_class == orbit_class.upper())
         if object_type:
             conds.append(_t.object_type == object_type.upper())
+        if country and country.strip():
+            conds.append(func.upper(_t.country_code) == country.strip().upper())
+        if orbit_group:
+            conds.append(_t.orbit_class.in_(ORBIT_GROUPS[orbit_group.lower()]))
         stmt = (
             select(*OBJECT_COLS)
             .where(*conds)
-            .order_by(_t.norad_id.desc())
+            .order_by(*exact_first, _t.norad_id.desc())
             .limit(max(1, min(limit, MAX_SEARCH)))
         )
         with self.engine.connect() as c:
@@ -182,6 +208,18 @@ class SqlCatalogSource:
         out = _info(r)
         out["tle_line1"], out["tle_line2"] = r.tle_line1, r.tle_line2
         return out
+
+    def countries(self) -> list[dict]:
+        """Distinct non-null country codes of live objects: [{code, count}], most common first."""
+        n = func.count()
+        stmt = (
+            select(_t.country_code, n.label("n"))
+            .where(_LIVE, _t.country_code.is_not(None), _t.country_code != "")
+            .group_by(_t.country_code)
+            .order_by(n.desc(), _t.country_code)
+        )
+        with self.engine.connect() as c:
+            return [{"code": r[0], "count": int(r[1])} for r in c.execute(stmt)]
 
     def count_live(self) -> int:
         stmt = select(func.count()).select_from(satellites).where(_LIVE)

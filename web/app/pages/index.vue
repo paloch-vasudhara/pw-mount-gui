@@ -2,6 +2,7 @@
 import { ref } from 'vue'
 import SectionFrame from '~/components/SectionFrame.vue'
 import ToolsGroup from '~/components/ToolsGroup.vue'
+import MountControlPanel from '~/components/mount/MountControlPanel.vue'
 import MountDetailsDialog from '~/components/mount/MountDetailsDialog.vue'
 import MountStatusPanel from '~/components/mount/MountStatusPanel.vue'
 import SkyChart from '~/components/sky/SkyChart.vue'
@@ -18,7 +19,7 @@ const filters = useFiltersStore()
   <main
     class="grid h-screen min-h-[480px] grid-cols-[minmax(280px,22.9%)_minmax(0,1fr)_minmax(280px,22.9%)] gap-3 bg-page p-5"
   >
-    <div class="grid min-h-0 grid-rows-[minmax(0,0.87fr)_minmax(0,1.9fr)] gap-3">
+    <div class="grid min-h-0 grid-rows-[minmax(var(--ti-min),0.87fr)_minmax(0,1.9fr)] gap-3 [--ti-min:196px]">
       <SectionFrame title="Track Info">
         <TrackCard />
       </SectionFrame>
@@ -51,7 +52,9 @@ const filters = useFiltersStore()
         <MountStatusPanel @open-details="detailsOpen = true" />
         <MountDetailsDialog v-model:open="detailsOpen" />
       </SectionFrame>
-      <SectionFrame title="Mount Control" />
+      <SectionFrame title="Mount Control">
+        <MountControlPanel homed-dialog />
+      </SectionFrame>
     </div>
   </main>
 </template>
@@ -60,6 +63,8 @@ const filters = useFiltersStore()
 /* FILTERS body: sized by the panel height. --u = panel body height / the content height at today's
    sizes (Visibility + Labels row 293.5 + gap 12 + Tools 136.5 = 442, plus slack for the fixed 1 px
    borders); every child clamp(min, u*N, N) hits N at 1920x1080. Tools sits at the bottom. */
+/* --ti-min (Track Info row floor) = SectionFrame chrome 46 + card 122 (u = 9 px) + strip slot 26 = ~194, 196 with slack:
+   below the height where 0.87fr reaches it the Filters row takes the rest (352 px at 1280x600 -> body 304 px). */
 .filters-body { container-type: size; height: 100%; min-height: 0; }
 .filters-inner {
   --u: calc(100cqh / 450);

@@ -154,21 +154,24 @@ def test_sun_refusals_with_test_override(pwi, tmp_path):
                     "goto_altaz", {"alt": cur_alt, "az": (cur_az + 35.0) % 360.0}, timeout=6
                 )
             )["reason"]
-            out["path_crossing"] = (
-                await c.cmd("goto_altaz", {"alt": cur_alt, "az": (cur_az + 80.0) % 360.0})
-            )["reason"]
-            out["tracking_in_disc_n/a"] = None
             await asyncio.sleep(1.0)
             moved = max(abs(a - b) for a, b in zip(before[:2], mount_pos(pwi)[:2], strict=True))
             out["moved_deg"] = round(moved, 4)
+            # since T3.5 (D-SUN) a path through the disc is ROUTED, not refused; STOP ends it
+            ack = await c.cmd("goto_altaz", {"alt": cur_alt, "az": (cur_az + 80.0) % 360.0})
+            out["path_crossing_ok"] = ack["ok"]
+            await asyncio.sleep(3.0)
+            await c.cmd("stop")
+            await asyncio.sleep(1.0)
             RESULTS["sim_sun_refusals"] = {"sun_override": sun, **out}
             await c.close()
             return out, moved
 
         out, moved = run(go())
         assert out["target_in_disc"] == "Within 15° of the Sun"
-        assert out["path_crossing"] == "Slew path passes within 15° of the Sun"
         assert moved < 0.05
+        assert out["path_crossing_ok"] is True
+        assert [e for e in g.audit_events() if e["event"] == "sun_detour"]
     finally:
         g.kill()
 
@@ -231,12 +234,10 @@ def test_monitor_stops_setting_sidereal_track(pwi, tmp_path):
             c = await Client.open(g.token())
             await c.wait_state("STOPPED", 5)
             await asyncio.sleep(0.5)
-            # western sky, away from the (real) Sun: pointing >= 35 deg from it is enforced below
-            s = pwi.status()
-            eph = Ephem(ROOT / "data" / "ephemeris" / "de421.bsp")
-            sun = eph.update((s.site.latitude_degs, s.site.longitude_degs, s.site.height_meters))
+            # western sky (a setting direction). The gateway's Sun is pinned below the horizon
+            # (start_gateway), so the real Sun is irrelevant: the old real-Sun precondition failed
+            # on an afternoon Sun at the user's site (Phase 3 end).
             az = 290.0
-            assert angular_sep_deg(az, 40.0, sun.sun_az, sun.sun_alt) > 35.0, "Sun too close"
             await goto_and_settle(c, pwi, 40.0, az)
             alt_now = pwi.status().mount.altitude_degs
             lim = round(alt_now - 0.12, 3)

@@ -1,0 +1,5 @@
+[09:24:50.671] pass SYN-S1_-5: peak 14.94, t_in in 64 s, t_out-t_in -0 s, compute_pass={"t_in": 1793179555.1324453, "t_out": 1793179856.9301524, "t_peak": 1793179706.503872, "peak": 45.00259924615592, "t_rise": 1793179384.3306189, "t_set": 1793180025.8241498}
+[09:25:01.135] prepositioned: alt 15.061 ax0 195.640 (wanted alt 15.061 ax0 195.640) wrap -23.4 settled=True
+[09:25:50.177] s1_-5 follow_tle at t_in-5 (called 0.00 s relative), took 44 ms
+[09:27:01.794] saved s1_-5.json (1206 rows)
+[09:27:01.808] s1_-5 wrap before -23.4 after -62.7

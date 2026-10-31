@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .transforms import refract_alt
+
 REFRESH_S = 1.0
 
 
@@ -46,6 +48,11 @@ class Ephem:
         except Exception as exc:
             self.error = f"{type(exc).__name__}: {exc}"
 
+    @property
+    def timescale(self):
+        """The skyfield timescale (None when the ephemeris failed to load)."""
+        return self._ts
+
     def stale(self, site: tuple[float, float, float] | None) -> bool:
         if not self.available or site is None:
             return False
@@ -71,9 +78,13 @@ class Ephem:
         obs = earth + wgs84.latlon(lat, lon, elevation_m=h)
         s_alt, s_az, _ = obs.at(t).observe(sun).apparent().altaz()
         m_alt, m_az, _ = obs.at(t).observe(moon).apparent().altaz()
+        # T3.3b (P18): the Sun is in the mount's frame (observed = refracted like PWI4), so its
+        # distance to the reported alt/az and the safety comparisons are consistent. The Moon
+        # stays refraction-free (display only).
+        s_alt_obs = refract_alt(float(s_alt.degrees))
         illum = float(almanac.fraction_illuminated(self._eph, "moon", t))
         self._cache = SunMoon(
-            sun_alt=float(s_alt.degrees),
+            sun_alt=s_alt_obs,
             sun_az=float(s_az.degrees),
             moon_alt=float(m_alt.degrees),
             moon_az=float(m_az.degrees),
@@ -90,12 +101,18 @@ class Ephem:
         return self._eph["earth"] + wgs84.latlon(lat, lon, elevation_m=h)
 
     def sun_altaz(
-        self, site: tuple[float, float, float], when: datetime | None = None
+        self,
+        site: tuple[float, float, float],
+        when: datetime | None = None,
+        *,
+        unrefracted: bool = False,
     ) -> tuple[float, float]:
-        """Apparent topocentric Sun (alt, az) in degrees for `site` (safety maths)."""
+        """Observed Sun (alt, az) in degrees for `site` (safety maths): refracted like the
+        mount's reported alt/az (T3.3b, P18); `unrefracted=True` for the bare apparent position."""
         t = self._ts.from_datetime(when or datetime.now(UTC))
         alt, az, _ = self._observer(site).at(t).observe(self._eph["sun"]).apparent().altaz()
-        return float(alt.degrees), float(az.degrees)
+        a = float(alt.degrees)
+        return (a if unrefracted else refract_alt(a)), float(az.degrees)
 
     def radec_j2000_altaz(
         self,
@@ -103,12 +120,35 @@ class Ephem:
         ra_h: float,
         dec_deg: float,
         when: datetime | None = None,
+        *,
+        unrefracted: bool = False,
     ) -> tuple[float, float]:
-        """Apparent topocentric (alt, az) of a J2000 RA/Dec at `when` (precession, nutation,
-        aberration included; no refraction)."""
-        from skyfield.api import Star
+        """Observed (alt, az) of a J2000 RA/Dec at `when`: precession, nutation, aberration and
+        refraction like PWI4 (`unrefracted=True`: no refraction). H4, T3.3 / T3.3b."""
+        from .transforms import radec_j2000_to_altaz
 
-        t = self._ts.from_datetime(when or datetime.now(UTC))
-        star = Star(ra_hours=ra_h, dec_degrees=dec_deg)
-        alt, az, _ = self._observer(site).at(t).observe(star).apparent().altaz()
-        return float(alt.degrees), float(az.degrees)
+        return radec_j2000_to_altaz(
+            ra_h,
+            dec_deg,
+            when or datetime.now(UTC),
+            site,
+            ts=self._ts,
+            earth=self._eph["earth"],
+            unrefracted=unrefracted,
+        )
+
+    def altaz_radec_j2000(
+        self,
+        site: tuple[float, float, float],
+        alt: float,
+        az: float,
+        when: datetime,
+        *,
+        unrefracted: bool = False,
+    ) -> tuple[float, float]:
+        """Inverse of `radec_j2000_altaz` (H4): (alt, az) is refracted unless `unrefracted`."""
+        from .transforms import altaz_to_radec_j2000
+
+        return altaz_to_radec_j2000(
+            alt, az, when, site, ts=self._ts, earth=self._eph["earth"], unrefracted=unrefracted
+        )

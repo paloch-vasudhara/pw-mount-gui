@@ -46,6 +46,9 @@ export default defineNuxtConfig({
     // Longest prefix first: /api/mount (gateway) before /api (analysis).
     devProxy: {
       '/api/mount': { target: `${gateway}/api/mount`, changeOrigin: true, prependPath: true },
+      // H4 (T3.3) is a gateway route outside /api/mount: without this it fell through to the
+      // analysis service and the Go To modal's computed pair froze (T3.4d).
+      '/api/transform': { target: `${gateway}/api/transform`, changeOrigin: true, prependPath: true },
       '/api': { target: `${analysis}/api`, changeOrigin: true, prependPath: true },
     },
   },

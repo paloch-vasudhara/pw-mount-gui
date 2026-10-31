@@ -4,6 +4,7 @@ audit. All against FakePwi4 (recorded requests); no real PWI4 is contacted.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 from contextlib import contextmanager
@@ -36,12 +37,17 @@ def cmd(name: str, args: dict | None = None, cid: str = "c1") -> str:
     return json.dumps({"type": "cmd", "id": cid, "cmd": name, "args": args or {}})
 
 
+_OPEN_WINS: list[Win] = []
+
+
 class Win:
     """One browser window: an authenticated WS plus ack / status helpers."""
 
     def __init__(self, tc: TestClient) -> None:
         self.cm = tc.websocket_connect("/api/mount/ws", headers=HDR)
         self.ws = self.cm.__enter__()
+        self.closed = False
+        _OPEN_WINS.append(self)
         self.ws.send_text(json.dumps({"type": "auth", "token": TOKEN}))
         assert json.loads(self.ws.receive_text())["type"] == "hello"
 
@@ -68,6 +74,11 @@ class Win:
         raise AssertionError(f"never saw holder {want}: {seen[-5:]}")
 
     def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        if self in _OPEN_WINS:
+            _OPEN_WINS.remove(self)
         # Let the server-side handler finish before TestClient cancels its task scope
         # (otherwise a slow teardown surfaces as a spurious CancelledError).
         self.ws.close(1000)
@@ -92,7 +103,9 @@ def audit_lines(tmp_path) -> list[dict]:
 
 
 @contextmanager
-def running(fake: FakePwi4 | None = None, wait_ready: bool = True):
+def running(fake: FakePwi4 | None = None, wait_ready: bool = True, homed: bool = True):
+    """homed=True: a mount found connected is put in the `overridden` guard state so motion
+    commands are accepted (the T3.3 not-homed guard has its own tests); False keeps not_homed."""
     fake = fake or FakePwi4()
     app = create_app(Settings(port=8400, token=TOKEN), transport=fake.transport)
     with TestClient(app, base_url="http://127.0.0.1:8400") as tc:
@@ -100,7 +113,16 @@ def running(fake: FakePwi4 | None = None, wait_ready: bool = True):
             wait_for(lambda: tc.get("/api/mount/status").status_code == 200)
             wait_for(lambda: app.state.control.ready)
             wait_for(lambda: app.state.control.fresh_status() is not None)
-        yield tc, fake, app
+            if homed and "mount.is_connected=true" in fake.text:
+                wait_for(lambda: app.state.control.homed.blocking)
+                app.state.control.homed.override("test-fixture")
+        try:
+            yield tc, fake, app
+        finally:
+            # A failing test must not leave a socket open: TestClient would hang on exit.
+            for w in list(_OPEN_WINS):
+                with contextlib.suppress(Exception):
+                    w.close()
 
 
 # ------------------------------------------------------------------ protocol

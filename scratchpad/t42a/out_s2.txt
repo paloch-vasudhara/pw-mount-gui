@@ -1,0 +1,4 @@
+[09:32:44.805] pass SYN-S2: peak 45.00, t_in in 63 s, t_out-t_in 302 s, compute_pass={"t_in": 1793180028.2640836, "t_out": 1793180330.0615828, "t_peak": 1793180179.6354055, "peak": 45.00244011299334, "t_rise": 1793179857.4621992, "t_set": 1793180498.9556375}
+[09:32:58.032] prepositioned: alt 50.000 ax0 15.641 (wanted alt 50.000 ax0 15.640) wrap -164.4 settled=True
+[09:34:59.900] saved s2_far.json (1218 rows)
+[09:34:59.917] s2_far wrap before -164.4 after -63.0

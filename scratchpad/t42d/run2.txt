@@ -1,0 +1,272 @@
+........F
+PWI4SIM RESULTS: {
+ "normal": {
+  "t_r_minus_now_at_ack_s": 9.7,
+  "t_end_minus_t_r_s": 131.1,
+  "follow_err_max_deg": 0.0074,
+  "min_alt_deg": 15.061,
+  "end_delay_after_t_end_s": 1.1,
+  "ended": {
+   "norad": 99101,
+   "reason": "Track ended at Lim EL",
+   "at": 1793243877.0927408
+  },
+  "final_state": "STOPPED",
+  "phases": [
+   "slewing",
+   "waiting",
+   "tracking"
+  ],
+  "audit": [
+   "track_start",
+   "track_done"
+  ]
+ },
+ "rising": {
+  "t_r_minus_t_cross_s": 4.15,
+  "waiting_s": 73.7,
+  "still_max_speed_deg_s": 0.0057,
+  "pos_err_at_t_r_deg": 0.0,
+  "follow_err_max_deg": 0.0042,
+  "min_alt_deg": 15.56,
+  "state_while_waiting": [
+   "TRACKING",
+   "Waiting for SYN-RISING"
+  ],
+  "phases": [
+   "slewing",
+   "waiting",
+   "tracking"
+  ],
+  "wrap_before_cmd": -71.6362091350911,
+  "wrap_after_upload": -291.228601715013,
+  "wrap_end": -291.228601715013
+ },
+ "peak_below": {
+  "ack": {
+   "ok": false,
+   "reason": "Pass peaks below the station limit elevation",
+   "code": "peak_below_limit"
+  },
+  "max_drift_deg": 0.0,
+  "slewing_or_tracking_seen": false,
+  "snapshot_track": null,
+  "state": "STOPPED",
+  "audit": []
+ },
+ "sun": {
+  "sun_altaz": "28.8106,250.9525",
+  "detours": [
+   {
+    "t_a": 1793244087.844468,
+    "t_b": 1793244151.4886084,
+    "side": "ccw"
+   }
+  ],
+  "detour_len_s": 63.6,
+  "plan_min_sun_sep": 15.999999999999972,
+  "min_sun_sep_measured_deg": 15.999,
+  "min_sun_sep_in_detour_deg": 15.999,
+  "follow_err_max_3s_after_t_b_deg": 0.0058,
+  "reason_seen": true
+ },
+ "stop": {
+  "ack_s": 0.0,
+  "stopped_s": 0.079,
+  "stopped_and_not_tracking_s": 0.079,
+  "state": "STOPPED",
+  "track": {
+   "norad": null,
+   "name": null,
+   "phase": null,
+   "t_r": null,
+   "t_end": null,
+   "t_peak": null,
+   "peak_alt": null,
+   "detours": [],
+   "notes": [],
+   "ended": {
+    "norad": 99105,
+    "reason": "Stopped by STOP",
+    "at": 1793244207.0807762
+   }
+  },
+  "audit": [
+   [
+    "track_start",
+    null
+   ],
+   [
+    "track_stopped",
+    "Stopped by STOP"
+   ]
+  ]
+ },
+ "goto": {
+  "final_err_deg": 0.0004,
+  "state": "STOPPED",
+  "track": null,
+  "audit": [
+   [
+    "track_start",
+    null
+   ],
+   [
+    "track_replaced",
+    "Replaced by goto_altaz"
+   ]
+  ]
+ },
+ "wrap": {
+  "wrap_before_cmd": -70.1583298555987,
+  "wrap_after_upload": 68.7709941757174,
+  "wrap_min_over_track": 68.7709941757174,
+  "wrap_max_over_track": 68.7709941757174,
+  "samples": 617
+ },
+ "replace": {
+  "audit": [
+   [
+    "track_start",
+    99108,
+    null
+   ],
+   [
+    "track_replaced",
+    99108,
+    "Replaced by a new track"
+   ],
+   [
+    "track_start",
+    99608,
+    null
+   ],
+   [
+    "track_stopped",
+    99608,
+    "Stopped by STOP"
+   ]
+  ]
+ },
+ "cfg_before": [
+  1793159639.7852576,
+  "4406df60f130fe0bb8ee12b633f97bf60321d6ee35e15c1de51e8b1f5e2683a2"
+ ],
+ "cfg_after": [
+  1793243916.909066,
+  "4406df60f130fe0bb8ee12b633f97bf60321d6ee35e15c1de51e8b1f5e2683a2"
+ ]
+}
+E
+=================================== ERRORS ====================================
+_________________ ERROR at teardown of test_near_zenith_pass __________________
+
+    @pytest.fixture(scope="module")
+    def pwi():
+        import sim_guard
+        from pwi4_client import PWI4
+    
+        cfg = sim_guard.assert_simulator()
+        before = (Path(cfg).stat().st_mtime, hashlib.sha256(Path(cfg).read_bytes()).hexdigest())
+        p = PWI4(sim_guard.HOST, sim_guard.PORT)
+        was_connected = bool(p.status().mount.is_connected)
+        p.mount_connect()
+        p.mount_enable(0)
+        p.mount_enable(1)
+        wrap0 = p.status().mount.axis0_wrap_range_min_degs
+        yield p
+        try:
+            p.mount_stop()
+            p.mount_tracking_off()
+            if wrap0 is not None:
+                p.mount_set_axis0_wrap_range_min(wrap0)  # undo the runtime wrap change
+            if not was_connected:  # leave the sim as found: stopped, axes disabled, disconnected
+                p.mount_disable(0)
+                p.mount_disable(1)
+                p.mount_disconnect()
+        except Exception:
+            pass
+        after = (Path(cfg).stat().st_mtime, hashlib.sha256(Path(cfg).read_bytes()).hexdigest())
+        RESULTS["cfg_before"], RESULTS["cfg_after"] = before, after
+        print("\nPWI4SIM RESULTS:", json.dumps(RESULTS, indent=1, default=str))
+>       assert before == after, "PWI4.cfg changed!"
+E       AssertionError: PWI4.cfg changed!
+E       assert (1793159639.7...8b1f5e2683a2') == (1793243916.9...8b1f5e2683a2')
+E         
+E         At index 0 diff: 1793159639.7852576 != 1793243916.909066
+E         Use -v to get more diff
+
+gateway\tests\test_control_pwi4sim.py:76: AssertionError
+================================== FAILURES ===================================
+____________________________ test_near_zenith_pass ____________________________
+
+pwi = <pwi4_client.PWI4 object at 0x000002F47E2114F0>
+stub = <gateway.tests.tle_stub.TleStub object at 0x000002F47E212B10>
+site = (0.119972222222222, 115.920694444444, 12.0)
+tmp_path = WindowsPath('C:/Users/soar/AppData/Local/Temp/pytest-of-soar/pytest-597/test_near_zenith_pass0')
+
+    def test_near_zenith_pass(pwi, stub, site, tmp_path):
+        """Row 9: peak ~89 deg: the axis-0 lag near the peak does not trip the corridor; back on the
+        object within 5 s after the peak; the card note is in the snapshot."""
+        p = make_pass(stub, site, 89.0, -100.0, "SYN-ZENITH")
+        rig = Rig(pwi, tmp_path, stub)
+    
+        async def go():
+            c = await rig.open()
+            ack = await c.cmd("track_object", {"norad": p.norad}, timeout=20)
+            assert ack["ok"], ack
+            await c.until(lambda: c.phase in ("waiting", "tracking"), 60, "uploaded")
+            info = dict(c.track)
+            t_peak = info["t_peak"]
+            assert t_peak - now_s() > 8, "the peak came too early to measure"
+            await c.until(lambda: c.phase == "tracking", 40, "tracking")
+            await asyncio.sleep(max(t_peak + 14.0 - now_s(), 0.5))
+            still = c.state == "TRACKING" and c.phase in ("tracking", "detour")
+            t_stop = time.monotonic()
+            ack = await c.cmd("stop")
+            assert ack["ok"], ack
+            await c.wait_state("STOPPED", 5)
+            return c, info, still, t_stop
+    
+>       c, info, still, t_stop = run(go())
+                                 ^^^^^^^^^
+
+gateway\tests\test_track_object_pwi4sim.py:730: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+gateway\tests\test_control_pwi4sim.py:338: in run
+    return asyncio.run(coro)
+           ^^^^^^^^^^^^^^^^^
+..\..\..\miniforge3\Lib\asyncio\runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+..\..\..\miniforge3\Lib\asyncio\runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+..\..\..\miniforge3\Lib\asyncio\base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+gateway\tests\test_track_object_pwi4sim.py:717: in go
+    await c.until(lambda: c.phase in ("waiting", "tracking"), 60, "uploaded")
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <gateway.tests.test_track_object_pwi4sim.TrackClient object at 0x000002F404516C00>
+pred = <function test_near_zenith_pass.<locals>.go.<locals>.<lambda> at 0x000002F47FA5A840>
+timeout = 60, what = 'uploaded'
+
+    async def until(self, pred, timeout: float, what: str) -> float:
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < timeout:
+            if pred():
+                return time.monotonic()
+            await asyncio.sleep(0.02)
+>       raise AssertionError(
+            f"timeout waiting for {what}; state={self.state} reason={self.reason} "
+            f"track={self.track}"
+        )
+E       AssertionError: timeout waiting for uploaded; state=STOPPED reason=Missed the pass: could not reach the rendezvous in time track=None
+
+gateway\tests\test_track_object_pwi4sim.py:211: AssertionError
+=========================== short test summary info ===========================
+FAILED gateway/tests/test_track_object_pwi4sim.py::test_near_zenith_pass - As...
+ERROR gateway/tests/test_track_object_pwi4sim.py::test_near_zenith_pass - Ass...
+1 failed, 8 passed, 1 error in 744.92s (0:12:24)

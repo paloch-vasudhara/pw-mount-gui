@@ -66,13 +66,13 @@ const f = useFiltersStore().filters
   --ind-ml: clamp(8px, calc(var(--u, 1px) * 11), 11px);
   --ind-pad: clamp(10px, calc(var(--u, 1px) * 14), 14px);
   display: flex; flex-direction: column; gap: clamp(2px, calc(var(--u, 1px) * 6), 6px); border: 1px solid var(--panel-border);
-  padding: clamp(5px, calc(var(--u, 1px) * 10), 10px) clamp(9px, calc(var(--u, 1px) * 14), 14px); margin: 0; min-width: 0;
+  padding: clamp(4px, calc(var(--u, 1px) * 10), 10px) clamp(9px, calc(var(--u, 1px) * 14), 14px); margin: 0; min-width: 0;
   min-height: 0; flex: 0 1 auto; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--control-border) transparent;
 }
-.vis legend { padding: 0 6px; font-size: clamp(11px, calc(var(--u, 1px) * 13), 13px); line-height: clamp(14px, calc(var(--u, 1px) * 19.5), 19.5px); font-weight: 600; color: var(--label-slate); }
+.vis legend { padding: 0 6px; font-size: clamp(11px, calc(var(--u, 1px) * 13), 13px); line-height: clamp(13px, calc(var(--u, 1px) * 19.5), 19.5px); font-weight: 600; color: var(--label-slate); }
 .row {
   display: flex; align-items: center; gap: clamp(6px, calc(var(--u, 1px) * 10), 10px); flex: none;
-  height: clamp(15px, calc(var(--u, 1px) * 21), 21px);
+  height: clamp(14px, calc(var(--u, 1px) * 21), 21px);
   font-size: clamp(11px, calc(var(--u, 1px) * 14), 14px); color: var(--foreground); cursor: pointer; user-select: none;
 }
 .row.top { font-weight: 600; margin-top: clamp(1px, calc(var(--u, 1px) * 4), 4px); }

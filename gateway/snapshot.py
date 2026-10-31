@@ -89,6 +89,102 @@ class MoonInfo(AltAz):
     illumination: float | None = None
 
 
+class SequenceInfo(BaseModel):
+    """Progress of a connect / disconnect / home sequence (T3.2). Kept after it ends (done /
+    failed / cancelled) until the next sequence starts, so every window can show the outcome."""
+
+    name: str  # connect | disconnect | home
+    step: str | None = None  # human label of the current (or failing) step
+    step_index: int = -1
+    steps: list[str] = Field(default_factory=list)
+    status: str = "running"  # running | done | failed | cancelled
+    error: str | None = None  # "<step> failed: <reason>" / the cancel reason
+    warning: str | None = None  # e.g. "Home skipped: path passes within 15° of the Sun"
+
+
+class HomedInfo(BaseModel):
+    """Not-homed guard (T3.3, Q3/Q4) for the current connect session. The whole field is null
+    when the mount is not connected. `since` = UTC time the current state began."""
+
+    state: str  # homed | not_homed | overridden
+    since: str  # ISO 8601 UTC
+    # T3.3b: "stalled" = the stall guard stopped the mount (physical limit): only a completed
+    # home clears it, no override. null = the normal not-homed / homed / overridden states.
+    reason: str | None = None
+
+
+class JogInfo(BaseModel):
+    """A running jog (T3.4c). `origin` = how the mount was when the jog began: "stopped" (the
+    gateway turned tracking on for it) or "tracking" (a rate offset only). Informational only:
+    a jog always ends STOPPED."""
+
+    axis: int
+    dir: int
+    speed: float  # deg/s of the mount axis
+    origin: str
+
+
+class StepInfo(BaseModel):
+    axis: int
+    dir: int
+    size_arcmin: int
+
+
+class JogLimitInfo(BaseModel):
+    """T3.4e: an azimuth jog stopped (or was refused) at the axis-0 mechanical limit. `dir` = the
+    direction of the jog, `limit_deg` the mechanical limit, `turn_deg` the size of the wrap turn
+    that would continue the move, `est_s` the estimated duration of that turn."""
+
+    axis: int
+    dir: int
+    limit_deg: float
+    turn_deg: float
+    est_s: float
+
+
+class TurnInfo(BaseModel):
+    """T3.4e: a 360 deg wrap turn is running (axis-0 positions)."""
+
+    from_deg: float
+    to_deg: float
+
+
+class RouteInfo(BaseModel):
+    """T3.5c: a D-SUN detour route is flying (the mount avoids the Sun disc)."""
+
+    active: bool = True
+    sides: list[str] = Field(default_factory=list)  # "cw" / "ccw" per detour, [] = straight line
+    t_end: str  # UTC ISO time the route (incl. the settle wait) ends
+
+
+class TrackDetourInfo(BaseModel):
+    t_a: float  # Unix seconds
+    t_b: float
+    side: str  # "cw" / "ccw"
+
+
+class TrackEndedInfo(BaseModel):
+    norad: int
+    reason: str
+    at: float  # Unix seconds
+
+
+class TrackInfo(BaseModel):
+    """T4.2c: the object track (null = none). Times are Unix seconds (floats). Only `ended` is set
+    for 30 s after a track ended (the other fields are null then)."""
+
+    norad: int | None = None
+    name: str | None = None
+    phase: str | None = None  # slewing | waiting | tracking | detour
+    t_r: float | None = None  # the rendezvous time
+    t_end: float | None = None  # the Lim EL exit (null: unknown yet, a never-setting object)
+    t_peak: float | None = None
+    peak_alt: float | None = None
+    detours: list[TrackDetourInfo] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+    ended: TrackEndedInfo | None = None
+
+
 class MountSnapshot(BaseModel):
     seq: int
     ts_utc: str
@@ -105,6 +201,14 @@ class MountSnapshot(BaseModel):
     hour_angle_h: float | None = None
     limits: Limits = Field(default_factory=Limits)
     site_check: SiteCheck | None = None  # only when the site comes from Settings
+    sequence: SequenceInfo | None = None
+    homed: HomedInfo | None = None
+    jog: JogInfo | None = None  # T3.4c: null = no jog running
+    step: StepInfo | None = None  # T3.4c: null = no step running
+    jog_limit: JogLimitInfo | None = None  # T3.4e: null = no azimuth limit prompt
+    turn: TurnInfo | None = None  # T3.4e: null = no wrap turn running
+    route: RouteInfo | None = None  # T3.5c: null = no D-SUN route running
+    track: TrackInfo | None = None  # T4.2c: null = no object track (and none ended lately)
 
 
 def site_key(result: PollResult) -> tuple[float, float, float] | None:
@@ -128,10 +232,7 @@ def lmst_hours_from(jd: float, lon_deg_east: float) -> float:
     """Local mean sidereal time (hours) from JD (UTC ~ UT1) via the IAU 1982 GMST polynomial."""
     t = (jd - 2451545.0) / 36525.0
     gmst = (
-        280.46061837
-        + 360.98564736629 * (jd - 2451545.0)
-        + 0.000387933 * t * t
-        - t**3 / 38710000.0
+        280.46061837 + 360.98564736629 * (jd - 2451545.0) + 0.000387933 * t * t - t**3 / 38710000.0
     )
     return ((gmst + lon_deg_east) % 360.0) / 15.0
 
@@ -167,6 +268,14 @@ def build_snapshot(
     site: Site | None = None,
     site_check: SiteCheck | None = None,
     limits: Limits | None = None,
+    sequence: SequenceInfo | None = None,
+    homed: HomedInfo | None = None,
+    jog: JogInfo | None = None,
+    step: StepInfo | None = None,
+    jog_limit: JogLimitInfo | None = None,
+    turn: TurnInfo | None = None,
+    route: RouteInfo | None = None,
+    track: TrackInfo | None = None,
 ) -> MountSnapshot:
     """result = last good fetch (or the failed one). down_reason forces DISCONNECTED.
 
@@ -212,6 +321,7 @@ def build_snapshot(
             else MoonInfo(),
             limits=limits or Limits(),
             site_check=site_check,
+            sequence=sequence,
         )
 
     st = result.status
@@ -298,4 +408,12 @@ def build_snapshot(
         hour_angle_h=ha,
         limits=limits or Limits(),
         site_check=site_check,
+        sequence=sequence,
+        homed=homed if connected else None,
+        jog=jog if connected else None,
+        step=step if connected else None,
+        jog_limit=jog_limit if connected else None,
+        turn=turn if connected else None,
+        route=route if connected else None,
+        track=track if connected else None,
     )

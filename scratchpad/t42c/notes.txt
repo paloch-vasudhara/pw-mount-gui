@@ -1,0 +1,54 @@
+T4.2c HANDOFF (paused early, ~10% done)
+
+DONE
+- gateway/trackcheck.py: TrackCheck gained plan/setup/tle fields; TrackChecker.evaluate(..., fresh=False)
+  skips the plan cache when fresh=True. Imports OK; test_check_track + test_trackplan: 57 passed.
+
+NOT STARTED (everything else)
+- gateway/trackexec.py (new TrackExecutor, held as ControlService.trackx), control.py wiring, snapshot TrackInfo,
+  poller.track_provider, safety.py (target0 on goto_altaz, SafetyMonitor.extend_route), jog refusal, app.py,
+  tle_stub.py, new tests, final pytest/ruff.
+
+DESIGN DECIDED (follow this)
+- Shared verdict: ControlService.track_verdict(cmd, conn_id, fresh=False) -> (MotionVerdict, extra, TrackCheck)
+  = _motion_verdict (row 0) + hook self.track_eval(norad, site, status, fresh) set in app.py (wraps
+  track.evaluate with safety.lim_el/sun_altaz/sun_altaz_at/mount_from_status). /api/mount/check calls it with conn_id None;
+  real command calls it via asyncio.to_thread, then re-runs _gateway_refusal.
+- Clock seams: ControlService.track_clock (time.time) used by TrackChecker(clock=lambda: control.track_clock()),
+  and track_sleep (asyncio.sleep) for the executor loop.
+- Rendezvous goto = internal Command goto_altaz {alt, az, target0=plan.rendezvous.axis0}, queued as a _Job
+  (ROUTABLE/D-SUN works). Need target0 support: safety._check_motion (tgt0 = args["target0"]) and a
+  _goto_wrap(cmd) helper in control._execute and _route_job (set wrap min = target0-180), because the planner's
+  axis0 representation can differ by 360 from the nearest one.
+- Arrival: poll until route None, job.task done, pose within 0.3 deg of rendezvous axes, tracker not moving.
+  If now > t_r - dsun.LEAD_S: re-plan once (evaluate fresh=True); if new rendezvous >0.5 deg away, one short goto; still late -> stop.
+- Upload: motion_cleared, tracking_off, wrap via route_wrap_plan (non-final: anchor window for travel direction, clamp to mech min),
+  monitor track_begin (begin_route: route=True plan, corridor=(axis0,alt), duration = t_end-now+1+3 settle; route plans
+  are validated_decision only => look-ahead off), custom_path_new, add_point_list (jd=unix/86400+2440587.5), apply(0).
+  Override TRACKING "Waiting for {name}"/"Tracking {name}"/"Avoiding the Sun".
+- Follow loop: sleep to next event (cap 1 s); extend when remaining < 20 min and not final (add+apply, no new; refusal/gap/
+  window exit -> mark final, end at chunk end); end at t_end+1 s: stop + tracking_off, override STOPPED "Track ended at Lim EL"
+  (cleared by next command in handle()), audit track_done, snapshot ended kept 30 s.
+- Ending: _cancel_all(reason, track_event="track_stopped") calls trackx.on_cancel (strip "Cancelled: " prefix);
+  replace paths (goto/track_object/tracking on/HOME/disconnect) use track_replaced; tracking off -> track_stopped;
+  jog/step/wrap_turn refused with R_OBJECT_TRACK "Object tracking; press STOP first" (code object_tracking) in jogc.refusal;
+  exempt R_SLEWING for starts_tracking while a track is in its slewing phase; skip worker-busy check in _sequence_refusal
+  when track active; HOME/disconnect end the track synchronously (sequence stops the mount itself).
+- Snapshot track (Unix-second floats): {norad,name,phase,t_r,t_end,t_peak,peak_alt,detours[{t_a,t_b,side}],notes,ended{norad,reason,at}};
+  null when idle; when only ended is live, other fields None.
+- Tests: tle_stub.py (http.server thread, dict updatable, context manager, GET /api/sats/{norad}); executor tests use
+  LEO pass from test_passes (LEO_NOW=T0+78500), attach() pattern from test_check_track, fake clock + sleep hook that parks the
+  fake mount at monitor.plan.target (see test_dsun_wiring.install_hook).
+
+NEXT STEPS: implement in order: safety/control target0 -> verdict refactor + app wiring -> snapshot/poller -> trackexec ->
+ending rules -> tle_stub -> tests -> full non-sim pytest, ruff check ., ruff format --check gateway.
+No processes were started; nothing committed.
+RESUMED 10-29: control/safety/jog/snapshot/poller/app edits + trackexec.py written; tests next
+T4.2c: executor+tests done, running full suite
+
+RESUMED 10-29 (worker 2)
+DONE: safety target0 (check + final_check + SafetyMonitor.extend_route); control.py (track_verdict, _track_command, _end_track,
+ _goto_wrap, trackx wiring, ending rules, _Job.finished/.error, R_OBJECT_TRACK); jog.refusal; snapshot TrackInfo + poller.track_provider;
+ app.py (track_eval hook, check endpoint uses control.track_verdict); gateway/trackexec.py; tests/tle_stub.py + test_tle_stub.py;
+ tests/test_track_exec.py (20 tests); test_check_track WS test rewritten (check == command).
+Fake-clock rig: Rig in test_track_exec.py (track_clock/track_sleep seams, pause_at/resume, parks fake mount at plan rendezvous).

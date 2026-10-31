@@ -1,6 +1,26 @@
-# Session handoff — updated 2026-10-22 (T3.1 verified)
+# Session handoff — updated 2026-10-30 (T5.1 COMPLETE and user-checked; the user commits; next T5.2 Astrometry spec)
 
 Read this first, then `docs/BUILD_PLAN.md` (§7 tracker + **resume point**, §6 task specs, §8 logs/findings), then `docs/logic_sheet.txt` as needed.
+
+## START HERE (after compaction / next session)
+
+1. **Check `git log`.** The user commits T5.1 (Pass Analysis: a analysis engine, b gateway 5-min lead, c web modal, d/e user adjustments) right after this handoff. If it is still uncommitted, ask before doing anything else.
+2. **T5.1 is complete:**
+   - the ssa-toolkit comparison passed;
+   - the lead sim row passed;
+   - browser passes;
+   - the user's live check clean (BUILD_PLAN §8 "T5.1a / T5.1b", "T5.1c", "T5.1d", "T5.1e").
+3. **Next: T5.2 Astrometry lite (A2b-iv), spec first.**
+   - Read the logic sheet A2b-iv, `concept/Astrometry.png` + `concept/Job Modal.png`, and the ssa-toolkit `photometry/` pipeline (read/copy only; O1 says the astrometry pipeline is ported from it).
+   - Ask the user the open design questions (AskUserQuestion) before briefing workers.
+4. **ssa-toolkit:**
+   - its `.gitignore` has an uncommitted `+database/` line (not ours; reported 10-30; don't touch);
+   - reference runs: conda env `orekit310`, in-process, `PYTHONDONTWRITEBYTECODE=1`, `git status` checked before / after.
+5. **Open item** (fix only if the user asks): the GEO "no safe detour" text while the Sun disc approaches (T4.2f log).
+6. **Environment:**
+   - The `PWI4.cfg` baseline is `b714321830fb…` (user site 13.12 / 100.92; app Lim EL 10; timezone Asia/Bangkok).
+   - Sim runs need the user's 8400 stopped (ask). Layout measurements can run with only a throwaway analysis + Nuxt, with the snapshot injected (no gateway / PWI4).
+   - Keep `.py` files out of the repo `scratchpad/` (`ruff check .`).
 
 ## Where we are
 
@@ -19,7 +39,55 @@ Read this first, then `docs/BUILD_PLAN.md` (§7 tracker + **resume point**, §6 
     - Monitor false-stop bug fixed (validated gotos are watched by a 2° path corridor + actual limits; the predictive look-ahead only for tracking and unvalidated motion).
     - P15: `goto_altaz` sends `tracking_off` first.
     - Sim suite 23/23 twice; independent re-gate passed (BUILD_PLAN §8).
-    - Next: user check via `/dev/control` → commit → T3.2.
+    - Committed `92bd389`.
+  - **T3.2 ✅ (verified 10-22, UNCOMMITTED):**
+    - CONNECT (start PWI4 ≤ 60 s → connect → enable → home) / DISCONNECT (stop → home → disable → disconnect) with BUSY steps, failed-step rule, STOP cancels;
+    - HOME (85/180 in settings) Sun-checked: blocked → skip+warning on connect, confirm on disconnect;
+    - MOUNT CONTROL panel.
+    - Real-mount items: HOMING detection + the homing altitude floor.
+    - User-checked 10-22, incl. CONNECT auto-starting PWI4.
+    - The supervisor then fixed the Details modal (its control groups now ARE the live `MountControlPanel`).
+    - "HOME never moves" on the sim is P12 (sim `find_home` is a no-op), not a bug.
+    - The user re-checked the modal controls 10-22: OK.
+  - **PWI4 manual (MAN7034, 4.1.5) supplied by the user:** see BUILD_PLAN §8 P16/P17.
+    - The Simulator has no Home commands.
+    - L-Series must home after every power cycle; homing goes via the region sensor at ≈ 60° alt.
+    - Apparent coordinates have no refraction.
+    - Jog max 10°/s.
+    - Offsets reset on a new target.
+    - PWI4 changes the wrap range when tracking satellites.
+  - **T3.3 ✅ (verified 10-22, UNCOMMITTED):**
+    - TRACK = `tracking_on` (+ wrap centring, P19);
+    - H4 in `gateway/transforms.py` + `POST /api/transform`;
+    - not-homed guard (`gateway/homed.py`, snapshot `homed`, command `homed_override`) + the dashboard dialog / NOT HOMED chip;
+    - Pointing Mode STOP/TRACK live.
+    - Log in BUILD_PLAN §8 "T3.3 log".
+  - T3.2 + T3.3 committed `96ef418`.
+  - **T3.3b + T3.4 (incl. T3.4d/e) user-checked 10-27; the user commits them right after this handoff** (check `git log`; if still uncommitted, ask before doing anything else).
+    - T3.3b:
+      - refraction = PWI4's model (Saemundsson × 0.9865, ≤ 0.46″ vs PWI4);
+      - P19 revert (PWI4's unwinding turn on `tracking_on` is intended);
+      - stall guard (per axis, 2.5 s frozen while far from its target → STOP + "STALLED — HOME REQUIRED").
+    - T3.4:
+      - Go To modal + `POST /api/mount/check` (shared verdict);
+      - Jog modal + `jog` / `jog_stop` / `step` (`gateway/jog.py`): JOG always ends STOPPED, STEP from TRACKING ends TRACKING;
+      - azimuth wrap slide + mechanical-limit prompt + `wrap_turn` (option B);
+      - a jog outside the wrap window re-centres it.
+    - Dev-proxy fix: `/api/transform` → gateway (`web/nuxt.config.ts`).
+    - Logs: BUILD_PLAN §8 "T3.3b / T3.4 / T3.4d / T3.4e log".
+  - **Next:**
+    1. **Phase 3 closed 10-28:**
+       - T3.5 D-SUN plus the Tier 3 run: full sim ×2, harness, full browser pass;
+       - two monitor fixes (azimuth-axis velocity; arrival needs a settled mount);
+       - tests decoupled from the real Sun.
+       - The user commits T3.5 + the phase close together.
+    2. **Next: Phase 4 (Tracking).** Phase 3 committed `3e4f4c5`. T4.1 spec written 10-28 (BUILD_PLAN §6; Q13–Q16: gateway fetches the TLE by NORAD via `PW_ANALYSIS_URL`, Sun-disc rule kept, ≥ 30 s left above Lim EL, stale TLEs trackable). T4.1 verified + user-checked 10-28. T4.2: probe done (P22), spec written (Q17 own path, Q18 zenith note); T4.2b planner verified; next brief T4.2c (wiring). Keep the user 8400 gateway stopped during sim work.
+    - `PWI4.cfg` baseline is now `4406df60…e2683a2` (the user's site change).
+    - The PWI4 sim site is lat 0.12 / lon 115.92 (user, 10-28).
+    - Never run the tests while the user's 8400 gateway is up: its monitor acts on the same sim.
+  - **Working method:** BUILD_PLAN §1 "Test tiers" (user-approved 10-27). Sub-tasks test only the changed areas; the full sim suite only at phase end; timeboxed briefs with progress notes.
+  - The PWI4 cfg + app settings changes of 10-22 07:00–07:25 were the user's (moved the test Sun away from the home position); keep them.
+  - **Real-mount checklist:** in BUILD_PLAN §7 under the resume point.
   - **The resume point is in BUILD_PLAN §7.**
 - **User decisions (10-21) for Phase 3:**
   - PWI4 site for safety maths + refuse motion on site mismatch;
@@ -31,7 +99,10 @@ Read this first, then `docs/BUILD_PLAN.md` (§7 tracker + **resume point**, §6 
   - audit kept 90 days;
   - stale-TLE badge → T4.3.
 - **Satellite DB:** `POSTGRESQL_DSN` in the repo-root `.env` (git-ignored). **Never read or print `.env`.** Gate scripts use `analysis.db.make_engine()` (read-only session) and print counts only.
-- **PWI4 is in Simulator mode** (sim_guard OK on 10-21). The sim was left **disconnected**. `PWI4.cfg` SHA-256 `B714321830FB166AC4DB38BEE51CB7AC18560A63E6C1782AAA9F09F15A1A42F0`; check it is unchanged after every sim session.
+- **PWI4 is in Simulator mode** (sim_guard OK on 10-22). The sim was left **disconnected**.
+  - `PWI4.cfg` baseline SHA-256 is now `40A4C3F4BF1168E7A7D5EFE6A8782FD2462A0B80F369A5A425C162A9D6A5578C` (10-22 07:25Z; earlier 4D752D34…).
+  - **PWI4 rewrites its own cfg files when used by hand** (GUI changes / restarts), so the hash only proves no-writes for unattended sim runs.
+  - The real guarantees are the `Pwi4Writer` endpoint whitelist test + the audit log.
 
 ## Gotchas learned this phase
 
@@ -49,6 +120,12 @@ Read this first, then `docs/BUILD_PLAN.md` (§7 tracker + **resume point**, §6 
 - Sim/WS test clients: never block the event loop (wrap REST calls in `asyncio.to_thread`) and use `max_queue=None`. Otherwise the client stops answering pings and the gateway (correctly) drops it as link loss.
 - PWI4 `goto_alt_az` keeps tracking on (P15); `mount/stop` ends tracking, but its own HTTP response still says tracking (stale).
 - Sim tests that keep clear of the REAL Sun depend on the time of day and the sim's start pose: use the "never closer than the start, end ≥ 35° clear" rule (`safe_target`). The Phase-1 test can leave the sim near the morning Sun.
+- Worker browser runs: start Nuxt with `NUXT_ANALYSIS_URL` pointing at a closed port unless the analysis service is needed. The default `/api` proxy hits the user's analysis service on 8410.
+- Shell scripting: long inline `python - <<EOF` heredocs with backticks/quotes can break bash; write the script to the scratchpad with the Write tool and run it.
+- New gateway REST routes outside `/api/mount` need a `devProxy` entry in `web/nuxt.config.ts` (T3.4d: `/api/transform` went to the analysis service in dev).
+- Vue prop wiring is not covered by unit tests (T3.3: `home-dialog` vs `homed-dialog`), so always do the real-browser gate.
+- `PW_TEST_SUN_ALTAZ` pins the Sun for safety only; the snapshot/UI keep the real Sun.
+- **Test tiers (10-27):** sub-tasks run only the touched units + new/changed sim tests once; the full sim ×2 only at phase end (BUILD_PLAN §1).
 - Python on this Windows box can't see Git Bash `/tmp` — use the session scratchpad or repo-relative paths.
 
 ## What exists (repo map)
@@ -128,7 +205,7 @@ Gate expectations today: lint 0 errors (11 warnings, all generated `components/u
 | Offsets only move a **tracking** mount (P10) → jog/step while STOPPED needs another mechanism | T3.4 design |
 | Always `update_wrap=0`; manage axis0 wrap explicitly; `goto_alt_az` may unwind the long way (P8, P9) | T3.1/T3.4, D-SUN |
 | `follow_tle(name, line1, line2)` order (P5); acquisition 10–16 s (P6) | T4.2 |
-| HOMING detection + velocity fields unverifiable in the sim (P12) | Phase 3 real-mount session |
+| HOMING detection + velocity fields unverifiable in the sim (P12); real homing path via ≈ 60° alt region sensor; positions before the first home may be untrustworthy (P16) | Phase 3 real-mount session; T3.3 Q3 |
 | Harness metric `08_watchdog.explicit_stop_latency_s` mis-measured | opportunistic fix |
 | Fields commit on blur (legacy parity), not Enter; IOD rows need row-level Enter | T5.3 |
 

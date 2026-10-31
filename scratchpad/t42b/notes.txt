@@ -1,0 +1,4 @@
+T4.2b notes
+- design: trackplan.py pure; Sun-frame arcs follow Sun(t) (clearance exactly 16); integer-second grid; chunks 30 min; extend_track(); safety.sun_altaz_at added.
+- trackplan.py, trackcheck/app wired; next: tests (tlegen consts added)
+- trackplan tests pass; next: check-endpoint tests (detour/notes/t_r), full suite, ruff

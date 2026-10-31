@@ -65,6 +65,8 @@ ROWS = [
 
 
 STALE_NORADS = {44444}
+# country_code per norad (default "TST"); None = NULL. The decayed 11111 must not be counted.
+COUNTRY = {43013: "PRC", 41001: "US", 22222: "US", 44444: "US", 11111: "PRC", 33333: None}
 
 
 def tle_of(norad: int) -> tuple[str, str]:
@@ -94,7 +96,7 @@ def build_sqlite(path: str, extra_leo: int = 0) -> None:
             c.execute(
                 ins,
                 dict(
-                    n=norad, cs=f"2020-001{chr(65 + norad % 20)}", nm=name, ot=ot, co="TST",
+                    n=norad, cs=f"2020-001{chr(65 + norad % 20)}", nm=name, ot=ot, co=COUNTRY.get(norad, "TST"),
                     l1=l1, l2=l2, ep=stale if norad in STALE_NORADS else fresh, oc=oc, act=active,
                     dec="2026-09-01 00:00:00" if decayed else None,
                 ),

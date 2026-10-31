@@ -73,7 +73,8 @@ def pwi():
     after = (Path(cfg).stat().st_mtime, hashlib.sha256(Path(cfg).read_bytes()).hexdigest())
     RESULTS["cfg_before"], RESULTS["cfg_after"] = before, after
     print("\nPWI4SIM RESULTS:", json.dumps(RESULTS, indent=1, default=str))
-    assert before == after, "PWI4.cfg changed!"
+    # Content only: PWI4 re-saves its own cfg (same bytes, new mtime) on a disconnect (T4.2d).
+    assert before[1] == after[1], "PWI4.cfg changed!"
 
 
 class Sampler:
@@ -253,6 +254,7 @@ class Client:
         self.token = token
         self.state = "?"
         self.holder = "?"
+        self.homed: dict | None = None  # T3.3: the snapshot's `homed` field
         self.state_log: list[tuple[float, str]] = []
         self.acks: dict[str, dict] = {}
         self._ack_events: dict[str, asyncio.Event] = {}
@@ -260,17 +262,28 @@ class Client:
         self._n = 0
 
     @classmethod
-    async def open(cls, token: str) -> Client:
+    async def open(cls, token: str, override_homed: bool = True) -> Client:
+        """override_homed: a mount the gateway finds already connected is `not_homed` (T3.3,
+        Q4); the motion tests clear that with the real `homed_override` command (then release
+        the lock again so the lock-state assertions of the older tests still hold)."""
         from websockets.asyncio.client import connect
 
         url = f"ws://127.0.0.1:{PORT}/api/mount/ws"
-        ws = await connect(url, origin=ORIGIN, ping_interval=None)
+        ws = await connect(url, origin=ORIGIN, ping_interval=None, max_queue=None)
         await ws.send(json.dumps({"type": "auth", "token": token}))
         c = cls(ws, token)
         for _ in range(100):
             if c.state != "?":
                 break
             await asyncio.sleep(0.05)
+        if override_homed and c.homed and c.homed["state"] == "not_homed":
+            ack = await c.cmd("homed_override")
+            # (a window that opens right after another one may be shown a stale not_homed)
+            stale = ack.get("reason") == "Mount is not in the not-homed state"
+            assert ack["ok"] or stale, ack.get("reason")
+            if ack["ok"]:
+                ack = await c.cmd("release_control")
+                assert ack["ok"], ack.get("reason")
         return c
 
     async def _read(self) -> None:
@@ -280,6 +293,7 @@ class Client:
                 if msg["type"] == "status":
                     st = msg["data"]["state"]
                     self.holder = msg["data"].get("control", {}).get("holder", "?")
+                    self.homed = msg["data"].get("homed")
                     if st != self.state:
                         self.state_log.append((time.monotonic(), st))
                     self.state = st

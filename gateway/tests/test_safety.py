@@ -14,6 +14,7 @@ import pytest
 
 from gateway.safety import (
     AxisParams,
+    SafetyMonitor,
     ValidatedGoto,
     axis0_target,
     corridor_distance,
@@ -194,11 +195,18 @@ def test_i4_target_inside_sun_disc(monkeypatch):
     )  # fmt: skip
 
 
-def test_i4_path_crossing_sun(monkeypatch):
-    # target 30 deg from the Sun, but the slew passes straight through it
+def test_i4_path_crossing_sun_without_detour(monkeypatch):
+    # T3.5c: a crossing path is detoured; here the Sun sits where neither side is usable
+    # (Lim EL below, a 40 deg axis-1 limit above), so it stays a refusal, with no PWI4 write
+    fake = FakePwi4()
+    fake.set(
+        mount__altitude_degs=30.0, mount__axis1__position_degs=30.0,
+        mount__axis1__max_mech_position_degs=40.0, mount__azimuth_degs=130.0,
+        mount__axis0__position_degs=130.0,
+    )  # fmt: skip
     forged(
-        "goto_altaz", {"alt": 45, "az": 180}, sun="45,150",
-        reason="Slew path passes within 15° of the Sun", mp=monkeypatch,
+        "goto_altaz", {"alt": 30, "az": 230}, sun="30,180", fake=fake,
+        reason="Slew path passes within 15° of the Sun; no safe detour", mp=monkeypatch,
     )  # fmt: skip
 
 
@@ -556,7 +564,7 @@ def _goto_scenario(monkeypatch, tmp_path, target_alt, *, wrong=None, validated=T
 @pytest.mark.parametrize("margin", [0.5, 0.1])
 def test_monitor_lets_validated_goto_reach_lim_el_plus_margin(monkeypatch, tmp_path, margin):
     stopped, stops, log, audit = _goto_scenario(monkeypatch, tmp_path, 15.0 + margin)
-    assert not stopped and stops == 0
+    assert not stopped and stops == 0, [e for e in audit if e["event"] == "limit_stop"]
     assert abs(log[-1][1] - (15.0 + margin)) < 0.05
     assert not [e for e in audit if e["event"] == "limit_stop"]
 
@@ -583,3 +591,37 @@ def test_plan_ends_on_stop_and_unvalidated_rules_resume(monkeypatch, tmp_path):
         assert w.send("tracking", {"on": True}, "t")["ok"]
         assert app.state.monitor.plan is None
         w.close()
+
+
+def test_monitor_velocity_uses_the_azimuth_axis_not_the_flipping_azimuth():
+    """Phase 3 end: when axis 1 passes the zenith the REPORTED azimuth flips by 180 deg while the
+    azimuth axis barely moves. The monitor's v_az (and so its speed-dependent look-ahead) must
+    follow the axis, or a descent from alt 87 is predicted below Lim EL."""
+    mon = SafetyMonitor(None, None, None)  # type: ignore[arg-type]  # velocity() needs no I/O
+    mon._hist.append((0.0, 89.5, 10.0, 10.0, 0.0))
+    mon._hist.append((0.3, 87.7, 190.0, 10.3, 0.0))  # reported az flipped, axis 0 +0.3 deg
+    v_alt, v_az = mon.velocity()
+    assert abs(v_az - 1.0) < 1e-9 and abs(v_alt + 6.0) < 1e-9
+    assert monitor_decision(87.7, 190.0, v_alt, v_az, 15.0, None) is None
+    # no axis-0 position reported: the wrapped azimuth difference (previous behaviour)
+    mon._hist.clear()
+    mon._hist.append((0.0, 45.0, 359.0, math.nan, 0.0))
+    mon._hist.append((0.5, 45.0, 1.0, math.nan, 0.0))
+    assert abs(mon.velocity()[1] - 4.0) < 1e-9
+
+
+def test_track_corridor_is_measured_on_the_sky_near_the_zenith():
+    """Q19 (T4.2d): an object track's corridor scales axis-0 offsets by cos(alt). At alt 87 a
+    10 deg axis-0 lag is ~0.5 deg on the sky (inside 2 deg); in axis space it is 10 deg."""
+    path = [[(0.0, 87.0), (60.0, 87.0)]]
+    lag = (-10.0, 87.0)  # behind the start of the azimuth sweep
+    assert corridor_distance(lag, path) == pytest.approx(10.0)
+    assert corridor_distance(lag, path, sky=True) == pytest.approx(
+        10.0 * math.cos(math.radians(87))
+    )
+    # low altitude: the sky metric stays close to the axis metric (no blanket relaxation)
+    low = [[(0.0, 30.0), (60.0, 30.0)]]
+    assert corridor_distance((-3.0, 30.0), low, sky=True) == pytest.approx(
+        3.0 * math.cos(math.radians(30))
+    )
+    assert corridor_distance((10.0, 33.0), low, sky=True) == pytest.approx(3.0)

@@ -1,0 +1,20 @@
+[10:05:54.973] prepositioned: alt 29.999 ax0 100.000 (wanted alt 30.000 ax0 100.000) wrap -80.0 settled=True
+[10:05:55.022] s5_points_600: N=600 add 29 ms (resp 55604 chars, tail ".9211100498,100.0,39.96661101836394\n2461341.9211104363,100.0,39.983305509181974\n2461341.9211108228,100.0,40.0'\r\nQuery:\r\n"), apply 16 ms; first point in 9.0 s
+[10:06:30.090] saved s5_points_600.json (351 rows)
+[10:06:30.101] {"tag": "s5_points_600", "n": 600, "alt_at_t0": 30.0290760631896, "alt_at_end": 39.9996471360036, "alt_max": 39.9999992182208, "alt_last": 39.9999992182208, "trk_at_end_of_path": true, "add_ms": 28.502702713012695, "resp_len": 55604, "notes": {}}
+[10:06:36.318] prepositioned: alt 30.000 ax0 100.000 (wanted alt 30.000 ax0 100.000) wrap -80.0 settled=True
+[10:06:36.410] s5_points_2400: N=2400 add 48 ms (resp 222230 chars, tail "1.9215891496,100.0,39.99166319299708\n2461341.9215892460,100.0,39.99583159649854\n2461341.9215893429,100.0,40.0'\r\nQuery:\r\n"), apply 28 ms; first point in 8.9 s
+[10:07:11.437] saved s5_points_2400.json (351 rows)
+[10:07:11.448] {"tag": "s5_points_2400", "n": 2400, "alt_at_t0": 30.0289191568002, "alt_at_end": 39.9996489150867, "alt_max": 39.9999992580717, "alt_last": 39.9999992580717, "trk_at_end_of_path": true, "add_ms": 47.72758483886719, "resp_len": 222230, "notes": {}}
+[10:07:17.632] prepositioned: alt 30.000 ax0 100.000 (wanted alt 30.000 ax0 100.000) wrap -80.0 settled=True
+[10:07:17.804] s5_points_10000: N=10000 add 110 ms (resp 925904 chars, tail "2461341.9220674722,100.0,39.99799979998\n2461341.9220674955,100.0,39.99899989999\n2461341.9220675183,100.0,40.0'\r\nQuery:\r\n"), apply 29 ms; first point in 8.8 s
+[10:07:52.750] saved s5_points_10000.json (351 rows)
+[10:07:52.762] {"tag": "s5_points_10000", "n": 10000, "alt_at_t0": 30.0276466703756, "alt_at_end": 39.9996371555521, "alt_max": 39.999999286971, "alt_last": 39.999999286971, "trk_at_end_of_path": true, "add_ms": 110.07380485534668, "resp_len": 925904, "notes": {}}
+[10:07:58.989] prepositioned: alt 30.000 ax0 100.000 (wanted alt 30.000 ax0 100.000) wrap -80.0 settled=True
+[10:07:59.050] s5_append_addonly: N=200 add 17 ms (resp 18570 chars, tail ".9225438540,100.0,39.89949748743719\n2461341.9225450172,100.0,39.949748743718594\n2461341.9225461804,100.0,40.0'\r\nQuery:\r\n"), apply 30 ms; first point in 8.9 s
+[10:08:54.112] saved s5_append_addonly.json (551 rows)
+[10:08:54.125] {"tag": "s5_append_addonly", "n": 200, "alt_at_t0": 30.0275376967736, "alt_at_end": 39.9996530007342, "alt_max": 40.0000000514626, "alt_last": 40.0000000514626, "trk_at_end_of_path": true, "add_ms": 16.820192337036133, "resp_len": 18570, "notes": {"add_at": 8.049633264541626}}
+[10:09:00.351] prepositioned: alt 30.000 ax0 100.000 (wanted alt 30.000 ax0 100.000) wrap -80.0 settled=True
+[10:09:00.416] s5_append_addapply: N=200 add 30 ms (resp 18570 chars, tail ".9232540638,100.0,39.89949748743719\n2461341.9232552270,100.0,39.949748743718594\n2461341.9232563903,100.0,40.0'\r\nQuery:\r\n"), apply 32 ms; first point in 8.9 s
+[10:09:55.476] saved s5_append_addapply.json (551 rows)
+[10:09:55.488] {"tag": "s5_append_addapply", "n": 200, "alt_at_t0": 30.0296440100065, "alt_at_end": 40.9570642624243, "alt_max": 49.9999990720185, "alt_last": 49.9999990720185, "trk_at_end_of_path": true, "add_ms": 29.60991859436035, "resp_len": 18570, "notes": {"add_apply_at": 8.0091872215271}}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Callable
@@ -8,14 +9,18 @@ from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query, Response
 from pydantic import BaseModel, Field
+from skyfield.api import EarthSatellite, wgs84
 
-from .catalog import LAYERS, default_source
+from . import state as state_mod
+from .catalog import LAYERS, ORBIT_GROUPS, default_source
 from .chunks import MAX_DURATION_S, STEP_S, Site
 from .db import CatalogUnavailable
+from .passes import MAX_WINDOW_S, compute_passes
 from .service import Service, Unavailable
-from .state import compute_state
+from .state import compute_state, warm
 
 VERSION = "0.1.0"
+PASSES_TIMEOUT_S = 20.0
 log = logging.getLogger("analysis")
 
 
@@ -32,10 +37,44 @@ class ChunkIn(BaseModel):
     duration_s: float = Field(default=1800, gt=0, le=MAX_DURATION_S)
 
 
+class PassesIn(BaseModel):
+    norad: int
+    site: SiteIn
+    lim_el: float = Field(ge=-90, le=90)
+    start_unix: float
+    end_unix: float
+    mode: Literal["optical", "los"]
+    sun_alt_max: float = Field(default=0.0, ge=-90, le=90)  # test-only; the web never sends it
+
+
 class StateIn(BaseModel):
     norad: int
     site: SiteIn
     t_unix: float | None = None
+
+
+def _run_passes(row: dict, body: PassesIn) -> dict:
+    warm()
+    sat = EarthSatellite(row["tle_line1"], row["tle_line2"], row["name"] or "", state_mod._ts)
+    topos = wgs84.latlon(body.site.lat, body.site.lon, body.site.alt_m)
+    rows = compute_passes(
+        sat,
+        topos,
+        state_mod._ts,
+        state_mod._eph,
+        body.lim_el,
+        body.start_unix,
+        body.end_unix,
+        body.mode,
+        body.sun_alt_max,
+    )
+    return {
+        "name": row["name"],
+        "norad": row["norad"],
+        "tle_epoch": row["tle_epoch"],
+        "tle_age_days": row["tle_age_days"],
+        "passes": rows,
+    }
 
 
 def create_app(factory: Callable = default_source) -> FastAPI:
@@ -88,9 +127,22 @@ def create_app(factory: Callable = default_source) -> FastAPI:
         q: str | None = None,
         orbit_class: str | None = None,
         object_type: str | None = None,
+        country: str | None = None,
+        orbit_group: str | None = None,
         limit: int = Query(500, ge=1, le=500),
     ) -> list[dict]:
-        return db_call(lambda: service.get_source().search(q, orbit_class, object_type, limit))
+        if orbit_group is not None and orbit_group.lower() not in ORBIT_GROUPS:
+            raise HTTPException(422, "orbit_group must be one of leo, meo, geo")
+        return db_call(
+            lambda: service.get_source().search(
+                q, orbit_class, object_type, limit, country=country, orbit_group=orbit_group
+            )
+        )
+
+    # declared before /api/sats/{norad} so the int path does not capture it
+    @app.get("/api/sats/countries")
+    def sats_countries() -> list[dict]:
+        return db_call(lambda: service.countries(lambda: service.get_source().countries()))
 
     @app.get("/api/sats/{norad}")
     def sats_get(norad: int) -> dict:
@@ -106,6 +158,27 @@ def create_app(factory: Callable = default_source) -> FastAPI:
             raise HTTPException(404, "not found or decayed")
         t = body.t_unix if body.t_unix is not None else time.time()
         return compute_state(row, body.site.lat, body.site.lon, body.site.alt_m, t)
+
+    @app.post("/api/passes")
+    async def passes(body: PassesIn) -> dict:
+        if body.end_unix <= body.start_unix:
+            raise HTTPException(422, "End must be after Start")
+        if body.end_unix - body.start_unix > MAX_WINDOW_S:
+            raise HTTPException(422, "Window longer than 7 days")
+        row = await asyncio.to_thread(
+            lambda: service.tle_row(
+                body.norad, lambda n: db_call(lambda: service.get_source().get(n))
+            )
+        )
+        if row is None:
+            raise HTTPException(404, "not found or decayed")
+        try:
+            out = await asyncio.wait_for(
+                asyncio.to_thread(_run_passes, row, body), timeout=PASSES_TIMEOUT_S
+            )
+        except TimeoutError:
+            raise HTTPException(503, "Pass computation timed out") from None
+        return out
 
     @app.post("/api/sky/chunk")
     async def sky_chunk(body: ChunkIn) -> Response:

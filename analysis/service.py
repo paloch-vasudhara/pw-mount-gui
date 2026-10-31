@@ -91,6 +91,7 @@ class Service:
         self.child_ready = False
         self.metrics: dict[str, float | int | str] = {}
         self._rows: dict[int, tuple[float, dict | None]] = {}
+        self._countries: list[dict] | None = None
 
     # ---- lifecycle
     async def start(self) -> None:
@@ -154,6 +155,7 @@ class Service:
             self.child_ready = True
             self.cache.clear()
             self._rows.clear()
+            self._countries = None  # recomputed lazily from the reloaded catalogue
             self.metrics = {
                 "load_total_s": round(time.perf_counter() - t, 3),
                 "child_load_s": round(child["load_s"], 3),
@@ -191,6 +193,13 @@ class Service:
             self._rows.clear()
         self._rows[norad] = (now, row)
         return row
+
+    def countries(self, fetch: Callable[[], list[dict]]) -> list[dict]:
+        """Country list cached with the catalogue (cleared on every reload)."""
+        cached = self._countries
+        if cached is None:
+            cached = self._countries = fetch()
+        return cached
 
     # ---- chunks
     async def chunk(self, layer: str, site: Site, t0_unix: float, duration_s: float) -> bytes:

@@ -70,16 +70,29 @@ class FakePwi4:
         self.paths: list[str] = []
         # Write-path model (T3.1a): every request with its query, and a tiny mount state machine.
         self.calls: list[tuple[str, dict[str, str]]] = []
+        self.bodies: list[tuple[str, str]] = []  # (path, form body) of every POST (T3.5c)
         self.stop_ends_tracking = False  # model PWI4 variant where mount/stop also ends tracking
         self.write_delay = 0.0  # seconds a /mount/* write hangs before answering
         self.fail_writes: set[str] = set()  # paths answered with HTTP 500
+        # T3.2 connection model: mount/connect, enable, disable, disconnect, find_home.
+        self.connect_noop = False  # mount/connect answers 200 but the mount never connects
+        self.home_script: list[
+            tuple[float, dict[str, object]]
+        ] = []  # (delay, status) after find_home
+        self._tasks: list[asyncio.Task] = []
 
     @property
     def writes(self) -> list[tuple[str, dict[str, str]]]:
         return [c for c in self.calls if c[0] != "/status"]
 
-    def _apply_write(self, path: str) -> None:
+    async def _play(self, script: list[tuple[float, dict[str, object]]]) -> None:
+        for delay, over in script:
+            await asyncio.sleep(delay)
+            self.set(**over)
+
+    def _apply_write(self, path: str, params: dict[str, str] | None = None) -> None:
         over: dict[str, object] = {}
+        params = params or {}
         if path == "/mount/stop":
             over["mount.is_slewing"] = False
             if self.stop_ends_tracking:
@@ -90,6 +103,17 @@ class FakePwi4:
             over["mount.is_tracking"] = True
         elif path.startswith("/mount/goto_"):
             over["mount.is_slewing"] = True
+        elif path == "/mount/custom_path/apply":
+            over["mount.is_tracking"] = True  # P21: a custom path reports tracking
+        elif path == "/mount/connect":
+            if not self.connect_noop:
+                over["mount.is_connected"] = True
+        elif path == "/mount/disconnect":
+            over["mount.is_connected"] = False
+        elif path in ("/mount/enable", "/mount/disable"):
+            over[f"mount.axis{params.get('axis', '0')}.is_enabled"] = path.endswith("enable")
+        elif path == "/mount/find_home" and self.home_script:
+            self._tasks.append(asyncio.get_running_loop().create_task(self._play(self.home_script)))
         if over:
             self.set(**{k.replace(".", "__"): v for k, v in over.items()})
 
@@ -103,12 +127,14 @@ class FakePwi4:
     async def handler(self, request: httpx.Request) -> httpx.Response:
         self.paths.append(request.method + " " + request.url.path)
         self.calls.append((request.url.path, dict(request.url.params)))
+        if request.method == "POST":
+            self.bodies.append((request.url.path, request.content.decode()))
         if request.url.path.startswith("/mount/") and not self.down:
             if self.write_delay:
                 await asyncio.sleep(self.write_delay)
             if request.url.path in self.fail_writes:
                 return httpx.Response(500, text="boom")
-            self._apply_write(request.url.path)
+            self._apply_write(request.url.path, dict(request.url.params))
         if self.connect_timeout_after is not None:
             await asyncio.sleep(self.connect_timeout_after)
             raise httpx.ConnectTimeout("timed out")
@@ -121,6 +147,15 @@ class FakePwi4:
     @property
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handler)
+
+
+@pytest.fixture(autouse=True)
+def _clean_state_override():
+    from gateway import state
+
+    state.clear_override()
+    yield
+    state.clear_override()
 
 
 @pytest.fixture(autouse=True)
