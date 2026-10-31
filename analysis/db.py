@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from sqlalchemy import Engine, create_engine
+from sqlalchemy import Engine, create_engine, make_url
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DSN_VAR = "POSTGRESQL_DSN"
@@ -26,8 +26,12 @@ def make_engine() -> Engine:
     if not dsn:
         raise CatalogUnavailable("satellite database is not configured")
     # Never include `dsn` (or exceptions that may embed it) in messages.
+    url = make_url(dsn)
+    if url.drivername == "postgresql":
+        # SQLAlchemy 2.1 maps a bare postgresql:// to psycopg 3; we ship psycopg2-binary.
+        url = url.set(drivername="postgresql+psycopg2")
     engine = create_engine(
-        dsn,
+        url,
         pool_pre_ping=True,
         pool_size=2,
         max_overflow=0,
