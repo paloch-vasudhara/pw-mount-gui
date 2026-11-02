@@ -6,7 +6,7 @@ export type AngleFmt = 'dd' | 'dms'
 export interface StationSettingsDto {
   version: number
   location: { lat_deg: number, lon_deg: number, alt_m: number, timezone: string | null }
-  hardware: { mount: string, ota: string, lim_el_deg: number }
+  hardware: { mount: string, ota: string, lim_el_deg: number, camera_pixel_um?: number | null }
   providers: { astrometry: string, satellite_db: string }
   display: { lat_format: AngleFmt, lon_format: AngleFmt, alt_unit: AltUnit }
 }
@@ -28,6 +28,8 @@ export interface SettingsForm {
   altM: number | null
   timezone: string
   limEl: number | null
+  /** Camera pixel size (um); null = unknown (T5.2: the astrometry scale hint). */
+  cameraPixelUm: number | null
   latFormat: AngleFmt
   lonFormat: AngleFmt
   altUnit: AltUnit
@@ -41,10 +43,12 @@ export interface SettingsForm {
   clearKey: boolean
 }
 
-export type FieldErrors = Partial<Record<'lat' | 'lon' | 'alt' | 'timezone' | 'limEl', string>>
+export type FieldErrors = Partial<Record<'lat' | 'lon' | 'alt' | 'timezone' | 'limEl' | 'cameraPixelUm', string>>
 
 export const LIM_EL_MIN = 0
 export const LIM_EL_MAX = 90
+export const PIXEL_UM_MIN = 0.5
+export const PIXEL_UM_MAX = 30
 export const ALT_MIN_M = -500
 export const ALT_MAX_M = 9000
 
@@ -55,6 +59,7 @@ export function formFromDto(d: StationSettingsDto): SettingsForm {
     altM: d.location.alt_m,
     timezone: d.location.timezone ?? '',
     limEl: d.hardware.lim_el_deg,
+    cameraPixelUm: d.hardware.camera_pixel_um ?? null,
     latFormat: d.display.lat_format,
     lonFormat: d.display.lon_format,
     altUnit: d.display.alt_unit,
@@ -78,6 +83,7 @@ export function validateForm(f: SettingsForm, zones: readonly string[]): FieldEr
   if (!inRange(f.altM, ALT_MIN_M, ALT_MAX_M)) e.alt = 'Altitude must be between -500 and 9000 m'
   if (!f.timezone || !zones.includes(f.timezone)) e.timezone = 'Choose a time zone from the list'
   if (!inRange(f.limEl, LIM_EL_MIN, LIM_EL_MAX)) e.limEl = 'Lim EL must be between 0 and 90'
+  if (f.cameraPixelUm != null && !inRange(f.cameraPixelUm, PIXEL_UM_MIN, PIXEL_UM_MAX)) e.cameraPixelUm = 'Camera pixel size must be between 0.5 and 30 µm'
   return e
 }
 
@@ -86,7 +92,7 @@ export function buildPayload(f: SettingsForm): Record<string, unknown> {
   const body: Record<string, unknown> = {
     version: 1,
     location: { lat_deg: f.lat, lon_deg: f.lon, alt_m: f.altM, timezone: f.timezone },
-    hardware: { mount: f.mount, ota: f.ota, lim_el_deg: f.limEl },
+    hardware: { mount: f.mount, ota: f.ota, lim_el_deg: f.limEl, camera_pixel_um: f.cameraPixelUm },
     providers: { astrometry: f.astrometry, satellite_db: f.satelliteDb },
     display: { lat_format: f.latFormat, lon_format: f.lonFormat, alt_unit: f.altUnit },
   }
@@ -136,7 +142,7 @@ export function isDirty(f: SettingsForm, baseline: SettingsForm): boolean {
     a === b || (a != null && b != null && Math.abs(a - b) <= EPS)
   return !(
     num(f.lat, baseline.lat) && num(f.lon, baseline.lon) && num(f.altM, baseline.altM)
-    && num(f.limEl, baseline.limEl)
+    && num(f.limEl, baseline.limEl) && num(f.cameraPixelUm, baseline.cameraPixelUm)
     && f.timezone === baseline.timezone
     && f.latFormat === baseline.latFormat && f.lonFormat === baseline.lonFormat
     && f.altUnit === baseline.altUnit

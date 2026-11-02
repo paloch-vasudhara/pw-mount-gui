@@ -11,7 +11,7 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { GatewayError, useGatewayApi } from '@/composables/useGatewayApi'
 import {
-  buildPayload, buildSiteCheckBody, formFromDto, isDirty, LIM_EL_MAX, LIM_EL_MIN, pcTimeZone, siteWarning, timeZoneList, validateForm,
+  buildPayload, buildSiteCheckBody, formFromDto, isDirty, LIM_EL_MAX, LIM_EL_MIN, PIXEL_UM_MAX, PIXEL_UM_MIN, pcTimeZone, siteWarning, timeZoneList, validateForm,
   type SettingsForm, type SettingsResponse, type SiteCheckDto,
 } from '@/utils/station-settings'
 
@@ -257,6 +257,16 @@ const SATDB = [{ value: 'DELV Aerospace', label: 'DELV Aerospace' }]
             </div>
             <p v-if="errors.limEl" class="ss-err" data-testid="ss-limel-err">
               {{ errors.limEl }}
+            </p>
+            <div class="form-row">
+              <label class="ss-label" title="Camera pixel size">Pixel [ &micro;m]</label>
+              <NumberField
+                v-model="form.cameraPixelUm" data-testid="ss-pixel" :min="PIXEL_UM_MIN" :max="PIXEL_UM_MAX" :step="0.01"
+                fixed-width="90px" placeholder="unknown" :invalid="!!errors.cameraPixelUm"
+              />
+            </div>
+            <p v-if="errors.cameraPixelUm" class="ss-err" data-testid="ss-pixel-err">
+              {{ errors.cameraPixelUm }}
             </p>
           </fieldset>
 

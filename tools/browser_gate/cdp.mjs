@@ -42,6 +42,14 @@ for (const s of steps) {
     }
     await sleep(s.wait ?? 250);
   }
+  // { files: [selector, [absolute paths]] } -> set an <input type=file> (dispatches change)
+  if (s.files) {
+    const doc = await send('DOM.getDocument', { depth: -1, pierce: true });
+    const q = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: s.files[0] });
+    if (!q.result?.nodeId) console.log('NOT FOUND', s.files[0]);
+    else { await send('DOM.setFileInputFiles', { nodeId: q.result.nodeId, files: s.files[1] }); console.log('FILES', s.files[0]); }
+    await sleep(s.wait ?? 500);
+  }
   if (s.type) { for (const ch of s.type) { await send('Input.dispatchKeyEvent', { type: 'keyDown', key: ch, text: ch, unmodifiedText: ch }); await send('Input.dispatchKeyEvent', { type: 'keyUp', key: ch }); await sleep(40); } await sleep(s.wait ?? 250); }
   if (s.keys) { for (const [key, code, vk] of s.keys) { await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk }); await send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk }); await sleep(80); } await sleep(s.wait ?? 250); }
   if (s.shot) { const r = await send('Page.captureScreenshot', { format: 'png' }); fs.writeFileSync(`${outDir}/${s.shot}.png`, Buffer.from(r.result.data, 'base64')); console.log('SHOT', s.shot); }

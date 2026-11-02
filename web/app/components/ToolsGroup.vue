@@ -1,11 +1,18 @@
 <script setup lang="ts">
-// Tools group (A2b). Satellite Path Analysis (T5.1c) is live; Initial Orbit Determination stays disabled.
-import { ref } from 'vue'
+// Tools group (A2b). Satellite Path Analysis (T5.1c) is live; Initial Orbit Determination (T5.3b) opens the IOD modal.
+import { ref, watch } from 'vue'
+import IodDialog from '@/components/analysis/IodDialog.vue'
 import PassAnalysisDialog from '@/components/analysis/PassAnalysisDialog.vue'
 import StationSettingsDialog from '@/components/settings/StationSettingsDialog.vue'
+import { useAstrometryJobStore } from '~/stores/astrometry-job'
 
 const settingsOpen = ref(false)
 const passesOpen = ref(false)
+const iodOpen = ref(false)
+
+// the astrometry job pill asks for IOD (T5.2d)
+const astro = useAstrometryJobStore()
+watch(() => astro.openIodTick, () => { iodOpen.value = true })
 </script>
 
 <template>
@@ -14,7 +21,7 @@ const passesOpen = ref(false)
     <button type="button" class="tool-btn" data-testid="open-pass-analysis" @click="passesOpen = true">
       SATELLITE PATH ANALYSIS
     </button>
-    <button type="button" class="tool-btn" disabled>
+    <button type="button" class="tool-btn" data-testid="open-iod" @click="iodOpen = true">
       INITIAL ORBIT DETERMINATION
     </button>
     <button type="button" class="tool-btn" data-testid="open-station-settings" @click="settingsOpen = true">
@@ -22,6 +29,7 @@ const passesOpen = ref(false)
     </button>
     <StationSettingsDialog v-model:open="settingsOpen" />
     <PassAnalysisDialog v-model:open="passesOpen" />
+    <IodDialog v-model:open="iodOpen" />
   </fieldset>
 </template>
 

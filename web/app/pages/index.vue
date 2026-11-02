@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import AstrometryJobPill from '~/components/analysis/AstrometryJobPill.vue'
 import SectionFrame from '~/components/SectionFrame.vue'
 import ToolsGroup from '~/components/ToolsGroup.vue'
 import MountControlPanel from '~/components/mount/MountControlPanel.vue'
@@ -45,6 +46,7 @@ const filters = useFiltersStore()
           />
         </div>
         <SkyClock />
+        <AstrometryJobPill />
       </div>
     </SectionFrame>
     <div class="grid min-h-0 grid-rows-[minmax(0,1fr)_minmax(0,1fr)] gap-3">

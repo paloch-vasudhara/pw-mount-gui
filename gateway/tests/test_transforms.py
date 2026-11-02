@@ -16,7 +16,6 @@ defaults (loose: another model), (c) the exact round trip.
 from __future__ import annotations
 
 import math
-import time
 import warnings
 from datetime import UTC, datetime
 
@@ -302,23 +301,25 @@ def test_transform_result_matches_h4_and_round_trips():
         assert sep_arcsec(back["az"], back["alt"], 120.0, 45.0) < 0.1
 
 
-def test_transform_default_site_is_pwi4_site():
-    app, tc = _client()
-    with tc:
-        end = time.monotonic() + 5
-        while app.state.poller.pwi4_site() is None and time.monotonic() < end:
-            time.sleep(0.02)
+def test_transform_default_site_is_the_settings_location_even_with_pwi4_down(tmp_path):
+    # H4 serves the analysis tools (IOD): Settings location, no PWI4 needed (user 11-02)
+    from gateway.settings import Location
+
+    fake = FakePwi4()
+    fake.down = True
+    st = Settings(port=8400, token=TOKEN, settings_path=tmp_path / "s.json")
+    app = create_app(st, transport=fake.transport)
+    with TestClient(app, base_url="http://127.0.0.1:8400") as tc:
         body = {k: v for k, v in BODY.items() if k != "site"}
         r = tc.post("/api/transform", json=body, headers=H)
         assert r.status_code == 200, r.text
-        assert r.json()["site"] == {"lat": 14.3479, "lon": 100.5656, "height_m": 12.0}
-
-
-def test_transform_503_without_site():
-    app, tc = _client(down=True)
-    with tc:
-        body = {k: v for k, v in BODY.items() if k != "site"}
-        assert tc.post("/api/transform", json=body, headers=H).status_code == 503
+        loc = Location()
+        assert r.json()["site"] == {"lat": loc.lat_deg, "lon": loc.lon_deg, "height_m": loc.alt_m}
+        site = (loc.lat_deg, loc.lon_deg, loc.alt_m)
+        t = datetime(2026, 10, 22, 12, tzinfo=UTC)
+        res = r.json()["result"]
+        expect = app.state.ephem.altaz_radec_j2000(site, 45.0, 120.0, t)
+        assert (res["ra_h"], res["dec_deg"]) == expect
 
 
 def _with(**over):

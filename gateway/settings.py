@@ -131,6 +131,9 @@ class Hardware(BaseModel):
     # screen; edit settings.json by hand. Absent in older files -> defaults.
     home_alt_deg: float = Field(DEFAULT_HOME_ALT, ge=0, le=90)
     home_az_deg: float = Field(DEFAULT_HOME_AZ, ge=0, lt=360)
+    # T5.2b: camera pixel size for the astrometry scale hint (null = unknown -> blind unless the
+    # image carries XPIXSZ). The OTA focal length is fixed at RASA11 = 620 mm in the relay.
+    camera_pixel_um: float | None = Field(None, ge=0.5, le=30)
 
 
 class Providers(BaseModel):
@@ -266,8 +269,9 @@ class SettingsStore:
             clean = StationSettings.model_validate(new.model_dump())
             # The Settings screen does not carry the home pose: a PUT that omits it must keep the
             # (possibly hand-edited) stored values instead of resetting them to the defaults.
+            # camera_pixel_um is carried (null clears it) but an omitted field is kept as well.
             fs = new.hardware.model_fields_set
-            for name in ("home_alt_deg", "home_az_deg"):
+            for name in ("home_alt_deg", "home_az_deg", "camera_pixel_um"):
                 if name not in fs:
                     setattr(clean.hardware, name, getattr(self.current.hardware, name))
             if api_key is not None:

@@ -1605,6 +1605,229 @@ Notes:
 
 ---
 
+### T5.2 — Astrometry from Image lite (A2b-iv), wired into IOD rows (spec, 2026-10-30)
+
+**Goal:** IOD › (…) › Add Astrometry opens ASTROMETRY FROM IMAGE (`concept/Astrometry.png`):
+- load a frame;
+- epoch / exposure (autofilled from metadata);
+- DETECT STREAKS (the mount tracked the object: stars are streaks, the target is a point);
+- review / click-edit the detections;
+- RUN ASTROMETRY on astrometry.net (nova).
+
+The solved target RA/Dec at mid-exposure fills the IOD row. The job runs in the background with a pill.
+
+**Decisions:**
+- **Q29:** image work + the nova job in the **analysis** service; RUN goes through the **gateway**, which adds the API key server-to-server (the key never reaches the browser).
+- **Q30:** the scale hint from FITS `FOCALLEN` / `XPIXSZ`, else Settings (RASA11 620 mm + a new "Camera pixel size (µm)").
+- **Q31:** server-side jobs survive a refresh; one at a time; job pill; in memory (lost on an analysis restart).
+- **Q34:** the IOD state is recalled until a refresh; after a refresh a finished job is applied to a row from the pill.
+- **User 10-30:** the gateway is always up to use the tools.
+- **Reference (read / copy only, I1):**
+  - ssa-toolkit `photometry/` (engine, io, background, detect, streaks, select, solve, platesolve, pixel_coords, types);
+  - `data_api/routes/astrometry.py` + `astrometry_jobs.py` (`/measure`, `/run` nova path, the job registry, `_run_solve` object mode, the midpoint export);
+  - the legacy UI `frontend/src/tdm-tool.js` (detections edit table, focus-a-coordinate-then-click-the-image "specify", add / delete detection, the target lock, `ZoomPane` wheel-to-cursor zoom + pan, the bottom-corner job pill that persists and reattaches after a reload).
+  - Port only what this flow needs: no ASTAP, no sidereal mode, no TDM, no WCS cache.
+
+**1. Analysis (`analysis/astrometry/`, a package)**
+- **Port** from ssa-toolkit `photometry/`, object mode only:
+  - image loading (FITS / TIFF / JPG / PNG; the same accepted types: `.fits .fit .tif .tiff .jpg .jpeg .png`) with metadata: `DATE-OBS` epoch (exposure start), `EXPTIME` / `EXPOSURE`, `FOCALLEN`, `XPIXSZ`;
+  - the background + detection + streak classification + role assignment (`DetectionEngine`, `measure_at` click-snap);
+  - the nova client + the object-mode solve (the star-streak midpoints as a synthetic point field → WCS) + pixel → RA/Dec mapping of the target.
+  - Keep module boundaries close to the source so later fixes port easily; attribute the origin in each module docstring.
+- **New deps** (`analysis/requirements.txt` + the venv): `photutils`, `scipy`, `scikit-image`, `tifffile`, `pillow`, `requests` (astropy is already present). Pin to the versions ssa-toolkit uses where they install on Python 3.12.
+- **Image sessions:** an uploaded frame is kept in memory under an `image_id` (max 3 frames, 30 min idle TTL), so click-snap and RUN don't re-upload. Temp files are deleted.
+- **Endpoints (analysis):**
+  - `POST /api/astrometry/image` (multipart `file`) → `{image_id, preview{png_b64, width, height, scale}, meta{format, bit_depth, dims, epoch_iso|null, exposure_s|null, focal_mm|null, pixel_um|null, warnings[]}}`. No detection yet: the frame shows first.
+  - `POST /api/astrometry/detect {image_id}` → `{detections[], n_streaks, target|null, warnings[]}`. A detection = `{id, role: "star"|"target", shape: "streak"|"point", x, y, xs, ys, xe, ye, brt 1–5}`.
+  - `POST /api/astrometry/snap {image_id, x, y, role}` → one refined detection (`measure_at`).
+  - `POST /api/astrometry/run` — **called only by the gateway** (rejects a request without `apikey`):
+    - body `{image_id, detections[] (edited), epoch_iso, exposure_s, focal_mm, pixel_um, apikey}` → 202 `{job_id, state}`;
+    - 409 when a job is active.
+  - `GET /api/astrometry/job/{id}` and `GET /api/astrometry/job` (the active or latest job, for reattach) → `{job_id, state: uploading|queued|solving|mapping|done|failed|cancelled|timeout, stage_text, started, result?: {ra_deg, dec_deg, epoch_mid_iso, epoch_mid_unix, residual_arcsec, scale_arcsec_px, n_stars_used}, error?: readable}`. Never the key.
+  - `POST /api/astrometry/job/{id}/cancel`.
+- **Rules:**
+  - RUN needs ≥ 10 streaks + a target (422 otherwise);
+  - the epoch is required;
+  - mid-exposure = epoch + exposure / 2 (exposure missing → the epoch itself, with a warning in the result);
+  - the scale check vs the hint, as ssa does (a wrong-scale solve → failed, "Solved scale does not match the camera").
+  - The nova solve timeout is 300 s.
+  - Readable errors only: "astrometry.net could not solve this frame", "astrometry.net unreachable", "Invalid astrometry.net API key", "Solve timed out".
+- **Tests:**
+  - port the relevant ssa-toolkit `tests/photometry` cases;
+  - detection on `examples/data/astrometry/OW0021_20250404130130.tif`, read in place from ssa-toolkit (read-only; skip if absent): ≥ 10 streaks + a target;
+  - the metadata parse;
+  - the session TTL;
+  - the job state machine with a fake nova client (no network in tests);
+  - the run validation.
+
+**2. Gateway**
+- **Settings:** `camera_pixel_um: float | null` (Hardware group; 0.5–30 µm; default null) in the settings model + file.
+- **The relay:**
+  - `POST /api/mount/astrometry/run` (auth as the other mount routes) adds the key from the secret store and forwards the body to analysis `/api/astrometry/run` (`PW_ANALYSIS_URL`);
+  - returns the analysis answer;
+  - no key stored → 409 "Set the astrometry.net API key in Station Settings";
+  - analysis down → 503 "Analysis service unavailable";
+  - the key never appears in logs, the audit or responses.
+  - A focal / pixel hint missing from the body is filled from Settings (620 mm OTA + `camera_pixel_um`); still missing → a blind solve (no hint).
+- **Tests:** key injection (memory secret store + a fake analysis), the no-key 409, no key in any response or log line.
+
+**3. Web**
+- **IOD wiring:**
+  - Add Astrometry enabled (the T5.3 row states pending / failed / valid already exist);
+  - it opens ASTROMETRY FROM IMAGE for that row (the overwrite rules of T5.3 apply first);
+  - RUN → the row becomes "Astrometry pending" (job id kept in the row + the IOD memo);
+  - done → RA / Dec bright, Az / El by H4 at the mid-exposure epoch (dimmed), Source "Astrometry", epoch = mid-exposure;
+  - failed → "Astrometry failed" (replace / remove without a prompt).
+- **Astrometry modal (render):** left: Epoch (UTC, H1) + Exposure (s) above the Data Entries table; right: Image Preview with the toolbar.
+  - **Epoch / Exposure:** autofilled from the metadata, editable; empty → RUN disabled ("Enter the exposure start time").
+  - **Table:** T (target X / Y) then S1…Sn with S / E rows (X / Y) + BRT; scrolls.
+    - Focusing a coordinate arms "specify": the next click on the image sets that point (snapped by `/snap` for the target).
+    - "+ add streak" / ✕ remove a streak; the target row cannot be deleted, only re-specified.
+    - A selected row highlights its overlay.
+  - **Preview:** "select image" placeholder; a click opens the file prompt (the accepted types).
+    - Toolbar: the streak-overlay visibility toggle, − / zoom % / +, wheel-to-cursor zoom, drag-pan when zoomed (port `ZoomPane`).
+    - Overlay: streaks as lines with S / E, the target as a ring.
+  - **Buttons:**
+    - DETECT STREAKS: needs an image; replaces the table, with a confirm when it has edits;
+    - CLEAR: clears the image + table;
+    - RUN ASTROMETRY: green only with ≥ 10 streaks + a target + an epoch; the `title` gives the reason; → the gateway relay → a 202 closes the modal and the job pill appears; 409 / 503 show on a status line.
+- **Job pill:** a small bottom-corner pill on the dashboard (not inside a modal).
+  - Content: "Astrometry · <stage>" with a spinner; done → "Astrometry · solved — row N" (or "Apply to a row…" when the row is gone after a refresh: picks an IOD row and opens IOD); failed → the readable reason; × dismisses a finished job; "Cancel" while running.
+  - It polls `GET /api/astrometry/job/{id}` every 2.5 s while active.
+  - On page load: `GET /api/astrometry/job` reattaches an active / unclaimed finished job.
+- **Settings:** Hardware gains "Camera pixel size [ ] µm" (follow the T1.2 / T1.5 layout rules, A5 widths).
+- **vitest:**
+  - table / overlay model, specify, add / remove;
+  - RUN readiness;
+  - the pill states, reattach;
+  - the IOD row transitions;
+  - the settings field.
+
+**Must not touch:** `pwi4/`, ssa-toolkit (read / copy only; test images are read in place), `docs/`, PWI4 settings. No commits. Throwaway ports only. Tests never call the real astrometry.net (fakes); the supervisor's gate may run ONE real nova solve with the user's key only after asking the user.
+
+**Briefs:**
+
+| Brief | Kind | Scope | Timebox |
+|---|---|---|---|
+| **T5.2a** | analysis | the photometry port (io, detection, snap) + deps + image sessions + `/image` `/detect` `/snap` + tests | 90 min |
+| **T5.2b** after a | analysis + gateway | the nova client + object solve + mapping + the job registry + `/run` `/job` + the gateway relay + Settings `camera_pixel_um` (gateway) + tests | 90 min |
+| **T5.2c** ∥ b (contract above) | web | the Astrometry modal (preview / zoom / overlay / table / specify / detect) | 90 min |
+| **T5.2d** after b, c | web | RUN + the job pill + reattach + IOD wiring + the Settings field | 75 min |
+
+**Gate (Tier 2):**
+- Diff reviews; unit tests; detection on the OW0021 frames vs ssa-toolkit's own engine output for the same frames (`orekit310` env not needed: the photometry stack only; run ssa's engine in-process read-only, I1 checked) — the streak count and the target position within 1 px.
+- **Browser, 1920 + 1280×600 @1.5:** load → detect → edit → RUN (fake nova behind a test switch) → pill → the IOD row filled → refresh → reattach.
+- **One real end-to-end run (with the user's go-ahead, their key):** the three OW0021 frames → three rows → IOD → compare the orbit with OneWeb's real TLE (the user's planned pipeline test).
+
+---
+
+### T5.3 — Initial Orbit Determination lite (A2b-ii), built BEFORE T5.2 (spec, 2026-10-30)
+
+**Goal:** FILTERS › Tools › INITIAL ORBIT DETERMINATION opens the IOD modal (`concept/IOD.png`):
+- 3 angles-only observation rows (manual now; astrometry in T5.2);
+- INITIAL ORBIT DETERMINATION;
+- the P2 state vector and a coarse TLE.
+
+**User decisions (10-30):**
+- **Q28 order:** IOD (T5.3) is built first, then Astrometry (T5.2) plugs into a real IOD row.
+- **Q32 TLE:** SGP4-fitted. A few Newton iterations adjust the mean elements so SGP4 reproduces the P2 state at its epoch (start: the osculating elements).
+- **Q33 result use:** display + copy only (tracking an IOD orbit can come later as its own task).
+- **Q34 state:** recall until refresh, like Pass Analysis: close / reopen keeps the rows + results, a refresh clears them. (T5.2: a pending astrometry row keeps its job; after a refresh a finished job is applied from the job pill.)
+- **For T5.2, recorded now:**
+  - **Q29:** image work + the astrometry.net job in the analysis service; RUN goes through the gateway, which adds the API key server-to-server.
+  - **Q30:** the scale hint from FITS `FOCALLEN` / `XPIXSZ`, else a new Settings › Hardware "Camera pixel size (µm)" + RASA11 620 mm.
+  - **Q31:** server-side jobs that survive a refresh, one at a time, with a job pill.
+
+**1. Analysis: IOD engine + endpoint (`analysis/iod.py`, pure; `POST /api/iod`)**
+- **Input:**
+  - `{site{lat, lon, alt_m}, obs: [{t_unix, ra_deg, dec_deg} × 3]}`;
+  - RA/Dec = topocentric J2000 directions (astrometric, as a plate solve or H4 gives them; the ~20″ aberration difference is negligible for a coarse IOD; note it in the docstring).
+- **Site inertial position** at each epoch from skyfield (`wgs84` site `.at(t)` in GCRS, km).
+- **Gauss** (Curtis Alg. 5.5) + the iterative improvement (Alg. 5.6, f / g from universal variables), until the slant ranges change < 1e-8 relative or 50 iterations.
+  - Root selection: the positive real roots of the 8th-order polynomial; several → choose the one whose r2 gives an orbit above the atmosphere (|r| > 6478 km) and, if still ambiguous, the smallest |r2| (report the choice).
+- **Velocity at P2 (O6):** Herrick-Gibbs when the angle between consecutive position vectors < 3°, else Gibbs. Report the method used.
+- **Output:**
+  - `{epoch_unix (= t2), r_km[3], v_kms[3] (GCRS ≈ J2000), method: "gauss+gibbs" | "gauss+herrick-gibbs", iterations, coe{a_km, e, i_deg, raan_deg, argp_deg, nu_deg, period_min}, tle{line1, line2}, tle_fit{iterations, pos_err_km, vel_err_ms}}`.
+- **Coarse TLE (Q32):**
+  - convert r2 / v2 to TEME at t2 (skyfield frames);
+  - starting from the osculating COE, run Newton / least-squares on (n, e, i, Ω, ω, M) with `sgp4` so the TEME state at the epoch matches (≤ 10 iterations; stop at ≤ 10 m / ≤ 1 cm/s);
+  - B* = 0;
+  - catalogue "A9999" (alpha-5, as the render), class U, blank international designator;
+  - epoch = t2;
+  - valid checksums.
+  - **If the fit does not converge,** return the osculating TLE and say so (`tle_fit.converged = false`).
+- **Readable failures** (422 `{detail}`; never raw exceptions):
+  - fewer than 3 observations or duplicate epochs → "Three observations with different epochs are needed";
+  - obs not in time order → the engine sorts; P2 = the middle epoch;
+  - no positive root → "No orbit fits these observations (check the epochs and angles)";
+  - diverged → "Orbit solution did not converge";
+  - hyperbolic / sub-surface → "The fitted orbit is not a bound orbit above the Earth";
+  - coplanar or degenerate geometry → "Observation directions are too close together".
+- **Tests** (synthetic, `analysis/tests/test_iod.py`): observations generated from known TLEs with skyfield topocentric J2000 RA/Dec at the user site:
+  - LEO 500 km, 60 s / 120 s spacing (Herrick-Gibbs);
+  - LEO with 5 min spacing (Gibbs);
+  - MEO;
+  - GEO (2 h spacing).
+  - **Criteria (noise-free):** |Δr2| ≤ 1 km, |Δv2| ≤ 1 m/s vs the truth state; the TLE reproduces the state ≤ 10 m at its epoch; the TLE-predicted RA/Dec at t1 / t3 within 0.05° of the observations (LEO).
+  - **A 2″-noise case:** report the errors (no hard bound) for the log.
+  - Every failure branch.
+  - Runtime < 0.5 s per solve.
+
+**2. Web: the IOD modal (`components/analysis/IodDialog.vue`, `utils/iod.ts`, `utils/iod-memo.ts`)**
+- ToolsGroup: enable INITIAL ORBIT DETERMINATION, which opens the modal. Layout per the render: Data Entries table, the full-width INITIAL ORBIT DETERMINATION button + status line, the P2 State Vector box and the Coarse TLE Estimation box (monospace).
+- **Table columns:**
+  - row slot (1 › 2 › 3 ›), Epoch (UTC) ▲/▼ (sortable; the slot numbers stay with their rows), Az., El., R.A., Dec., Source, (…);
+  - angles in decimal degrees, 3 decimals shown (the render), up to 4 typed;
+  - R.A. in degrees 0–360;
+  - Dec / El signed.
+- **(…) menu:**
+  - Add Manual;
+  - Add Astrometry — present but disabled until T5.2, `title` "Available when Astrometry is added";
+  - Remove Entry — red; inactive on an empty row.
+- **Add Manual (logic sheet A2b-ii):**
+  - the row turns into inputs; Epoch pre-filled with now (UTC) via the H1 suite (digits only, fixed separators);
+  - Az / El / R.A. / Dec number inputs; typing in one pair clears the other;
+  - Source "Manual";
+  - Enter or a click outside confirms → the other pair is computed with H4 at the ROW EPOCH (`POST /api/transform`, the gateway) and shown dimmed;
+  - the typed pair is bright (the render: manual az / el bright, RA / Dec dimmed);
+  - Esc cancels the edit;
+  - ranges: Az 0–360, El 0–90 (an observation below the horizon is refused with the field marked), RA 0–360, Dec −90…90.
+  - When the gateway is unreachable, the other pair stays empty with a muted "—" and the row is still valid if it has RA / Dec; an Az / El-only row is not valid until the conversion succeeds (IOD needs RA / Dec).
+- **Overwrite rules:** adding to or removing an occupied VALID row asks for confirmation (a small inline confirm: "Replace row N?" / "Remove row N?"); an empty or failed row is replaced without a prompt.
+- **INITIAL ORBIT DETERMINATION:**
+  - grey / disabled until 3 valid rows with distinct epochs (the `title` gives the reason), green when ready;
+  - click → `POST /api/iod` (via `/api`, analysis) with the rows' RA / Dec / epoch + the site from the gateway snapshot;
+  - the status line under it: "Done" on success (with the method, e.g. "Done · Gauss + Herrick-Gibbs"), or the readable 422 / "Analysis service unavailable".
+- **Outputs:**
+  - P2 State Vector: `R_2 : [ x, y, z ]   V_2 : [ vx, vy, vz ]` (km, km/s, 3 decimals; the render);
+  - Coarse TLE Estimation: the two lines;
+  - a small copy button on each box (copies the text; a brief "Copied");
+  - when `tle_fit.converged` is false, a muted note "Osculating elements (fit did not converge)".
+  - Editing a row after a result greys the outputs as stale ("Inputs changed — run again") until the next run.
+- **Recall (Q34):** module-scope memo (rows, results, status, sort), saved on an open → closed transition only (the T5.1d lesson); a refresh clears it.
+- **Layout:** fit 1280×600 @1.5 and 1920; follow the render proportions; measure before proposing changes (the T5.1e method).
+- **vitest:** row validation / ranges, pair clearing, readiness rules, overwrite-confirm rules, the output formats, the request building, the memo.
+
+**Must not touch:** `pwi4/`, ssa-toolkit (read/copy only; I1), `docs/`, PWI4 settings, the gateway (H4 exists). No commits. Throwaway ports only; never the user's 3200 / 8400 / 8410.
+
+**Briefs:**
+
+| Brief | Kind | Scope | Timebox |
+|---|---|---|---|
+| **T5.3a** | analysis | `analysis/iod.py` (Gauss + improvement, Gibbs / HG, COE, SGP4-fitted TLE) + `POST /api/iod` + tests | 75 min |
+| **T5.3b** ∥ a (API contract above) | web | IOD modal + Tools button + manual rows + H4 + outputs + memo; vitest | 90 min |
+
+**Gate (Tier 2):**
+- Diff review; analysis + web unit tests.
+- **Reference check (I1 kept):** the same synthetic observations through orekit's `IodGauss` (+ Gibbs / Herrick-Gibbs) in the `orekit310` env (in-process, `PYTHONDONTWRITEBYTECODE=1`, ssa-toolkit `git status` unchanged): r2 / v2 vs ours, and both vs the truth.
+- **Real browser** (throwaway analysis + gateway for H4 without PWI4 motion — or the snapshot injected + H4 stubbed if the user's 8400 is up; 1920 + 1280×600 @1.5):
+  - 3 manual rows from a real satellite's computed positions → IOD → TLE;
+  - the TLE's NORAD-free orbit vs the real one (period / inclination);
+  - the overwrite confirms; recall.
+- No sim test (no motion).
+
+---
+
 ## 7. Progress tracker
 
 Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying · ✅ done · ⏸ paused/partial
@@ -1636,14 +1859,14 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | T4.2 | ✅ | ✅ 10-28 | ✅ 10-29 | ✅ 10-29 | ✅ 10-29 (+ T4.2f fixes, re-checked) | a probe (P22), b planner, c executor, d sim tests 10/10, e web; Q17 own path, Q18 zenith note, Q19 sky-distance corridor; browser pass click → "Track ended at Lim EL" at 1920 + 1280×600 @1.5 |
 | T4.3 | ✅ | ✅ 10-29 | ✅ 10-29 | ✅ 10-29 | ✅ 10-29 (+ T4.3d / T4.3e adjustments, user-checked) | a search filters + countries; b A1e panel + strip + stale badge; c Track Target modal; browser pass 1920 + 1280×600 @1.5 (THAICOM 8 tracked from the modal) |
 | T5.1 | ✅ | ✅ 10-30 | ✅ 10-30 | ✅ 10-30 | ✅ 10-30 (+ T5.1d / T5.1e adjustments, user-checked) | O4; Q24–Q27 (5-min lead everywhere); a analysis engine (ssa comparison passed), b gateway lead (sim row passed), c web modal (browser pass 1920 + 1280×600 @1.5, real LEO [Track] → tracking) |
-| T5.2 | ⬜ | | | | | |
-| T5.3 | ⬜ | | | | | O6 |
+| T5.2 | ✅ | ✅ 10-30 | ✅ 11-02 | ✅ 11-02 | ✅ 11-02 (+ T5.2e resilience; 3 real astrometry.net solves by the user) | Q29–Q31; a port (OW0021 identical to ssa), b nova + jobs + relay (key-echo hardening), c modal, d run + pill + IOD wiring + 2 layout fixes |
+| T5.3 | ✅ | ✅ 10-30 | ✅ 11-02 | ✅ 11-02 | ✅ 11-02 (+ T5.3d fixes; Vallado Ex. 7-2 verified by the user and as a test) | O6; Q28 built before T5.2; Q32–Q34; a engine (orekit reference: ours closer to truth), b modal (browser 1920 + 1280×600 @1.5) |
 | T6.1 | ⬜ | | | | | |
 | T6.2 | ⬜ | | | | | |
 | T6.3 | ⬜ | | | | | |
 
-**Resume point (2026-10-30, T5.1 COMPLETE, user-checked):** Phases 0–4 committed (Phase 4 `0556991`). **T5.1 (a–e) is verified and user-checked; the user commits it.** Next:
-1. **T5.2 Astrometry lite (A2b-iv), spec first:** read the logic sheet A2b-iv, `concept/Astrometry.png`, `concept/Job Modal.png`, the ssa-toolkit `photometry/` pipeline (read/copy only); ask the user the design questions before briefing workers.
+**Resume point (2026-11-02, T5 COMPLETE, user-checked):** T5.1 `e29ed97`; **the user commits T5.2 + T5.3 (+ T5.3d / T5.2e)**. Next:
+1. **Phase 5 end (Tier 3):** full sim suite ×2 (ask the user to stop 8400), the harness, the full browser pass, the flaky list; then the Phase 5 close. Then Phase 6 (hardening & packaging), spec first.
 2. **The real-mount session** (user) whenever available: the checklist below plus D-SUN custom-path following (10°/s arcs, 15°/s straights) and HOME routing vs the real homing path.
 - **Real-mount session checklist** (the user's first session on the real L-350; homing + jog will be tested together):
   - PWI4's real jog behaviour (does a release keep tracking? speeds? P20; option A provisional);
@@ -1684,6 +1907,8 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | 2026-10-20 | T1.1 | WebSocket can't pass Nitro devProxy (HTTP only) → in dev the page connects straight to the gateway (`runtimeConfig.public.gatewayWs`); token fetch stays proxied; prod = same-origin (gateway serves the app) |
 | 2026-10-20 | A4-i | **Red warnings** (user): Status red on FAULT; Sun Distance red when ≤ 15° (green > 15°). Implemented in T1.4 |
 | 2026-10-27 | T3.4e | Azimuth jog across PWI4's wrap edge swung 360° silently. Option B: the gateway slides PWI4's wrap window along with an azimuth jog (no turn while the axis has mechanical room, sim ±300°); near the real mechanical limit the jog stops with a margin and prompts "turn 360° / stay"; Turn = a goto-like validated reposition (pad dimmed, STOP available; D-SUN routing in T3.5 like gotos); Stay = stop at the limit, prompt again on the next jog that way | user |
+| 2026-10-30 | T5.3 user check | IOD checked live (accuracy tested end-to-end after T5.2). Sort ▲ as Pass Analysis; width 660 kept; the gateway must be up to use the tools; the in-row confirm kept; O6 3° rule kept as a standing rule until real-data tests; T5.3 is committed together with T5.2 | user |
+| 2026-10-30 | T5.2 / T5.3 Q28–Q34 | Build IOD (T5.3) before Astrometry (T5.2). Astrometry: image work + the nova job in analysis, the gateway relays the API key server-to-server; scale hint from FITS FOCALLEN / XPIXSZ else a new Settings camera pixel size + RASA11 620 mm; server-side jobs survive a refresh (one at a time, job pill). IOD: SGP4-fitted coarse TLE; display + copy only; the modal state is recalled until a refresh | user |
 | 2026-10-30 | T5.1 user confirmations | Sort arrows ▲ asc / ▼ desc (not the render); a satellite change clears the result, mode / window keep it; reopening recalls the last modal state until a page refresh; rises / sets outside the listed window show "—" (duration clipped to the window); exact search matches first (Track Target + picker) | user |
 | 2026-10-30 | T5.1 Q24–Q27 | Pass Analysis: optical darkness stays O4 (Sun < 0°; the ssa comparison runs ours at −6°); all modal times UTC; SEARCH reuses the Track Target table in picker mode; [Track] on passes in progress or reaching Lim EL within 5 min, and the 5-min lead applies to every TRACK OBJECT (card, modal, Pass Analysis): an object below 0° is trackable when its Lim EL crossing is ≤ 5 min ahead (meeting point + wait) | user |
 | 2026-10-29 | T4.3 Q21–Q23 | A1e stacking: B's full card + a one-line pinned strip for the tracked A (strip click re-focuses A); Track Target search lists all live objects (stale with the badge); a modal row selection stays in the modal (the dashboard selection changes when tracking starts) | user |
@@ -2715,6 +2940,162 @@ The user stopped 8400 / 3200 / 8410 (PWI4 kept running) and gave a 150 min budge
   - the "Visible Duration" header overflows into the empty [Track] header (z-index 3), fully readable;
   - measured at 1920 + 1280×600 @1.5 (both modes).
 - **T5.1 user-checked; the user commits it.**
+
+### T5.3a / T5.3b log (2026-10-30, IOD built before T5.2 per Q28)
+
+- **T5.3a (worker, verified):**
+  - `analysis/iod.py` + `POST /api/iod` + `analysis/tests/test_iod.py` (28); analysis 80 passed; ruff clean.
+  - **Two-body truth:** state recovered exactly (≤ 1e-5 km / m/s).
+  - **SGP4 truth:** LEO ≈ 1–1.7 km / 7–10 m/s, MEO 0.9 km / 0.18 m/s, GEO 0.3 km / 0.05 m/s. This is the J2 / SGP4 physics a two-body fit cannot absorb; the spec's ≤ 1 km / 1 m/s vs SGP4 was too strict for LEO, so the tests assert it vs two-body truth and ≤ 3 km / 25 m/s vs SGP4 for LEO.
+  - **TLE fit:**
+    - 2–6 m (LEO), 12–22 m (MEO / GEO: the TLE text resolution);
+    - converged in every case;
+    - TLE-predicted directions within 0.033° at t1 / t3.
+  - **Additions:** a Levenberg-Marquardt refinement takes over when Alg. 5.6 drifts on long MEO / GEO arcs; candidate roots are tried in increasing |r2|; the response gains `roots`.
+  - O6 applied literally: LEO 60 s (3.8°) uses Gibbs; Herrick-Gibbs at 30 s.
+- **T5.3b (worker, verified):**
+  - `IodDialog.vue`, `utils/iod.ts`, `utils/iod-memo.ts`, ToolsGroup INITIAL ORBIT DETERMINATION enabled; vitest 514 (+30); typecheck 0; lint 0 errors.
+  - **Choices:**
+    - row states empty / pending / failed / partial / valid ("partial" = a typed Az / El not yet converted);
+    - only a valid row asks before replace / remove (an inline confirm in the row);
+    - ▲ = ascending (the app convention);
+    - 360 wraps to 0;
+    - El 0–90;
+    - plain text inputs (≤ 4 decimals);
+    - Esc closes menu → confirm → edit → dialog;
+    - an in-dialog menu;
+    - modal 660 px.
+- **Supervisor reference check (orekit `IodGauss`, `orekit310`, in-process, I1 unchanged):** real TLEs from the T5.1 passes.
+
+| case | ours vs truth | orekit vs truth |
+|---|---|---|
+| ISS 60 s | 0.82 km / 9.9 m/s | 1.80 km / 21.7 m/s |
+| ISS 150 s | 0.78 km / 9.9 m/s | 6.94 km / 82.5 m/s |
+| TERRA 120 s | 1.23 km / 14.3 m/s | 4.88 km / 53.9 m/s |
+| NAVSTAR 86 1200 s | 1.29 km / 0.21 m/s | 88.0 km / 14.7 m/s |
+
+  orekit's plain Gauss has no iterative improvement; ours is closer to the truth in every case.
+- **Browser** (throwaway analysis + gateway for H4 + Nuxt, no mount commands):
+  - **1920:**
+    - Add Manual RA / Dec → H4 filled Az / El dimmed (opacity) at the row epoch;
+    - 3 ISS rows → "Done · Gauss + Gibbs";
+    - R_2 / V_2 within 0.07 km / 1 m/s of the direct engine run (the web sends 4-decimal angles);
+    - TLE i 51.63°, n 15.555 rev/day;
+    - the replace confirm "Replace row 1? Yes / No";
+    - recall after close / reopen.
+  - **1280×600 @1.5:** the dialog 660 × 473 inside 600; outputs visible; no page overflow.
+  - Ports free.
+
+### T5.2a / T5.2b / T5.2c log (2026-10-30)
+
+- **T5.2a (worker, verified):**
+  - `analysis/astrometry/` = the photometry port (types, io, background, detect, morphology, streaks, trails, select, engine) + `sessions.py` (3 frames, 30 min TTL) + `service.py` + `api.py` (`/image`, `/detect`, `/snap`).
+  - Sidereal branches kept unreachable, so the modules stay port-identical; `engine.raw` is float32.
+  - **New deps:** photutils 3.1.1 (`<4`), scipy 1.18.1, scikit-image 0.26.0, tifffile 2026.10.15, pillow 13.0.0, requests 2.34.2, python-multipart 0.0.32.
+  - **OW0021 detection vs ssa-toolkit's own engine** (in-process, read-only, I1 kept): identical, 40 / 10 / 23 streaks, the target to 0.01 px; 61 MP frame: load 0.3 s, detect 5–7 s.
+  - In object mode, edge-clipped streaks are already dropped by `select` before emission, so no flag is needed downstream (supervisor check).
+  - The OW0021 TIFFs carry no epoch / exposure; they are typed manually.
+- **T5.2b (worker, verified + one supervisor hardening):**
+  - `nova.py` (the real client: a synthetic-FITS upload, the WCS download; the fake), `solve.py` (the object solve, the mapping, the scale check 0.8–1.25 vs the hint, mid-exposure), `jobs.py` (single active, the last 20, cooperative cancel), `/run` `/job` `/job/{id}` `/cancel`;
+  - `PW_ASTROMETRY_FAKE=1` = a deterministic fake (RA 150 / Dec 20, ~3 s);
+  - the gateway relay `POST /api/mount/astrometry/run` (key from the secret store, 620 mm + `camera_pixel_um` hints, 409 no key, 503 analysis down; audit `astrometry_run` with the status only);
+  - Settings `hardware.camera_pixel_um`.
+  - **Supervisor:** a FastAPI 422 can echo its whole input; the relay now replaces any analysis reply that contains the key, or any non-string 422 detail, with "The astrometry request was rejected (…)" (new test).
+  - The real nova HTTP paths are untested (no network in tests); the first real run is the user-approved end-to-end test.
+- **T5.2c (worker, verified):** `AstrometryDialog.vue`, `useZoomPane.ts`, `utils/astrometry.ts`, `pages/dev/astrometry.vue`; vitest 545.
+- **Supervisor browser check** (`/dev/astrometry`, throwaway analysis 18711 + Nuxt 13272; the `files` step added to `tools/browser_gate/cdp.mjs`):
+  - real OW0021_130130 loaded → DETECT: 40 streaks, the target at 5152.2 / 3151.8; RUN title "Enter the exposure start time";
+  - zoom 156 %; the overlay toggle;
+  - no page overflow at 1920 / 1280×600 @1.5.
+  - **Found:**
+    - the Epoch field overflows the 244 px left column over the "Image Preview" heading;
+    - the status line shows the 3-line engine warning (the dialog grows ~45 px).
+    - Both go to T5.2d.
+- **Gates:** analysis + gateway non-sim 802 + the relay test; ruff clean.
+
+### T5.2d log (2026-10-30)
+
+- **Worker deliverables:**
+  - `utils/astrometry-job.ts`, `stores/astrometry-job.ts` (polling 2.5 s, reattach, cancel, dismiss in module scope + sessionStorage), `AstrometryJobPill.vue` (bottom-left, mounted in `pages/index.vue`);
+  - IOD Add Astrometry wired (stacked `AstrometryDialog`, the relay, pending / solved / failed rows, resolved even with IOD closed via the memo);
+  - Settings "Pixel [ ] µm" (90 px, title "Camera pixel size"; the 100 px label column);
+  - layout fixes: (a) Epoch / Exposure on one full-width row; (b) a one-line status + the full warnings in the `title`.
+  - "Apply to a row…" after a refresh = the first empty row (else the first non-usable one; all valid → a message).
+- **Supervisor fix:** a refused RUN (`runStatus` error) was hidden behind the detect summary on the status line; error now takes precedence (+ test). vitest 567; typecheck 0; lint 0 errors.
+- **End-to-end browser gate** (analysis 18711 `PW_ASTROMETRY_FAKE=1` + gateway 18734 memory secrets with a dummy key + Nuxt 13272; 1920 and 1280×600 @1.5):
+  - IOD › Add Astrometry → OW0021_130130 → DETECT (40 + the target; "40 streaks detected, target found · 8 edge streaks excluded") → epoch 13:01:30 / 2 s → RUN;
+  - the dialog closes; row 1 "Astrometry pending" at 13:01:31 (mid-exposure); pill "Astrometry · Uploading to astrometry.net · Cancel";
+  - → row 1 RA 149.461° / Dec +19.941° bright, Az / El 68.376° / 69.335° by H4 dimmed, Source Astrometry; pill "solved — row 1";
+  - refresh → pill reattached "solved — apply to a row…";
+  - the Epoch row does not overlap the preview; the dialog height is steady (614 → 617 / 527 → 530 of 600); no page overflow;
+  - ports free.
+
+### T5.3d IOD fix pass (2026-11-02, from the user's IOD test)
+
+- **User test results (11-02):**
+  - IOD verified against Vallado (4th ed.) Example 7-2 (pp. 447–449): very close to the known orbit (closer than the book's Gauss);
+  - three issues found: H4 needed PWI4; IOD used PWI4's location; Add Manual on rows 2 / 3 did not work.
+  - **Confirmations:** A (apply to the first empty row) and B (the "Pixel" label) kept; C the pill moves to the Sky Viewer bottom-left; D whole-second epochs kept, angle inputs up to 6 decimals (display 3, the full value restored on edit); D* Edit Entry; E1 an edited Astrometry row becomes Manual; E2 failed rows are replaced, not edited.
+- **Causes:**
+  - **(1 + 2)** `/api/transform` defaulted to PWI4's site (503 without PWI4) and IOD sent no site. The snapshot / `POST /api/iod` already used the Settings location.
+  - **(3)** On a filled row, Replace → Yes removed the focused button; the row's focus-out saw no focused element and cancelled the blank edit; `startEdit` also focused the first row's Az cell (reproduced in a browser).
+- **Fixes:**
+  - **gateway (supervisor):** H4 defaults to the Settings location (logic sheet H4), never needs PWI4 (Go To motion keeps PWI4's site behind the mismatch gate); a test with PWI4 down.
+  - **web (worker):**
+    - the edit focuses its own row's input; a focus loss to nothing no longer commits / cancels; a capture-phase outside-pointer commit;
+    - Edit Entry (valid / partial rows; full-precision prefill; Esc restores; Astrometry → Manual);
+    - 6-decimal inputs stored as typed;
+    - every H4 request carries the Settings `site`;
+    - the pill inside the Sky Viewer `SectionFrame` (absolute, 8 px left / bottom).
+  - vitest 579; typecheck 0; lint 0 errors.
+- **Regression test:** Vallado Example 7-2 added to `analysis/tests/test_iod.py`. Ours vs the known orbit: |Δr| 0.52 km, |Δv| 0.58 m/s, a 12 242.5 km (truth 12 246.0), e 0.19985, i 39.9996°, Ω 330.0005° (the book's EOP corrections are not applied).
+- **Found + fixed (supervisor):**
+  - `analysis/app.py` and `analysis/requirements.txt` were rewritten at 10-30 10:16:33 UTC, after the last handoff, most likely by the T5.2a worker's lingering background task (its notice said background work was still running).
+  - The rewrite registered the astrometry router twice with two different `ImageSessions` (`/image` + `/detect` on one store, `/run` on another → a real RUN would 404 "Image expired") and duplicated the deps list.
+  - Removed both; added an assembled-app test (`/image` then `/run` through `create_app()`).
+  - Only those two files were touched.
+  - **Process lesson:** briefs now require workers to leave no background process running, and the supervisor checks file mtimes vs the handoff at the start of a session.
+- **Browser check** (throwaway Nuxt 13270, the snapshot injected, the user's servers untouched; 1280×600 @1.5):
+  - Replace → Yes on a filled row 2 opens the edit focused in that row; 33.123456 / 44.654321 commit (shown 33.123° / 44.654°);
+  - Edit prefills the full values; Esc restores the row and keeps the dialog open;
+  - an edit to 33.987654 shows 33.988°, and reopening shows 33.987654;
+  - the pill at the Sky Viewer's bottom-left, clear of the clock, but its width cap truncates "Astrometry · Solving" to "Astrometry · Solv…" at 1280 (option offered to the user).
+- **Gates:**
+  - analysis + gateway non-sim 804 (6 timing-budget tests `test_compute_pass_budget_30ms` failed once while web builds loaded the machine, then passed on re-run → the flaky list);
+  - analysis 209 incl. Vallado + the assembled-app test;
+  - ruff clean.
+- **Follow-up (user 11-02): a two-line pill.**
+  - The title on top ("Astrometry" / "Astrometry solved" / "Astrometry failed", muted / green / red), the status below at full width ("Solving", "row N", "apply to a row…", the reason).
+  - Browser, 1280×600 @1.5 + 1920: all running / solved texts fit; only the longest failure reason truncates at 1280 (the full text in the hover title); clear of the clock.
+  - vitest 579; typecheck 0; lint 0 errors.
+
+### T5.2e astrometry.net resilience (2026-11-02, from the user's real test)
+
+- **User real test (11-02):**
+  - the solve works; valid RA / Dec fill the row, and Az / El are dimmed and correct;
+  - first run: a 409 from astrometry.net mid-job → "Astrometry failed / unreachable"; the re-run solved but created a 2nd submission on astrometry.net.
+  - The gateway audit showed both relays 202, so the 409 was astrometry.net's.
+- **Cause:** `NovaHttpClient` (as in ssa-toolkit) had no retries: one bad status anywhere killed the job, every error mapped to "unreachable", nothing was logged.
+- **Fix (worker, user-approved + amendment):**
+  - per-request retry (connection / timeout / 409 / 429 / 5xx; 2, 5, 10 s); upload retried only on no response or 429 / 503;
+  - poll tolerance (5 consecutive failures to give up);
+  - results-not-ready retry (30 s);
+  - a 30 min solve limit (slow ≠ failed); 60 s per request;
+  - resume (`POST /api/astrometry/job/{id}/resume` + the gateway relay, the same key-scrub hardening) re-polls the same subid with no upload;
+  - re-RUN fingerprint (`image_id` + the star midpoints + the hint scale) re-attaches to the remembered subid or reuses a stored solution — never a second upload unless astrometry.net said "could not solve" or the detections changed;
+  - timeout / cancel stop all polling (tested: no HTTP calls after the end) and keep the subid (resumable);
+  - readable reasons ("busy (HTTP n) — retried 3×", "unreachable (network)", …);
+  - one log line per step attempt (no key / session; tested);
+  - web: a Retry button on a resumable failed pill; the IOD row re-pointed to the new job.
+  - astrometry.net has no cancel API: nothing is sent on cancel.
+- **Gates (supervisor):** analysis + gateway non-sim 845; ruff clean; web 585; typecheck 0; lint 0 errors. The latest write 05:28 UTC, before the report (no lingering task).
+
+### T5 close (2026-11-02, user-checked)
+
+- **User real test after T5.2e:** three astrometry.net uploads, all solved; no 409 / failure; no double submission.
+- **The user keeps exercising the astrometry engine** and reports any uncaught error cases.
+- **The user commits T5.2 + T5.3 (+ T5.3d, T5.2e)** as one commit.
+- **Owed (Phase 5 end, Tier 3) next session:** full sim suite ×2 (the user's 8400 stopped), the harness, the full browser pass (1920 + 1280×600 @1.5: Pass Analysis, IOD, Astrometry with a fake nova, the pill, Settings), the flaky list (`test_compute_pass_budget_30ms` under CPU load).
 
 ## 9. Known limitations & risks
 

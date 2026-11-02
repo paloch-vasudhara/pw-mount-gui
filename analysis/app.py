@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from collections.abc import Callable
 from contextlib import asynccontextmanager
@@ -11,7 +12,12 @@ from fastapi import FastAPI, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 from skyfield.api import EarthSatellite, wgs84
 
+from . import iod
 from . import state as state_mod
+from .astrometry import nova as astro_nova
+from .astrometry.api import make_router as astrometry_router
+from .astrometry.jobs import JobRegistry
+from .astrometry.sessions import ImageSessions
 from .catalog import LAYERS, ORBIT_GROUPS, default_source
 from .chunks import MAX_DURATION_S, STEP_S, Site
 from .db import CatalogUnavailable
@@ -21,6 +27,7 @@ from .state import compute_state, warm
 
 VERSION = "0.1.0"
 PASSES_TIMEOUT_S = 20.0
+IOD_TIMEOUT_S = 10.0
 log = logging.getLogger("analysis")
 
 
@@ -51,6 +58,17 @@ class StateIn(BaseModel):
     norad: int
     site: SiteIn
     t_unix: float | None = None
+
+
+class ObsIn(BaseModel):
+    t_unix: float
+    ra_deg: float = Field(ge=0, le=360)
+    dec_deg: float = Field(ge=-90, le=90)
+
+
+class IodIn(BaseModel):
+    site: SiteIn
+    obs: list[ObsIn]
 
 
 def _run_passes(row: dict, body: PassesIn) -> dict:
@@ -90,6 +108,12 @@ def create_app(factory: Callable = default_source) -> FastAPI:
 
     app = FastAPI(title="pw-mount-control analysis", version=VERSION, lifespan=lifespan)
     app.state.service = service
+    app.state.astrometry = ImageSessions()
+    app.state.astro_jobs = JobRegistry()
+    app.state.nova_factory = (astro_nova.fake_factory
+                              if os.environ.get("PW_ASTROMETRY_FAKE") == "1"
+                              else astro_nova.real_factory)
+    app.include_router(astrometry_router(app.state.astrometry, app.state.astro_jobs))
 
     def ready() -> None:
         try:
@@ -179,6 +203,22 @@ def create_app(factory: Callable = default_source) -> FastAPI:
         except TimeoutError:
             raise HTTPException(503, "Pass computation timed out") from None
         return out
+
+    @app.post("/api/iod")
+    async def iod_solve(body: IodIn) -> dict:
+        site = body.site.model_dump()
+        obs = [o.model_dump() for o in body.obs]
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(iod.solve, site, obs), timeout=IOD_TIMEOUT_S
+            )
+        except iod.IodError as e:
+            raise HTTPException(422, e.message) from None
+        except TimeoutError:
+            raise HTTPException(503, "Orbit determination timed out") from None
+        except Exception:
+            log.warning("IOD failed unexpectedly")
+            raise HTTPException(503, "Orbit determination failed") from None
 
     @app.post("/api/sky/chunk")
     async def sky_chunk(body: ChunkIn) -> Response:

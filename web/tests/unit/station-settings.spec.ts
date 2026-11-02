@@ -13,7 +13,7 @@ const ZONES = ['UTC', 'Asia/Bangkok', 'Europe/London']
 const DTO: StationSettingsDto = {
   version: 1,
   location: { lat_deg: 13.7862, lon_deg: 101.4639, alt_m: 40.8, timezone: 'Asia/Bangkok' },
-  hardware: { mount: 'PW L-350', ota: 'Celestron RASA11', lim_el_deg: 15 },
+  hardware: { mount: 'PW L-350', ota: 'Celestron RASA11', lim_el_deg: 15, camera_pixel_um: null },
   providers: { astrometry: 'astrometry.net', satellite_db: 'DELV Aerospace' },
   display: { lat_format: 'dd', lon_format: 'dd', alt_unit: 'm' },
 }
@@ -99,6 +99,21 @@ describe('isDirty', () => {
     expect(edit((f) => { f.apiKey = 'k' })).toBe(true)
     expect(edit((f) => { f.clearKey = true })).toBe(true)
     expect(edit((f) => { f.lat = 13.7862 + 1e-9 })).toBe(false)
+  })
+  it('camera pixel size: null = unknown is valid; 0.5-30 only; sent in the payload (null clears); counts as a change', () => {
+    const f = formFromDto(DTO)
+    expect(f.cameraPixelUm).toBeNull()
+    expect(validateForm(f, ZONES)).toEqual({})
+    f.cameraPixelUm = 0.4
+    expect(validateForm(f, ZONES).cameraPixelUm).toBeTruthy()
+    f.cameraPixelUm = 30.1
+    expect(validateForm(f, ZONES).cameraPixelUm).toBeTruthy()
+    f.cameraPixelUm = 3.76
+    expect(validateForm(f, ZONES)).toEqual({})
+    expect((buildPayload(f).hardware as Record<string, unknown>).camera_pixel_um).toBe(3.76)
+    expect(isDirty(f, formFromDto(DTO))).toBe(true)
+    expect(formFromDto({ ...DTO, hardware: { ...DTO.hardware, camera_pixel_um: 3.76 } }).cameraPixelUm).toBe(3.76)
+    expect(formFromDto({ ...DTO, hardware: { mount: 'a', ota: 'b', lim_el_deg: 1 } }).cameraPixelUm).toBeNull()
   })
   it('site-check body is just the proposed location', () => {
     expect(buildSiteCheckBody(formFromDto(DTO))).toEqual({ lat_deg: 13.7862, lon_deg: 101.4639, alt_m: 40.8 })
@@ -196,6 +211,25 @@ describe('StationSettingsDialog', () => {
     await flushPromises()
     expect(JSON.parse(calls.find(c => c.method === 'PUT')!.body!).api_key).toBe('SECRET-KEY-XYZ')
     expect(document.body.innerHTML).not.toContain('SECRET-KEY-XYZ')
+    w.unmount()
+  })
+
+  it('Hardware has the camera pixel size field (90 px, empty = unknown) and saves it', async () => {
+    putResponse = { ...DTO, hardware: { ...DTO.hardware, camera_pixel_um: 3.76 }, api_key_set: false }
+    const w = await openDialog()
+    const input = document.body.querySelector('[data-testid="ss-pixel"] input') as HTMLInputElement
+    expect(input).not.toBeNull()
+    expect(input.value).toBe('')
+    expect(document.body.querySelector('[data-testid="ss-pixel"]')!.outerHTML).toContain('90px')
+    input.value = '3.76'
+    input.dispatchEvent(new Event('input'))
+    input.dispatchEvent(new Event('change'))
+    input.dispatchEvent(new Event('blur'))
+    await flushPromises()
+    ;(q('ss-save') as HTMLButtonElement).click()
+    await flushPromises()
+    const put = calls.find(c => c.method === 'PUT')!
+    expect(JSON.parse(put.body!).hardware.camera_pixel_um).toBe(3.76)
     w.unmount()
   })
 

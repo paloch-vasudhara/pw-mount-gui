@@ -7,3 +7,10 @@ skyfield
 sqlalchemy
 psycopg2-binary
 python-dotenv
+photutils>=2,<4
+scipy
+scikit-image
+tifffile
+pillow
+requests
+python-multipart

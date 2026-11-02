@@ -6,6 +6,7 @@ import json
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket
@@ -44,6 +45,25 @@ CHECKABLE = frozenset(
 )
 
 
+RASA11_FOCAL_MM = 620.0  # the OTA is fixed (Settings shows it read-only); T5.2 scale hint
+ASTROMETRY_RUN_TIMEOUT_S = 30.0
+ASTROMETRY_NO_KEY = "Set the astrometry.net API key in Station Settings"
+ASTROMETRY_BAD_REQUEST = "The astrometry request was rejected (check the detections and the epoch)"
+ANALYSIS_DOWN = "Analysis service unavailable"
+
+
+class AstrometryRun(BaseModel):
+    """Web body of the astrometry relay. The key is never part of it: the gateway adds it."""
+
+    model_config = ConfigDict(extra="ignore")
+    image_id: str
+    detections: list[dict[str, Any]]
+    epoch_iso: str | None = None
+    exposure_s: float | None = None
+    focal_mm: float | None = None
+    pixel_um: float | None = None
+
+
 class CheckRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     cmd: str
@@ -62,6 +82,7 @@ def create_app(
     transport: httpx.AsyncBaseTransport | None = None,
     secrets: SecretStore | None = None,
     tle_transport: httpx.BaseTransport | None = None,
+    analysis_transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     token = settings.token or new_token()
@@ -211,6 +232,87 @@ def create_app(
         await poller.refresh_ephem(force=True)  # apply live: Sun/Moon for the new site now
         return JSONResponse(with_check(store.public()), headers={"Cache-Control": "no-store"})
 
+    @app.post("/api/mount/astrometry/run", dependencies=[Depends(require_auth)])
+    async def astrometry_run(req: AstrometryRun) -> JSONResponse:
+        """T5.2: relay RUN to analysis, adding the astrometry.net key server-to-server. Missing
+        hints: focal -> RASA11 620 mm, pixel -> Settings camera_pixel_um (both missing = blind).
+        The key is never logged, audited or returned."""
+        try:
+            key = store.secrets.get()
+        except Exception:
+            key = None
+        if not key:
+            raise HTTPException(status_code=409, detail=ASTROMETRY_NO_KEY)
+        body = req.model_dump()
+        if body.get("focal_mm") is None:
+            body["focal_mm"] = RASA11_FOCAL_MM
+        if body.get("pixel_um") is None:
+            body["pixel_um"] = store.current.hardware.camera_pixel_um
+        body["apikey"] = key
+        try:
+            async with httpx.AsyncClient(
+                transport=analysis_transport, timeout=ASTROMETRY_RUN_TIMEOUT_S
+            ) as client:
+                r = await client.post(f"{settings.analysis_url}/api/astrometry/run", json=body)
+        except Exception:  # httpx errors can embed the request; never echo them
+            audit.write("astrometry_run", result="analysis_unavailable")
+            raise HTTPException(status_code=503, detail=ANALYSIS_DOWN) from None
+        finally:
+            del body
+        # a validation error can echo its whole input (the key included): never pass that on
+        leaked = key in r.text
+        del key
+        try:
+            payload = r.json()
+        except ValueError:
+            audit.write("astrometry_run", result="analysis_unavailable")
+            raise HTTPException(status_code=503, detail=ANALYSIS_DOWN) from None
+        if leaked or (r.status_code == 422 and not isinstance(payload.get("detail"), str)):
+            payload = {"detail": ASTROMETRY_BAD_REQUEST}
+        audit.write("astrometry_run", result=r.status_code)
+        return JSONResponse(
+            payload, status_code=r.status_code, headers={"Cache-Control": "no-store"}
+        )
+
+    @app.post("/api/mount/astrometry/job/{job_id}/resume", dependencies=[Depends(require_auth)])
+    async def astrometry_resume(job_id: str) -> JSONResponse:
+        """Resume a failed / timed-out / cancelled solve: analysis starts a NEW job that
+        re-polls the same astrometry.net submission (no new upload). The key is added here,
+        server-to-server, exactly like RUN; it is never logged, audited or returned."""
+        try:
+            key = store.secrets.get()
+        except Exception:
+            key = None
+        if not key:
+            raise HTTPException(status_code=409, detail=ASTROMETRY_NO_KEY)
+        body = {"apikey": key}
+        try:
+            async with httpx.AsyncClient(
+                transport=analysis_transport, timeout=ASTROMETRY_RUN_TIMEOUT_S
+            ) as client:
+                r = await client.post(
+                    f"{settings.analysis_url}/api/astrometry/job/{quote(job_id, safe='')}/resume",
+                    json=body,
+                )
+        except Exception:  # httpx errors can embed the request; never echo them
+            audit.write("astrometry_resume", result="analysis_unavailable")
+            raise HTTPException(status_code=503, detail=ANALYSIS_DOWN) from None
+        finally:
+            del body
+        leaked = key in r.text
+        del key
+        try:
+            payload = r.json()
+        except ValueError:
+            audit.write("astrometry_resume", result="analysis_unavailable")
+            raise HTTPException(status_code=503, detail=ANALYSIS_DOWN) from None
+        if leaked or (r.status_code == 422 and not isinstance(payload.get("detail"), str)):
+            payload = {"detail": ASTROMETRY_BAD_REQUEST}
+        audit.write("astrometry_resume", result=r.status_code)
+        return JSONResponse(
+            payload, status_code=r.status_code, headers={"Cache-Control": "no-store"}
+        )
+
     @app.get("/api/mount/site-check", dependencies=[Depends(require_auth)])
     def site_check() -> JSONResponse:
         return JSONResponse(poller.current_site_check().model_dump())
@@ -224,15 +326,16 @@ def create_app(
     def transform(req: TransformRequest) -> JSONResponse:
         """H4 (T3.3, T3.3b): J2000 RA/Dec <-> OBSERVED topocentric alt/az (refracted like PWI4's
         reported alt/az, P18) at an explicit time. Read-only (no control lock). Default site =
-        PWI4's own site. The response states the frame in `frame`."""
+        the Settings location (logic sheet H4; user 11-02: the analysis tools never need PWI4).
+        Go To motion keeps PWI4's own site behind the site-mismatch gate. The response states the
+        site used and the frame in `frame`."""
         if not ephem.available:
             raise HTTPException(status_code=503, detail="ephemeris unavailable")
         if req.site is not None:
             site = (req.site.lat, req.site.lon, req.site.height_m)
         else:
-            site = poller.pwi4_site()
-            if site is None:
-                raise HTTPException(status_code=503, detail="PWI4 site unavailable")
+            loc = store.current.location
+            site = (loc.lat_deg, loc.lon_deg, loc.alt_m)
         t = req.time()
         v = req.values
         if isinstance(v, AltAzValues):

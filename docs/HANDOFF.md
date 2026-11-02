@@ -1,26 +1,43 @@
-# Session handoff — updated 2026-10-30 (T5.1 COMPLETE and user-checked; the user commits; next T5.2 Astrometry spec)
+# Session handoff — updated 2026-11-02 end of day (T5 complete + user-checked; the user commits; next Phase 5 end Tier 3)
 
 Read this first, then `docs/BUILD_PLAN.md` (§7 tracker + **resume point**, §6 task specs, §8 logs/findings), then `docs/logic_sheet.txt` as needed.
 
 ## START HERE (after compaction / next session)
 
-1. **Check `git log`.** The user commits T5.1 (Pass Analysis: a analysis engine, b gateway 5-min lead, c web modal, d/e user adjustments) right after this handoff. If it is still uncommitted, ask before doing anything else.
-2. **T5.1 is complete:**
-   - the ssa-toolkit comparison passed;
-   - the lead sim row passed;
-   - browser passes;
-   - the user's live check clean (BUILD_PLAN §8 "T5.1a / T5.1b", "T5.1c", "T5.1d", "T5.1e").
-3. **Next: T5.2 Astrometry lite (A2b-iv), spec first.**
-   - Read the logic sheet A2b-iv, `concept/Astrometry.png` + `concept/Job Modal.png`, and the ssa-toolkit `photometry/` pipeline (read/copy only; O1 says the astrometry pipeline is ported from it).
-   - Ask the user the open design questions (AskUserQuestion) before briefing workers.
-4. **ssa-toolkit:**
-   - its `.gitignore` has an uncommitted `+database/` line (not ours; reported 10-30; don't touch);
-   - reference runs: conda env `orekit310`, in-process, `PYTHONDONTWRITEBYTECODE=1`, `git status` checked before / after.
-5. **Open item** (fix only if the user asks): the GEO "no safe detour" text while the Sun disc approaches (T4.2f log).
-6. **Environment:**
-   - The `PWI4.cfg` baseline is `b714321830fb…` (user site 13.12 / 100.92; app Lim EL 10; timezone Asia/Bangkok).
-   - Sim runs need the user's 8400 stopped (ask). Layout measurements can run with only a throwaway analysis + Nuxt, with the snapshot injected (no gateway / PWI4).
-   - Keep `.py` files out of the repo `scratchpad/` (`ruff check .`).
+1. **First: `git log` / `git status`, and the file mtimes vs this handoff** (a worker's lingering task once rewrote files after a handoff).
+   - The user commits T5.2 + T5.3 (+ the T5.3d IOD fixes, the T5.2e astrometry.net resilience) right after this handoff.
+   - If it is still uncommitted, ask before doing anything else.
+2. **Phase 5 work is complete and user-checked:**
+   - T5.1 Pass Analysis (`e29ed97`);
+   - T5.3 IOD (Vallado Ex. 7-2 verified);
+   - T5.2 Astrometry (3 real astrometry.net solves, no failures / doubles).
+   - The user keeps exercising the astrometry engine and will report any uncaught error cases.
+3. **Next: Phase 5 end (Tier 3).**
+   - Full sim suite ×2: ask the user to stop 8400 first.
+   - The PWI4 harness.
+   - The full browser pass at 1920 + 1280×600 @1.5: Pass Analysis, IOD (replace / edit / 6 decimals), Astrometry with `PW_ASTROMETRY_FAKE=1`, the two-line pill + Retry, Settings Pixel; plus the Phase 4 flows.
+   - The flaky list: `test_compute_pass_budget_30ms` fails only under CPU load.
+   - Then the Phase 5 close and the Phase 6 spec (hardening & packaging; ask design questions first).
+4. **Decisions in force:**
+   - Q24–Q34;
+   - user 11-02: H4 = the Settings location (no PWI4); angles 6 decimals (display 3); Edit Entry (Astrometry → Manual; failed rows replaced, not edited); the two-line pill in the Sky Viewer bottom-left;
+   - astrometry.net: retries, a 30 min limit, resume / re-attach, never a 2nd upload unless "could not solve" or the detections were edited;
+   - the O6 3° rule is standing;
+   - the gateway must be up to use the tools;
+   - ▲ asc / ▼ desc.
+5. **Tooling:**
+   - `tools/browser_gate/cdp.mjs` (+ the `files` step);
+   - `PW_ASTROMETRY_FAKE=1`;
+   - throwaway gateway: `PW_SECRET_STORE=memory`, the token via `/api/mount/session` with `Sec-Fetch-Site: none`, the settings PUT needs `location.timezone`;
+   - gate scripts in the session scratchpad (`t52d_gate/`, `t53_gate/`, `iod_fix/`, `t51_cmp/`, `t53_ref/`);
+   - the analysis log lines `nova step=…` trace astrometry.net steps.
+   - Workers must leave no background process running.
+6. **ssa-toolkit:** the user's `.gitignore` `+database/` line (don't touch). Reference runs: conda `orekit310`, in-process, `PYTHONDONTWRITEBYTECODE=1`.
+7. **Open item** (fix only if asked): the GEO "no safe detour" text (T4.2f).
+8. **Environment:**
+   - The `PWI4.cfg` baseline is `b714321830fb…` (site 13.12 / 100.92; Lim EL 10; tz Asia/Bangkok).
+   - Sim runs need the user's 8400 stopped.
+   - No `.py` files in the repo `scratchpad/`.
 
 ## Where we are
 
