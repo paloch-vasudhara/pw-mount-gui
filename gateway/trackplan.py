@@ -19,7 +19,7 @@ starting at the RENDEZVOUS time `t_r` and ending at the Lim EL exit (`t_out`), o
   * Sun stop (T4.2f, user decision Q20): a blocked interval longer than SUN_HOLD_S (a slow object
     drifting into the Sun, e.g. a GEO) is not detoured: the plan ends at its start with the
     end_reason "Track ended: Sun approaching" (refused only if < 30 s of track would remain). A
-    rendezvous inside such an interval is refused (sun_no_detour).
+    rendezvous inside such an interval is refused (sun_no_detour, "Target is too close to the Sun").
   * The track times are whole Unix seconds (the planner grid), the last point of a finite pass is
     exactly `t_out`.
 """
@@ -77,6 +77,8 @@ SUN_HOLD_S = 600  # a blocked interval longer than this is a "Sun stop", not a d
 
 R_ZENITH_NOTE = "Near-zenith pass: tracking lags near the peak"
 R_NO_DETOUR = "Pass passes within 15° of the Sun; no safe detour"
+# a rendezvous inside a long Sun interval (a slow object drifting into the Sun, e.g. a GEO)
+R_SUN_TOO_CLOSE = "Target is too close to the Sun; try again later"
 R_TRACK_ENDED = "Track ended at Lim EL"
 R_SUN_APPROACHING = "Track ended: Sun approaching"
 R_NO_AZ_RANGE = "Pass leaves the mount's azimuth range"
@@ -437,7 +439,9 @@ def _attempt(
             ir = i_r
             t_r = float(T[ir])
             if ir < n and in_long_run(ir):
-                return TrackRefusal(R_NO_DETOUR, CODE_NO_DETOUR, "the Sun blocks the rendezvous")
+                return TrackRefusal(
+                    R_SUN_TOO_CLOSE, CODE_NO_DETOUR, "the Sun blocks the rendezvous"
+                )
             j = clear_of_sun(ir) if ir < n else None
             if j is None:
                 return TrackRefusal(R_TOO_SHORT, CODE_TOO_SHORT)

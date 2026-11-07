@@ -5,8 +5,8 @@ Read this first, then `docs/BUILD_PLAN.md` (§7 tracker + **resume point**, §6 
 ## START HERE (after compaction / next session)
 
 1. **First: `git log` / `git status`, and the file mtimes vs this handoff** (a worker's lingering task once rewrote files after a handoff).
-   - The user commits T5.2 + T5.3 (+ the T5.3d IOD fixes, the T5.2e astrometry.net resilience) right after this handoff.
-   - If it is still uncommitted, ask before doing anything else.
+   - T5.2 + T5.3 (+ T5.3d, T5.2e) are COMMITTED as `2e7d5cc` (11-02, user).
+   - The tree was clean at the handoff.
 2. **Phase 5 work is complete and user-checked:**
    - T5.1 Pass Analysis (`e29ed97`);
    - T5.3 IOD (Vallado Ex. 7-2 verified);
@@ -33,7 +33,7 @@ Read this first, then `docs/BUILD_PLAN.md` (§7 tracker + **resume point**, §6 
    - the analysis log lines `nova step=…` trace astrometry.net steps.
    - Workers must leave no background process running.
 6. **ssa-toolkit:** the user's `.gitignore` `+database/` line (don't touch). Reference runs: conda `orekit310`, in-process, `PYTHONDONTWRITEBYTECODE=1`.
-7. **Open item** (fix only if asked): the GEO "no safe detour" text (T4.2f).
+7. **The GEO Sun wording (T4.2f open item) is fixed (11-06):** "Target is too close to the Sun; try again later". Real-mount test 11-06 passed (HOME, D-SUN; BUILD_PLAN §8). ADS-B: source reviewed 11-07 → `docs/adsb_findings.html` (Q35–Q50, Phase 5b before T6); waiting on the user's capture, receiver location, route check and answers.
 8. **Environment:**
    - The `PWI4.cfg` baseline is `b714321830fb…` (site 13.12 / 100.92; Lim EL 10; tz Asia/Bangkok).
    - Sim runs need the user's 8400 stopped.

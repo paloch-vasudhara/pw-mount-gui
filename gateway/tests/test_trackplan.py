@@ -531,7 +531,10 @@ def test_rendezvous_inside_a_long_sun_interval_is_refused():
     ref = plan_track(setup(GEO), info, T0)
     fn = drifting_sun(ref.points[0], T0 - 60.0)  # already inside the 16 deg circle, 15.7 deg out
     res = plan_track(setup(GEO, sun=fn), info, T0)
-    assert isinstance(res, TrackRefusal) and res.code == "sun_no_detour"
+    assert isinstance(res, TrackRefusal) and (res.reason, res.code) == (
+        "Target is too close to the Sun; try again later",
+        "sun_no_detour",
+    )
     # < 30 s of track before the interval: too short
     fn = drifting_sun(ref.points[0], T0 + 25.0)
     res = plan_track(setup(GEO, sun=fn), info, T0)
@@ -618,6 +621,7 @@ def test_thaicom_8_drifting_into_the_real_sun():
     info3 = compute_pass(*tle, site, 10.0, now3, lambda: sun_at(now3), ts)
     res = plan_track(TrackSetup(*tle, site, 10.0, ts, sun_at, M), info3, now3)
     assert isinstance(res, TrackRefusal) and res.code == "sun_no_detour"
+    assert res.reason == "Target is too close to the Sun; try again later"
 
 
 # ------------------------------------------------------------------ budget

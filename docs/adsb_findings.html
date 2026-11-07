@@ -1,0 +1,613 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ADS-B Integration Findings</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=Barlow+Semi+Condensed:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #f6f7f9; --surface: #ffffff; --surface-2: #f0f2f5; --line: #dde1e7;
+  --text: #1b1f27; --muted: #5d6676; --accent: #2f8a4a; --accent-soft: #e4f3e8;
+  --warn: #b4232c; --warn-soft: #fbe9ea; --info: #1f6fb2; --info-soft: #e5f0fa;
+  --code: #eef1f5;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #1e2126; --surface: #25292f; --surface-2: #2c3138; --line: #3a4049;
+    --text: #e6e9ee; --muted: #9aa3b0; --accent: #5fbf78; --accent-soft: #24382b;
+    --warn: #ff7a7f; --warn-soft: #3d2628; --info: #6fb3ee; --info-soft: #1f3142; --code: #2f343c;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #1e2126; --surface: #25292f; --surface-2: #2c3138; --line: #3a4049;
+  --text: #e6e9ee; --muted: #9aa3b0; --accent: #5fbf78; --accent-soft: #24382b;
+  --warn: #ff7a7f; --warn-soft: #3d2628; --info: #6fb3ee; --info-soft: #1f3142; --code: #2f343c;
+}
+* { box-sizing: border-box; }
+html { scroll-padding-top: 16px; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 15.5px/1.55 "Barlow", "Bahnschrift", system-ui, sans-serif; }
+.wrap { display: grid; grid-template-columns: 240px minmax(0, 1fr); max-width: 1240px; margin: 0 auto; gap: 32px; padding: 24px 16px 64px; }
+nav { position: sticky; top: 16px; align-self: start; max-height: calc(100vh - 32px); overflow: auto; font-size: 14px; }
+nav h2 { font: 600 12px "Barlow Semi Condensed", sans-serif; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 16px 0 6px; }
+nav a { display: block; color: var(--text); text-decoration: none; padding: 3px 8px; border-left: 2px solid transparent; }
+nav a:hover { border-left-color: var(--accent); background: var(--surface-2); }
+nav a.sub { padding-left: 20px; color: var(--muted); }
+header.top { margin-bottom: 8px; }
+h1 { font: 700 30px/1.2 "Barlow Semi Condensed", sans-serif; letter-spacing: .02em; margin: 0 0 6px; }
+.meta { color: var(--muted); font-size: 14px; }
+.meta a { color: var(--info); }
+section { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 20px 24px; margin-top: 20px; }
+section > h2 { font: 700 20px "Barlow Semi Condensed", sans-serif; letter-spacing: .03em; margin: 0 0 4px; display: flex; gap: 10px; align-items: baseline; }
+h3 { font: 600 17px "Barlow Semi Condensed", sans-serif; margin: 22px 0 6px; padding-top: 14px; border-top: 1px dashed var(--line); display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+h4 { font: 600 15px "Barlow", sans-serif; margin: 14px 0 4px; }
+.id { font: 600 12px "Barlow Semi Condensed", sans-serif; color: var(--accent); background: var(--accent-soft); padding: 1px 7px; border-radius: 4px; letter-spacing: .05em; }
+.ref { font-size: 12.5px; color: var(--muted); font-weight: 500; }
+p { margin: 6px 0; }
+ul, ol { margin: 6px 0; padding-left: 22px; }
+li { margin: 2px 0; }
+code, .mono { font-family: Consolas, "Cascadia Mono", ui-monospace, monospace; font-size: 13px; background: var(--code); padding: 1px 5px; border-radius: 4px; }
+table { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 14.5px; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font: 600 12.5px "Barlow Semi Condensed", sans-serif; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); background: var(--surface-2); }
+.callout { border-left: 3px solid var(--info); background: var(--info-soft); padding: 8px 12px; border-radius: 0 6px 6px 0; margin: 10px 0; }
+.callout.warn { border-left-color: var(--warn); background: var(--warn-soft); }
+.callout.ok { border-left-color: var(--accent); background: var(--accent-soft); }
+.chip { display: inline-block; font: 600 12px "Barlow Semi Condensed", sans-serif; letter-spacing: .05em; padding: 1px 8px; border-radius: 999px; border: 1px solid currentColor; margin: 1px 2px; }
+.chip.g { color: var(--accent); } .chip.r { color: var(--warn); } .chip.b { color: var(--info); } .chip.m { color: var(--muted); }
+.card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; background: var(--surface-2); margin: 8px 0; font-size: 14.5px; }
+.card .t { font-weight: 600; }
+.card .row { display: grid; grid-template-columns: 140px 1fr; gap: 8px; }
+.btnbar { font: 600 13px "Barlow Semi Condensed", sans-serif; letter-spacing: .06em; display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; margin: 2px 0; }
+.btnbar span { padding: 3px 12px; }
+.btnbar .on { color: var(--accent); background: var(--accent-soft); outline: 1px solid var(--accent); }
+.flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 6px 0; }
+.flow span { background: var(--surface-2); border: 1px solid var(--line); border-radius: 6px; padding: 2px 10px; font-size: 14px; }
+.flow i { color: var(--muted); font-style: normal; }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+pre { overflow-x: auto; background: var(--code); padding: 8px 10px; border-radius: 6px; margin: 6px 0; }
+pre code { background: none; padding: 0; }
+footer { color: var(--muted); font-size: 13px; margin-top: 28px; }
+@media (max-width: 880px) {
+  .wrap { grid-template-columns: 1fr; gap: 0; }
+  nav { position: static; max-height: none; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+  .two { grid-template-columns: 1fr; }
+  section { padding: 16px; }
+  .card .row { grid-template-columns: 120px 1fr; }
+  table { display: block; overflow-x: auto; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<nav aria-label="Contents">
+  <h2>Report</h2>
+  <a href="#summary">Summary</a>
+  <a href="#repo">What the package is</a>
+  <a href="#platform">The data platform</a>
+  <a class="sub" href="#conn">Connection &amp; auth</a>
+  <a class="sub" href="#kinds">Event kinds</a>
+  <a class="sub" href="#decoded">Decoded fields</a>
+  <a class="sub" href="#ws">WebSocket protocol</a>
+  <a href="#gaps">Gaps &amp; unknowns</a>
+  <a href="#reuse">What we can reuse</a>
+  <h2>Design</h2>
+  <a href="#pipeline">Data pipeline</a>
+  <a class="sub" href="#cpr">CPR position decoding</a>
+  <a class="sub" href="#alt">Altitude</a>
+  <a class="sub" href="#time">Time base &amp; latency</a>
+  <a class="sub" href="#geom">Az/El geometry</a>
+  <a class="sub" href="#predict">Prediction</a>
+  <a href="#budget">Pointing error budget</a>
+  <a href="#cue">Mount cueing (aircraft mode)</a>
+  <a class="sub" href="#rates">Angular rates</a>
+  <a class="sub" href="#safety">Safety rules</a>
+  <a href="#ui">UI changes</a>
+  <a href="#security">Security</a>
+  <a href="#testing">Testing</a>
+  <h2>Next</h2>
+  <a href="#decisions">Decisions (Q35–Q50)</a>
+  <a href="#tasks">Proposed tasks</a>
+  <a href="#need">Needed from you</a>
+</nav>
+<main>
+<header class="top">
+  <h1>ADS-B Integration Findings</h1>
+  <div class="meta">2026-11-07 · source: <code>C:\Users\soar\Desktop\DELV\sip-aero-python</code> (revision <code>reviewed-python-client-20261107</code>). This is a read-only review: nothing was run, and no connection was made.
+  Goal: show aircraft on the Sky Viewer (hover + info) and cue the mount in aircraft mode, before Phase 6.</div>
+</header>
+
+<section id="summary">
+  <h2><span class="id">0</span> Summary</h2>
+  <ul>
+    <li><b>The package is a client kit, not the aircraft server.</b> It holds:
+      <ul>
+        <li>one Python receiver (<code>receive_ws.py</code>, ~290 lines, one dependency <code>websockets==17.4</code>) and its tests;</li>
+        <li>the public server CA;</li>
+        <li>the contract documents for the <b>SIP AERO platform</b> at <code>10.22.123.68</code>.</li>
+      </ul></li>
+    <li><b>How we connect:</b> WSS at <code>wss://10.22.123.68/api/v1/ws</code>.
+      <ul>
+        <li>Authentication is a revocable <b>read token</b>, sent as the first WebSocket message.</li>
+        <li>TLS is strict, checked against the bundled private CA.</li>
+        <li>REST history is at <code>/api/v1/records</code>. MQTT/TLS on port 8883 needs separate credentials.</li>
+      </ul></li>
+    <li><b>The aircraft data is the <code>decoded</code> event kind</b> (schema <code>sip.aero.adsb.decoded.v1</code>, DF17 only). It carries:
+      <ul>
+        <li>identification (callsign);</li>
+        <li>airborne position: altitude + <b>CPR codes</b> (Compact Position Reporting, ADS-B's encoded position format);</li>
+        <li>airborne velocity: ground speed, track, vertical rate, GNSS−baro difference;</li>
+        <li>target state.</li>
+      </ul></li>
+    <li><b>Biggest finding: the platform does not provide latitude/longitude.</b>
+      <ul>
+        <li><code>latitude_deg</code> and <code>longitude_deg</code> are always null (<code>position_status: needs_CPR_pair_or_valid_reference</code>).</li>
+        <li><b>We have to decode CPR ourselves</b>, from an even/odd message pair or against a known reference position.</li>
+        <li>It is a small, well-defined algorithm (~100 lines) that we can test against published vectors.</li>
+      </ul></li>
+    <li><b>Accuracy is limited by delay, not by ADS-B precision.</b>
+      <ul>
+        <li>The field of view is about 3°. One second of delay we don't correct for, on a 250 m/s aircraft 10 km away, moves it 1.4°.</li>
+        <li>So each position must be projected forward from its timestamp using the reported velocity.</li>
+        <li>The mount PC clock must be NTP-synced.</li>
+      </ul></li>
+    <li><b>Mount cueing reuses our custom alt/az path engine</b> (P21/P22): it sends PWI4 a short predicted path and refreshes it on every update.
+      <ul>
+        <li>Typical aircraft rates are 1–4°/s, within the mount's limits.</li>
+        <li>Overhead passes that peak above about 82° elevation exceed the 10°/s azimuth limit. They need the same near-zenith handling as satellites (Q18).</li>
+      </ul></li>
+    <li><b>Four facts are unknown, and a short real capture from you settles them:</b> the CPR field names, whether <code>decoded</code> publishing is switched on, the real feed delay, and where the receiver is. See <a href="#need">Needed from you</a>.</li>
+    <li><b>Recommendation:</b> build it as <b>Phase 5b (aircraft), before T6</b>. T6's security, packaging and acceptance work then covers the new incoming feed.</li>
+  </ul>
+</section>
+
+<section id="repo">
+  <h2><span class="id">1</span> What the package is</h2>
+  <table>
+    <tr><th>File</th><th>Content</th><th>Use for us</th></tr>
+    <tr><td><code>receive_ws.py</code></td><td>Async WSS receiver:
+      <ul>
+        <li>strict TLS and token authentication in the first message, then a check for the server's <code>hello</code>;</li>
+        <li>event / gap / heartbeat handling;</li>
+        <li>REST catch-up by ascending <code>after_id</code>;</li>
+        <li>exponential backoff (1 → 30 s);</li>
+        <li>JSONL output.</li>
+      </ul></td><td>Reference for our connection code (<a href="#reuse">§4</a>)</td></tr>
+    <tr><td><code>test_receive_ws.py</code></td><td>7 unit tests with mocked sockets: gap recovery, dedup, pagination, write failure, 1008 token rejection, TLS error text</td><td>Pattern for our fake-feed tests</td></tr>
+    <tr><td><code>sip-aero-ca.crt</code></td><td>The public certificate of the platform's own (private) certificate authority, revised 2026-11-07; SHA-256 <code>8E:16:E9:2A:…:A2:64</code></td><td>What we trust (public, so it can ship in our repo with a fingerprint check)</td></tr>
+    <tr><td><code>platform_api_en.md/.pdf/.tex</code></td><td>Full platform contract: auth, REST routes, WS protocol, persistence, telemetry units</td><td>Main reference</td></tr>
+    <tr><td><code>mqtt_decoded_en.md</code>, <code>decoded_payload.schema.json</code></td><td>The decoded ADS-B field contract and its JSON Schema</td><td>Our input validation</td></tr>
+    <tr><td><code>telemetry_*.md/.json</code>, <code>assets/*</code></td><td>81 receiver telemetry fields (ESP32/STM32, clock, network, archive)</td><td>Only for an optional receiver-health display</td></tr>
+    <tr><td><code>python_client_datasheet_en.*</code>, <code>review/*</code>, <code>manifest.json</code></td><td>Datasheet, packaging review, SHA-256 of every file; <code>credentials_included: false</code></td><td>—</td></tr>
+  </table>
+  <p>Other facts about the package:</p>
+  <ul>
+    <li>It is not a git repository and has no license file.</li>
+    <li>It is the vendor's example client, so we adapt its logic rather than copy the file in.</li>
+    <li>It has no server source, no aircraft analytics and no sample aircraft data. The only sample (<code>assets/telemetry_example.json</code>) is receiver telemetry.</li>
+  </ul>
+</section>
+
+<section id="platform">
+  <h2><span class="id">2</span> The data platform</h2>
+  <div class="flow"><span>Receiver (ESP32 + 2× STM32 channels)</span><i>→ MQTT/TLS QoS 0</i><span>Broker :8883</span><i>→</i><span>Platform ingest → SQLite commit</span><i>→</i><span>WS subscribers / REST</span></div>
+  <div class="flow"><span>Committed live/RAW frame</span><i>→ normalizer outbox (≤ 32 per turn)</i><span>MQTT <code>adsb/decoded</code> QoS 1</span><i>→ re-ingested as kind</i><span><code>decoded</code></span><i>→</i><span>WS / REST</span></div>
+  <ul>
+    <li>One FastAPI worker behind nginx.</li>
+    <li>Events are stored before they are broadcast.</li>
+    <li>Retention is 30 days.</li>
+    <li>The event <code>id</code> is an increasing decimal string, local to that database.</li>
+  </ul>
+
+  <h3 id="conn">Connection &amp; authentication</h3>
+  <table>
+    <tr><th>Item</th><th>Contract</th></tr>
+    <tr><td>WebSocket</td><td><code>wss://10.22.123.68/api/v1/ws?kinds=…&amp;after_id=…</code> (TCP 443)</td></tr>
+    <tr><td>Auth</td><td>The first message must arrive within 5 s: <code>{"type":"auth","token":"…"}</code>. Never in the URL. The token is re-checked about every 15 s; a revoked or expired token closes the connection with code 1008</td></tr>
+    <tr><td>Token</td><td>Read scope, valid 1–365 days (default 30), revocable. An admin creates it at <code>https://10.10.23.157</code>. It is separate from the MQTT and SSH credentials</td></tr>
+    <tr><td>TLS</td><td>Private CA, strict certificate checking (<code>VERIFY_X509_STRICT</code>), hostname/IP check on, no proxies. The certificate covers both <code>10.22.123.68</code> and <code>10.10.23.157</code></td></tr>
+    <tr><td>REST</td><td><code>Authorization: Bearer</code>. Routes: <code>/records</code> (filters: kind, device, icao, time, cursors; limit ≤ 500), <code>/overview</code>, and <code>/health</code> (public)</td></tr>
+    <tr><td>MQTT</td><td><code>mqtts://10.22.123.68:8883</code>, topics <code>adsb/decoded</code> (QoS 1) and the raw <code>adsb/frames</code>. Needs separately issued MQTT credentials and broker access rights</td></tr>
+    <tr><td>Network</td><td>The client machine needs a route/VPN to <code>10.22.123.68</code>. Not yet checked for the mount PC</td></tr>
+  </table>
+
+  <h3 id="kinds">Event kinds</h3>
+  <table>
+    <tr><th>Kind</th><th>Meaning</th><th>For us</th></tr>
+    <tr><td><code>decoded</code></td><td>Server-normalized DF17 messages with a documented schema.
+      <ul>
+        <li><b>Not in the WS default kinds</b>, so it must be requested.</li>
+        <li>Exists only when the server has <code>decoded_publish: true</code>, which is off by default in the source.</li>
+      </ul></td><td><span class="chip g">primary</span></td></tr>
+    <tr><td><code>live</code></td><td>The original parsed frame on <code>adsb/frames</code>: <code>payload.ADS_B</code> with DF/ICAO/TC and upstream fields (field names not documented)</td><td><span class="chip b">fallback</span> one hop earlier, so less delay</td></tr>
+    <tr><td><code>telemetry</code></td><td>Receiver health about every 5 s: clock (GNSS/NTP), channel freshness, PPS, network, buffers</td><td><span class="chip m">optional</span> health chip</td></tr>
+    <tr><td><code>raw</code>, <code>replay_end</code></td><td>Frames replayed from the receiver's eMMC archive</td><td>no (history, not live)</td></tr>
+    <tr><td><code>availability</code>, <code>diagnostic</code>, <code>server</code>, <code>invalid</code>, <code>raw_conflict</code></td><td>Device/server status</td><td>no (maybe availability, for the health chip)</td></tr>
+  </table>
+
+  <h3 id="decoded">Decoded fields we use</h3>
+  <table>
+    <tr><th>Type (TC)</th><th>Fields</th><th>Use</th></tr>
+    <tr><td><code>identification</code> (1–4)</td><td>callsign, category</td><td>Label, card title, search</td></tr>
+    <tr><td><code>airborne_position</code> (9–18)</td><td><code>barometric_altitude_ft</code>; CPR format (even/odd) and CPR lat/lon codes (17-bit); lat/lon <b>null</b></td><td>Position, after our CPR decode</td></tr>
+    <tr><td><code>airborne_position</code> (20–22)</td><td><code>gnss_altitude_m</code>, CPR codes</td><td>Position with true (geometric) height</td></tr>
+    <tr><td><code>airborne_velocity</code> (19)</td><td><code>ground_speed_kt</code>, <code>ground_track_deg</code> (true north), <code>east/north_velocity_kt</code>, <code>vertical_rate_fpm</code>, <code>gnss_minus_baro_altitude_ft</code>; on airspeed subtypes also <code>heading_deg</code>, <code>airspeed_kt</code></td><td>Prediction and height correction</td></tr>
+    <tr><td><code>target_state_status</code> (29)</td><td>selected altitude/heading, autopilot modes</td><td>Optional card extra; a hint that a turn is coming</td></tr>
+    <tr><td>Envelope</td><td>
+      <ul>
+        <li><code>icao</code> (6 hex);</li>
+        <li><code>timestamp</code> + <code>timestamp_status</code> + <code>timestamp_source</code> (1 = receiver GNSS … 7 = holdover);</li>
+        <li><code>received_at</code>;</li>
+        <li><code>crc_valid</code> / <code>frame_basis</code>, and <code>raw</code> (28 hex when CRC-checked);</li>
+        <li><code>signal_raw</code>, <code>channel</code>, <code>message_id</code>.</li>
+      </ul></td><td>Identity, timing, quality</td></tr>
+  </table>
+  <ul>
+    <li>The platform doesn't decode surface positions (TC 5–8). We don't need them: we only cue airborne targets above Lim EL.</li>
+    <li>Missing values stay <code>null</code>, never zero.</li>
+    <li>No position-integrity fields (NIC/NACp) are exposed. The position message's TC gives only a rough integrity level.</li>
+  </ul>
+
+  <h3 id="ws">WebSocket protocol</h3>
+  <ul>
+    <li>Packet types:
+      <ul>
+        <li><code>hello</code>: a runtime snapshot that includes active-aircraft summaries, but <i>not positions</i>;</li>
+        <li><code>event</code>;</li>
+        <li><code>gap</code>;</li>
+        <li><code>heartbeat</code>: about every 15 s when idle.</li>
+      </ul></li>
+    <li>Each client has a 256-packet queue. On overflow the server clears it and sends a <code>gap</code>.</li>
+    <li>The server can't filter by ICAO or area, so we filter on our side.</li>
+    <li>Catch-up (<code>after_id</code>) and history paging matter for a client that must log every message. <b>For live cueing, old positions are useless.</b> We only stream forward: on a gap we resume live and skip what was missed.</li>
+  </ul>
+</section>
+
+<section id="gaps">
+  <h2><span class="id">3</span> Gaps &amp; unknowns</h2>
+  <table>
+    <tr><th>#</th><th>Unknown</th><th>Why it matters</th><th>How to close</th></tr>
+    <tr><td>U1</td><td><b>The names of the CPR fields</b> inside <code>decoded</code>. The schema lists lat/lon but not the CPR format or codes; extra fields are allowed</td><td>The CPR decoder reads them. When <code>raw</code> is present we can decode the 28-hex frame ourselves, but for <code>parsed_live</code> frames <code>raw</code> is null</td><td>Sample capture</td></tr>
+    <tr><td>U2</td><td>Is <code>decoded_publish</code> switched on at the server?</td><td>Without it there is no <code>decoded</code> data. The client's default kinds (<code>decoded,telemetry</code>) suggest it is on</td><td>Sample capture, or the <code>/overview</code> counters</td></tr>
+    <tr><td>U3</td><td><b>The real delay</b> from radio reception to our gateway, and how much it varies, for <code>decoded</code> vs <code>live</code></td><td>It drives the predictor and the error budget. The decoded path adds a server queue and an extra MQTT round trip</td><td>A capture with both kinds: compare <code>timestamp</code>, <code>received_at</code> and our own arrival time</td></tr>
+    <tr><td>U4</td><td><b>The receiver's location</b>. Telemetry carries no station lat/lon</td><td>Decoding CPR against a reference needs a position within 180 NM. We also need to know whether the receiver sits with the mount</td><td>You</td></tr>
+    <tr><td>U5</td><td>Real message rates, the actual mix of <code>timestamp_status</code>/<code>source</code>, and the share of <code>full_raw_crc_checked</code> frames</td><td>How far to trust the timing; whether to trust CRC-checked frames only for cueing</td><td>Sample capture</td></tr>
+    <tr><td>U6</td><td>Whether the <b>mount PC</b> can reach <code>10.22.123.68:443</code></td><td>The gateway runs there</td><td>You</td></tr>
+    <tr><td>U7</td><td>How PWI4 behaves when a running custom path is <b>replaced</b> (new + add + apply) every second</td><td>Aircraft paths change with every update. P22 only measured extending a path</td><td>A sim probe (new finding P23)</td></tr>
+  </table>
+</section>
+
+<section id="reuse">
+  <h2><span class="id">4</span> What we can reuse</h2>
+  <ul>
+    <li><b>Connection logic from <code>receive_ws.py</code>.</b> We port it into a gateway module (<code>gateway/adsb_feed.py</code>) that runs as an asyncio task, like the PWI4 poller. The parts we take:
+      <ul>
+        <li><code>tls_context()</code> (strict CA) and URL validation;</li>
+        <li>the auth-first handshake and the <code>hello</code> check;</li>
+        <li>the packet loop;</li>
+        <li>close code 1008 → "token rejected", treated as fatal with no retry loop;</li>
+        <li>HTTP 429 / 5xx → retry, with backoff 1 → 30 s;</li>
+        <li>the TLS error text that includes the verify code.</li>
+      </ul></li>
+    <li><b>Not reused:</b> the JSONL output, the stdin token prompt, and the full REST catch-up loop, since a live cueing feed drops history.
+      <ul>
+        <li>Optional: one REST call at start (<code>/records?kind=decoded&amp;limit=…</code>, last ~60 s) to get callsigns and the first CPR pairs without waiting.</li>
+      </ul></li>
+    <li><b>Dependency:</b> our gateway already uses <code>websockets</code>: 17.2 in our venv, while the client pins 17.4. Both have the same <code>websockets.asyncio.client.connect</code> API, so no new package is needed.</li>
+    <li><b>Validation:</b> turn <code>decoded_payload.schema.json</code> into a pydantic model on the gateway. It rejects out-of-range values, unknown schema strings and oversized packets.</li>
+    <li><b>Test pattern:</b> their mocked-socket tests become our fake platform, a local WS server replaying a recorded JSONL file. Automated tests never connect to the real platform (the same rule as for astrometry.net).</li>
+    <li><b>Already in our app:</b>
+      <ul>
+        <li>disabled placeholders:
+          <ul>
+            <li>the Settings ADS-B group;</li>
+            <li>the Aircrafts filter tree;</li>
+            <li>the Track Target AIRCRAFT tab, with range presets 20/50/100/200/350 km;</li>
+            <li>the A1b card spec;</li>
+            <li><code>web/public/icons/aircraft.svg</code>.</li>
+          </ul></li>
+        <li>parts we reuse as they are:
+          <ul>
+            <li>the custom alt/az path executor (P21/P22);</li>
+            <li>the Sun / Lim EL safety monitor;</li>
+            <li>the secret store (Windows Credential Manager, write-only like the astrometry key);</li>
+            <li>the WS hub.</li>
+          </ul></li>
+      </ul></li>
+  </ul>
+</section>
+
+<section id="pipeline">
+  <h2><span class="id">5</span> Data pipeline (proposed)</h2>
+  <div class="flow"><span>adsb_feed (WSS client)</span><i>→ validate</i><span>aircraft table by ICAO</span><i>→ CPR</i><span>lat/lon/alt + velocity + time</span><i>→ ENU</i><span>az/el/range now</span><i>→</i><span>web snapshot 1 Hz</span></div>
+  <div class="flow"><span>selected aircraft</span><i>→ predict t+0…+10 s</i><span>alt/az path points</span><i>→ safety (Lim EL, Sun, rates)</i><span>PWI4 custom path (replaced on each update)</span></div>
+  <p>Everything runs in the <b>gateway</b>, for two reasons: the token never reaches the browser, and cueing needs the data next to the mount executor. The analysis service is not involved.</p>
+
+  <h3 id="cpr">CPR position decoding</h3>
+  <ul>
+    <li><b>First fix (global decode):</b> one even and one odd airborne position from the same aircraft, within 10 s of each other, give an unambiguous lat/lon.
+      <ul>
+        <li>Both frames must fall in the same longitude zone (NL); otherwise we wait for the next pair.</li>
+      </ul></li>
+    <li><b>Later fixes (local decode):</b> each new frame is decoded against that aircraft's own last position.
+      <ul>
+        <li>This is valid within 180 NM, with airborne precision of about 5 m.</li>
+      </ul></li>
+    <li><b>Sanity checks:</b> reject a position farther from the receiver than the range limit (≤ 350 km), or one implying more than ~1 000 kt since the last fix. After a rejection, start again from a fresh even/odd pair.</li>
+    <li><b>Implementation:</b> our own code (~100 lines), tested on the published worked example from <i>The 1090 MHz Riddle</i> (ICAO 40621D even/odd → 52.2572°, 3.9194°).
+      <ul>
+        <li>The common library, <b>pyModeS, is GPL-3.0</b>, which conflicts with packaging (Q38).</li>
+      </ul></li>
+  </ul>
+
+  <h3 id="alt">Altitude</h3>
+  <ul>
+    <li>Barometric altitude (TC 9–18) is pressure altitude, referenced to 1013.25 hPa. Depending on the weather it can differ from the true height by several hundred metres.</li>
+    <li>Use the best source available, in this order:
+      <ol>
+        <li>GNSS height (TC 20–22);</li>
+        <li>baro altitude + the latest <code>gnss_minus_baro_altitude_ft</code> from TC19, if no more than 60 s old;</li>
+        <li>baro altitude alone, flagged "baro" on the card.</li>
+      </ol></li>
+    <li>For scale: 100 m of height error is 0.57° at 10 km and 0.29° at 20 km.</li>
+  </ul>
+
+  <h3 id="time">Time base &amp; latency</h3>
+  <ul>
+    <li><b>Time of each fix:</b> the payload <code>timestamp</code> when <code>timestamp_status ≠ 0</code> and the source is GNSS or NTP (codes 1, 3, 4). Otherwise <code>received_at</code> (the server's receive time), flagged as lower quality.</li>
+    <li><b>Delay measurement:</b> the gateway measures <code>now − fix time</code> for every message.
+      <ul>
+        <li>The median and 95th-percentile delay appear in the ADS-B status.</li>
+        <li>The predictor always projects to the actual time the command is sent.</li>
+      </ul></li>
+    <li><b>The mount PC clock must be NTP-synced.</b> A clock error becomes an along-track error: 0.5 s ≈ 0.7° at 10 km.</li>
+  </ul>
+
+  <h3 id="geom">Az/El geometry</h3>
+  <ul>
+    <li>WGS84 lat/lon/height → Earth-centred coordinates (ECEF) → local east/north/up (ENU) at the Settings site → azimuth, elevation and slant range.</li>
+    <li>This includes Earth's curvature, so distant aircraft need no extra correction.</li>
+    <li><b>Refraction:</b> the astronomical model we use for stars and satellites doesn't apply to targets inside the atmosphere. The bending for aircraft is about 0.03° at 50 km, negligible against the 3° FOV. So the path gets geometric alt/az (note under Q39).</li>
+  </ul>
+
+  <h3 id="predict">Prediction</h3>
+  <ul>
+    <li><b>First build:</b> project forward from the last fix at the reported velocity (east/north knots plus vertical rate), on a flat local plane.
+      <ul>
+        <li>When the aircraft is turning, its last 2–3 track values give a turn rate, and the projection follows the turn.</li>
+      </ul></li>
+    <li><b>The H3 Kalman predictor</b> (in the logic sheet as "planned") comes later. We add it only if the measured gap between predicted and next real fix, on real tracks, exceeds the budget.</li>
+  </ul>
+</section>
+
+<section id="budget">
+  <h2><span class="id">6</span> Pointing error budget (FOV ≈ 3°, aim ≤ 0.5–1°)</h2>
+  <table>
+    <tr><th>Source</th><th>Size</th><th>At 10 km</th><th>At 20 km</th><th>At 50 km</th></tr>
+    <tr><td>1 s of delay not corrected for, at 250 m/s</td><td>250 m</td><td>1.43°</td><td>0.72°</td><td>0.29°</td></tr>
+    <tr><td>Height error of 100 m (baro, uncorrected)</td><td>100 m</td><td>0.57°</td><td>0.29°</td><td>0.11°</td></tr>
+    <tr><td>CPR airborne precision</td><td>≈ 5 m</td><td>0.03°</td><td>0.01°</td><td>&lt; 0.01°</td></tr>
+    <tr><td>Path following (P21/P22)</td><td>—</td><td colspan="3">0.003–0.06° on straight paths; up to ~0.2° in sharp curves at 10°/s</td></tr>
+  </table>
+  <div class="callout">Delay correction and height correction keep the aircraft in the frame. CPR precision and the mount are not the limiting factors.</div>
+</section>
+
+<section id="cue">
+  <h2><span class="id">7</span> Mount cueing (aircraft mode)</h2>
+  <ol>
+    <li><b>Track request</b> from the card or the AIRCRAFT tab:
+      <ul>
+        <li>run the checks (see <a href="#safety">safety rules</a>);</li>
+        <li>slew to where the aircraft will be when the slew finishes (the T4.2 rendezvous logic, with the aircraft predictor in place of sgp4).</li>
+      </ul></li>
+    <li><b>Following:</b> on every new fix (about 2 Hz for position and velocity, throttled to 1 Hz):
+      <ul>
+        <li>build a new predicted path from now − 0.5 s to now + 10 s, with a point every 0.5 s;</li>
+        <li>replace the running path (new + add + apply, <code>update_wrap=0</code>);</li>
+        <li>set the wrap window to cover the predicted route (P21).</li>
+      </ul></li>
+    <li><b>Gaps in the feed:</b> the mount keeps following the last path, which covers up to 10 s ahead. If no fresh fix arrives for 5 s, the mount stops (Q45).</li>
+    <li><b>End:</b> any of these ends the track and leaves the mount STOPPED, with the reason on the card, as for satellite tracks:
+      <ul>
+        <li>STOP;</li>
+        <li>the aircraft drops below Lim EL or goes out of range;</li>
+        <li>the Sun;</li>
+        <li>a rate limit;</li>
+        <li>the feed is lost.</li>
+      </ul></li>
+  </ol>
+  <div class="callout warn"><b>Probe first (U7).</b> Replacing a running path every second has not been measured on PWI4. Before building the executor, measure on the sim:
+    <ul>
+      <li>the disturbance at each replacement;</li>
+      <li>the apply delay (0.06–0.11 s in P21);</li>
+      <li>any hold or jump.</li>
+    </ul></div>
+
+  <h3 id="rates">Angular rates</h3>
+  <table>
+    <tr><th>Case</th><th>Peak El</th><th>Max angular rate</th><th>Max az rate</th></tr>
+    <tr><td>Cruise at 10.7 km, 250 m/s, passing 5 km to the side</td><td>65°</td><td>1.2°/s</td><td>2.9°/s</td></tr>
+    <tr><td>Cruise at 10.7 km, 250 m/s, passing 1.4 km to the side</td><td>82.4°</td><td>1.3°/s</td><td><b>10°/s</b> (arc limit)</td></tr>
+    <tr><td>Climb-out at 3 km, 130 m/s, 2 km to the side</td><td>56°</td><td>2.1°/s</td><td>3.7°/s</td></tr>
+    <tr><td>Approach at 1 km, 75 m/s, 3 km to the side</td><td>18°</td><td>1.4°/s</td><td>1.4°/s</td></tr>
+  </table>
+  <ul>
+    <li>Near their peak, aircraft move more slowly across the sky than LEO satellites.</li>
+    <li>The only hard case is a near-zenith overflight, where the azimuth rate is speed ÷ the horizontal miss distance.
+      <ul>
+        <li>On the sim the axis saturated at 20.4°/s (P22). For a cruising aircraft that is a peak of about 86°.</li>
+      </ul></li>
+    <li>Treatment, as for satellites:
+      <ul>
+        <li>allowed, with a "tracking lags near the zenith" note (Q18);</li>
+        <li>refused above a peak elevation still to be decided (Q46).</li>
+      </ul></li>
+  </ul>
+
+  <h3 id="safety">Safety rules (TRACK AIRCRAFT button + monitor)</h3>
+  <ul>
+    <li><b>Data:</b> a fresh position (≤ 3 s old), a completed first CPR fix, and the aircraft airborne.</li>
+    <li><b>Lim EL:</b> above Lim EL now, or predicted to cross it within the rendezvous window. The track stops when the aircraft drops below Lim EL (G3).</li>
+    <li><b>Sun:</b> not within 15° of the Sun. If the predicted path enters the 16° circle, the track stops before it. Aircraft get no detour (Q45).</li>
+    <li><b>Range:</b> within the range limit (from Settings or the tab's preset).</li>
+    <li><b>Unchanged:</b>
+      <ul>
+        <li>the link-loss stop (G4) and the start-up stop;</li>
+        <li>one tracked object at a time (G5): an aircraft track replaces a satellite track, and the other way round.</li>
+      </ul></li>
+  </ul>
+</section>
+
+<section id="ui">
+  <h2><span class="id">8</span> UI changes</h2>
+  <table>
+    <tr><th>Place</th><th>Change</th></tr>
+    <tr><td>Settings › ADS-B group</td><td>
+      <ul>
+        <li>an Enable switch;</li>
+        <li>WSS URL (default <code>wss://10.22.123.68/api/v1/ws</code>);</li>
+        <li>read token (write-only, kept in Credential Manager);</li>
+        <li>CA: the bundled public CA, with its fingerprint shown;</li>
+        <li>event kind (decoded / live);</li>
+        <li>receiver location, if it isn't with the mount;</li>
+        <li>default range limit;</li>
+        <li>status line: connected / auth failed / TLS error / age of the last message / median delay.</li>
+      </ul></td></tr>
+    <tr><td>Filters › Aircrafts tree</td><td>Enabled once a feed is configured. Child: Airborne aircraft (aircraft categories could be added later)</td></tr>
+    <tr><td>Sky Viewer</td><td>
+      <ul>
+        <li>An aircraft icon rotated to its track, with a callsign label (follows the Labels toggle).</li>
+        <li>Dimmed below Lim EL, like satellites.</li>
+        <li>Faded when stale (&gt; 10 s) and removed after 60 s.</li>
+        <li>Hover shows the nearest aircraft's tooltip; a click selects it.</li>
+        <li>Positions arrive at 1 Hz; the browser interpolates between updates.</li>
+      </ul></td></tr>
+    <tr><td>A1b Aircraft card</td><td>
+      <ul>
+        <li>As specified: callsign/ICAO title, Lat, Lon (.5f°), Altitude (.0f ft), Range (.3f km).</li>
+        <li>Proposed additions: Az/El, ground speed, track, vertical rate, data age, an altitude-source flag.</li>
+        <li>[TRACK AIRCRAFT], with the reason line.</li>
+      </ul></td></tr>
+    <tr><td>Track Target › AIRCRAFT tab</td><td>
+      <ul>
+        <li>The aircraft currently within the range preset (20/50/100/200/350 km, default 100).</li>
+        <li>Search by callsign/ICAO, sorted by range.</li>
+        <li>TRACK SELECTED TARGET.</li>
+      </ul></td></tr>
+    <tr><td>Status</td><td>A small "ADS-B feed down" chip on the Sky Viewer when the feed is enabled but disconnected or stale</td></tr>
+  </table>
+</section>
+
+<section id="security">
+  <h2><span class="id">9</span> Security</h2>
+  <ul>
+    <li><b>The token stays in Windows Credential Manager.</b>
+      <ul>
+        <li>The gateway sends it only in the first WSS message.</li>
+        <li>It is never logged, audited or returned to the browser (the same rules as the astrometry key).</li>
+      </ul></li>
+    <li><b>Strict TLS</b> with the bundled CA:
+      <ul>
+        <li>its fingerprint is pinned in code and tests;</li>
+        <li>no proxy, and the hostname check stays on;</li>
+        <li>a TLS failure shows the verify reason and never falls back to an unverified connection.</li>
+      </ul></li>
+    <li><b>The feed is untrusted input that can move the mount.</b>
+      <ul>
+        <li>We validate it against the schema, cap sizes (the platform caps payloads at 32 KB; we cap packets too), check numeric ranges and apply the sanity checks.</li>
+        <li>Every safety rule still applies. A bad or spoofed position can at most point the mount at the wrong place, inside the safe limits.</li>
+        <li>ADS-B itself is an unauthenticated radio broadcast, which is why spoofing is possible.</li>
+      </ul></li>
+    <li><b>Read-only use:</b> we never call the admin or token routes, and never publish to MQTT.</li>
+    <li><b>T6.1</b> extends its fuzz testing to the feed parser.</li>
+  </ul>
+</section>
+
+<section id="testing">
+  <h2><span class="id">10</span> Testing</h2>
+  <ul>
+    <li><b>Unit tests:</b>
+      <ul>
+        <li>CPR: published vectors, zone edges, rejections;</li>
+        <li>altitude selection;</li>
+        <li>ENU az/el against skyfield/astropy at fixed points;</li>
+        <li>the predictor, on straight and turning synthetic tracks;</li>
+        <li>schema validation.</li>
+      </ul></li>
+    <li><b>Fake platform:</b> a local WS server that does the auth handshake and replays a recorded JSONL capture, shifted to the current time. Gateway tests and browser checks use it (like <code>PW_ASTROMETRY_FAKE=1</code>).</li>
+    <li><b>Simulator:</b> the path-replacement probe (P23), then aircraft tracks on PWI4-sim driven by the replayed capture (Sun pinned with <code>PW_TEST_SUN_ALTAZ</code>).</li>
+    <li><b>Real:</b> done only by you: first a live feed check, then a real overflight cued on the L-350.</li>
+  </ul>
+</section>
+
+<section id="decisions">
+  <h2><span class="id">11</span> Decisions (Q35–Q50)</h2>
+  <table>
+    <tr><th>#</th><th>Decision</th><th>Recommended</th><th>Alternative</th></tr>
+    <tr><td>Q35</td><td>Transport</td><td><b>WSS + read token</b>: the documented client contract, port 443, revocable, read-only</td><td>MQTT direct: possibly less delay on <code>adsb/frames</code>, but needs MQTT credentials, broker access rights and an MQTT library</td></tr>
+    <tr><td>Q36</td><td>Event kind</td><td><b><code>decoded</code></b> (documented schema). Switch to <code>live</code> only if the capture shows the decoded delay above about 1 s</td><td><code>live</code> from the start (undocumented field names)</td></tr>
+    <tr><td>Q37</td><td>Where the client runs</td><td><b>Gateway</b>: the token stays server-side, next to the executor</td><td>Analysis service</td></tr>
+    <tr><td>Q38</td><td>CPR decoder</td><td><b>Our own implementation</b>, tested on published vectors</td><td>pyModeS (GPL-3.0)</td></tr>
+    <tr><td>Q39</td><td>Height source</td><td><b>GNSS → baro + TC19 difference → baro (flagged)</b>. No refraction for aircraft</td><td>Baro only</td></tr>
+    <tr><td>Q40</td><td>Time base</td><td><b>The payload timestamp if GNSS/NTP-qualified, otherwise <code>received_at</code></b>. Show the delay. NTP required on the mount PC</td><td>Our own arrival time</td></tr>
+    <tr><td>Q41</td><td>Predictor</td><td><b>Project forward at the reported velocity (+ turn rate)</b>. Add the H3 Kalman filter later if the errors call for it</td><td>Kalman filter now</td></tr>
+    <tr><td>Q42</td><td>What the Sky Viewer shows</td><td><b>Airborne, above 0°, within the range limit. Fade at 10 s, remove at 60 s. No trails</b></td><td>60 s trails (the parallel app has analytics)</td></tr>
+    <tr><td>Q43</td><td>A1b card fields</td><td><b>The spec + Az/El, ground speed, track, vertical rate, data age, altitude-source flag</b></td><td>The spec only</td></tr>
+    <tr><td>Q44</td><td>TRACK AIRCRAFT rules</td><td><b>Fresh (≤ 3 s); above Lim EL or crossing soon; Sun &gt; 15°; within range; zenith note</b></td><td>—</td></tr>
+    <tr><td>Q45</td><td>Feed loss or Sun during a track</td><td><b>Keep following the last path for up to 5 s, then STOP. Sun → stop before the 16° circle, no detour</b></td><td>Hold for the Sun, then resume</td></tr>
+    <tr><td>Q46</td><td>Near-zenith overflights</td><td><b>Allowed with the lag note. Refused above a peak elevation set from the sim probe (≈ 86°)</b></td><td>Always allowed</td></tr>
+    <tr><td>Q47</td><td>Receiver health</td><td><b>An ADS-B status line in Settings + a feed-down chip</b></td><td>A telemetry panel</td></tr>
+    <tr><td>Q48</td><td>CA handling</td><td><b>Bundle the public CA in the repo and pin its fingerprint</b>; Settings shows it</td><td>A file path in Settings</td></tr>
+    <tr><td>Q49</td><td>Order</td><td><b>Phase 5b before T6</b>, after the Phase 5 end tests</td><td>After T6</td></tr>
+    <tr><td>Q50</td><td>Tests</td><td><b>Only a fake platform replaying recorded captures. Automated tests never use the live platform</b></td><td>—</td></tr>
+  </table>
+</section>
+
+<section id="tasks">
+  <h2><span class="id">12</span> Proposed tasks (Phase 5b — Aircraft)</h2>
+  <table>
+    <tr><th>Task</th><th>Content</th><th>Gate</th></tr>
+    <tr><td>T5.4a</td><td>Analyse your capture: field names, rates, delay, timestamp mix → spec update</td><td>Report</td></tr>
+    <tr><td>T5.4b</td><td>
+      <ul>
+        <li>Gateway <code>adsb_feed</code>: WSS, TLS, auth, backoff, validation.</li>
+        <li>The Settings ADS-B group, with the token in Credential Manager.</li>
+        <li>The fake platform.</li>
+      </ul></td><td>Unit + fake-feed tests; no token leak</td></tr>
+    <tr><td>T5.4c</td><td>Aircraft state:
+      <ul>
+        <li>CPR first and later fixes;</li>
+        <li>altitude selection and timing;</li>
+        <li>ENU az/el and the predictor;</li>
+        <li>the snapshot sent to the web.</li>
+      </ul></td><td>Test vectors; replay → positions</td></tr>
+    <tr><td>T5.5</td><td>Web: the Aircrafts filter, the Sky Viewer layer + hover, the A1b card, the AIRCRAFT tab</td><td>Browser pass at 1920 and 1280×600 @1.5 on the fake feed</td></tr>
+    <tr><td>T5.6a</td><td>Sim probe P23: replacing the path every 1 s, the disturbances, rates near the zenith</td><td>Finding P23</td></tr>
+    <tr><td>T5.6b</td><td>Aircraft track planner/executor, rules and monitor</td><td>Sim tracks driven by the replay</td></tr>
+    <tr><td>T5.6c</td><td>Your live check: the real feed, then a real overflight on the L-350</td><td>You</td></tr>
+  </table>
+</section>
+
+<section id="need">
+  <h2><span class="id">13</span> Needed from you</h2>
+  <ol>
+    <li><b>A 10–15 minute capture</b> while there is traffic, made with your own token and kept outside both repos. For example:
+      <pre><code>.\.venv\Scripts\python.exe -X utf8 .\receive_ws.py --ca .\sip-aero-ca.crt --token-file "$env:USERPROFILE\.config\sip-aero\read-token.txt" --kinds decoded,live,telemetry --seconds 900 --output "$env:USERPROFILE\sip-aero-capture.jsonl"</code></pre>
+      <ul>
+        <li>Tell me the file path. The file contains aircraft data and no token.</li>
+        <li>It settles U1–U3 and U5, and later feeds the fake platform.</li>
+      </ul></li>
+    <li><b>The receiver's location</b> (lat/lon/height), and whether it sits with the mount (U4).</li>
+    <li><b>Whether the mount PC reaches <code>10.22.123.68:443</code></b>: a <code>/api/v1/health</code> check from that PC (U6).</li>
+    <li><b>A dedicated read token for the gateway</b> when we reach T5.4b. It goes straight into Settings; never paste it into chat.</li>
+    <li><b>Answers to Q35–Q50.</b></li>
+  </ol>
+</section>
+
+<footer>pw-mount-control · ADS-B integration findings · prepared from a read-only review of sip-aero-python (revision reviewed-python-client-20261107). No connection to the platform was made and no credentials were read.</footer>
+</main>
+</div>
+</body>
+</html>

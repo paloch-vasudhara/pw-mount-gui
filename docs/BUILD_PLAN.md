@@ -1865,7 +1865,7 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | T6.2 | ⬜ | | | | | |
 | T6.3 | ⬜ | | | | | |
 
-**Resume point (2026-11-02, T5 COMPLETE, user-checked):** T5.1 `e29ed97`; **the user commits T5.2 + T5.3 (+ T5.3d / T5.2e)**. Next:
+**Resume point (2026-11-02, T5 COMPLETE, user-checked):** T5.1 `e29ed97`; **T5.2 + T5.3 (+ T5.3d / T5.2e) committed `2e7d5cc`**. Next:
 1. **Phase 5 end (Tier 3):** full sim suite ×2 (ask the user to stop 8400), the harness, the full browser pass, the flaky list; then the Phase 5 close. Then Phase 6 (hardening & packaging), spec first.
 2. **The real-mount session** (user) whenever available: the checklist below plus D-SUN custom-path following (10°/s arcs, 15°/s straights) and HOME routing vs the real homing path.
 - **Real-mount session checklist** (the user's first session on the real L-350; homing + jog will be tested together):
@@ -2847,7 +2847,7 @@ The user stopped 8400 / 3200 / 8410 (PWI4 kept running) and gave a 150 min budge
 | Flaky list | <ul><li>`test_jog` keepalive: t0 is now taken before the send (the timer starts when the gateway accepts the jog);</li><li>`test_track_exec` pass sequence: waits for the "Track ended" override instead of reading it at once;</li><li>8 / 8 green together → **list empty**</li></ul> |
 | Full browser pass | the Phase 4 screens were covered by the T4.2 pass (click → "Track ended at Lim EL", Jog disabled) and the T4.3 pass (modal + A1e with a real THAICOM 8 track, after T4.2f) at 1920 and 1280×600 @1.5; Phase 3 screens unchanged since its Tier 3 |
 
-**Open item (user, fix if required):** a GEO about to be covered by the Sun disc shows "no safe detour" instead of "Sun blocks the track in …" (T4.2f log).
+~~Open item~~ **fixed 11-06 (user request):** a GEO about to be covered by the Sun disc now reads "Target is too close to the Sun; try again later" (code still `sun_no_detour`).
 
 ### T5.1a / T5.1b log (2026-10-30)
 
@@ -3097,9 +3097,33 @@ The user stopped 8400 / 3200 / 8410 (PWI4 kept running) and gave a 150 min budge
 - **The user commits T5.2 + T5.3 (+ T5.3d, T5.2e)** as one commit.
 - **Owed (Phase 5 end, Tier 3) next session:** full sim suite ×2 (the user's 8400 stopped), the harness, the full browser pass (1920 + 1280×600 @1.5: Pass Analysis, IOD, Astrometry with a fake nova, the pill, Settings), the flaky list (`test_compute_pass_budget_30ms` under CPU load).
 
+### Real-mount test (user, 2026-11-06, PlaneWave L-350)
+
+- **HOME:** works on the real mount; HOME with the Sun in the way is blocked correctly. **Home is cleared** (no longer an open status item).
+- **D-SUN:** works for every tracking and motion action (Go To, Jog, HOME, track segments).
+- **Mechanical limits:** with the mount homed at start, Jog and slews never reached the real mechanical limit; the 360° unwind message comes up first (the hang handler was not needed).
+- **Astrometry:** occasional hiccups remain; the user is investigating whether they come from astrometry.net (slow / cut off under load; current lean) or our pipeline. The analysis log's `nova step=` lines trace each astrometry.net step.
+- **ADS-B / aircraft (user decision):** a separate parallel app supplies the aircraft tracks (and their analytics). This app displays them on the Sky Viewer (hover + info) and tracks one on command. Its interface is still to be given.
+
+### GEO Sun wording (2026-11-06, user request; the T4.2f open item)
+
+- `gateway/trackplan.py`: a rendezvous inside a long Sun interval (> `SUN_HOLD_S`; a slow object such as a GEO drifting into the Sun) now refuses with `R_SUN_TOO_CLOSE` = "Target is too close to the Sun; try again later" instead of "Pass passes within 15° of the Sun; no safe detour". The code stays `sun_no_detour` (the web shows the gateway's reason; nothing keys on the text). The real no-detour cases (track ending inside the disc, no cw / ccw way, no clear chunk end) keep `R_NO_DETOUR`.
+- Tests: the two GEO refusal tests in `gateway/tests/test_trackplan.py` assert the new text. trackplan + check_track + dsun_wiring 82 passed; ruff clean.
+
+### ADS-B source review (2026-11-07, user request)
+
+- **Reviewed (read-only):** `C:/Users/soar/Desktop/DELV/sip-aero-python`, the SIP AERO platform client kit (`receive_ws.py`, CA, API / decoded / telemetry contracts). No connection made, nothing run.
+- **Report:** [docs/adsb_findings.html](adsb_findings.html) — findings, error budget, cueing design, decisions **Q35–Q50**, proposed **Phase 5b** (T5.4a–T5.6c, before T6).
+- **Key facts:**
+  - WSS `wss://10.22.123.68/api/v1/ws` + read token in the first message, strict TLS with the bundled CA.
+  - The `decoded` kind gives callsign, altitude, velocity, but **lat/lon are always null (CPR codes only)**: we decode CPR ourselves (own code; pyModeS is GPL-3.0).
+  - The pointing budget is set by latency (1 s at 250 m/s = 1.4° at 10 km vs FOV ≈ 3°) → timestamped dead reckoning, NTP on the mount PC.
+  - Cueing = custom alt/az path replaced each update; needs sim probe P23 first.
+- **Waiting on the user:** a 10–15 min capture (`--kinds decoded,live,telemetry`), the receiver location, the mount-PC route to `10.22.123.68:443`, answers Q35–Q50.
+
 ## 9. Known limitations & risks
 
 - **Gateway crash (G4 note):** nothing can send a stop if the gateway process dies; mitigated by a UI warning that hands the user off to PWI4.
 - **Sky Viewer scale:** "no item limit" is the main performance risk; the O1 benchmark puts the propagation side at ~2 s per 30-min chunk for 20k objects, so the remaining risk is rendering (T2.2/T2.3 measure it).
-- **D-SUN** is novel logic driving hardware; it ships only after planner unit tests + PWI4-sim runs + a supervised real-mount test.
-- **Aircraft / ADS-B** is deferred; UI is present but disabled.
+- **D-SUN** is novel logic driving hardware; it ships only after planner unit tests + PWI4-sim runs + a supervised real-mount test. **Real-mount test passed (user, 11-06).**
+- **Aircraft / ADS-B** is deferred; UI is present but disabled. Source (user, 11-06): a separate parallel app; this app displays + tracks on command (interface to be given).
