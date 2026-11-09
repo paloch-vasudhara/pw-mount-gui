@@ -2,7 +2,8 @@
 
 The API key is a secret: it lives only in the SecretStore (Windows Credential Manager),
 never in settings.json, never in a response, never logged. Everything else is plain JSON,
-written atomically (temp file + os.replace).
+written atomically (temp file + os.replace). T5.7: the CCTV password is a second secret (own
+Credential Manager entry); the CCTV URL and username are write-only towards the web as well.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import os
 import threading
 from pathlib import Path
 from typing import Literal, Protocol
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field, field_validator
@@ -23,6 +25,7 @@ log = logging.getLogger("gateway.settings")
 SCHEMA_VERSION = 1
 KEYRING_SERVICE = "pw-mount-control"
 KEYRING_USER = "astrometry.net"
+CCTV_KEYRING_USER = "cctv_password"
 
 DEFAULT_LAT = 13.7862
 DEFAULT_LON = 101.4639
@@ -69,22 +72,25 @@ class MemorySecretStore:
 class KeyringSecretStore:
     """Windows Credential Manager via `keyring` (service pw-mount-control)."""
 
+    def __init__(self, user: str = KEYRING_USER) -> None:
+        self.user = user
+
     def get(self) -> str | None:
         import keyring
 
-        return keyring.get_password(KEYRING_SERVICE, KEYRING_USER)
+        return keyring.get_password(KEYRING_SERVICE, self.user)
 
     def set(self, value: str) -> None:
         import keyring
 
-        keyring.set_password(KEYRING_SERVICE, KEYRING_USER, value)
+        keyring.set_password(KEYRING_SERVICE, self.user, value)
 
     def clear(self) -> None:
         import keyring
         from keyring.errors import PasswordDeleteError
 
         with contextlib.suppress(PasswordDeleteError):
-            keyring.delete_password(KEYRING_SERVICE, KEYRING_USER)
+            keyring.delete_password(KEYRING_SERVICE, self.user)
 
 
 _MEMORY = MemorySecretStore()
@@ -95,6 +101,16 @@ def default_secret_store() -> SecretStore:
     if os.environ.get("PW_SECRET_STORE") == "memory":
         return _MEMORY
     return KeyringSecretStore()
+
+
+_MEMORY_CCTV = MemorySecretStore()
+
+
+def default_cctv_secret_store() -> SecretStore:
+    """T5.7: the camera password's own Credential Manager entry (`cctv_password`)."""
+    if os.environ.get("PW_SECRET_STORE") == "memory":
+        return _MEMORY_CCTV
+    return KeyringSecretStore(CCTV_KEYRING_USER)
 
 
 # ---------------------------------------------------------------- schema
@@ -147,21 +163,56 @@ class Display(BaseModel):
     alt_unit: Literal["ft", "m", "km"] = "m"
 
 
+class Cctv(BaseModel):
+    """T5.7 mount camera. The URL and username are stored here but never sent to the web."""
+
+    enabled: bool = False
+    type: Literal["mjpeg", "hls"] = "mjpeg"
+    url: str = Field("", max_length=2048)
+    username: str = Field("", max_length=256)
+
+    @property
+    def configured(self) -> bool:
+        return self.enabled and bool(self.url)
+
+
+def cctv_url_error(url: str) -> str | None:
+    """Why a camera URL is refused (the message never echoes it), else None. Empty = no camera."""
+    if url == "":
+        return None
+    try:
+        u = urlsplit(url)
+        host = u.hostname
+        _ = u.port  # raises ValueError on a bad port
+    except ValueError:
+        return "The CCTV URL is not valid"
+    if u.scheme not in ("http", "https") or not host:
+        return "The CCTV URL must start with http:// or https:// (RTSP goes through the relay)"
+    if u.username is not None or u.password is not None or "@" in u.netloc:
+        return "Put the camera login in the Username / Password fields, not in the URL"
+    if u.fragment or any(c.isspace() for c in url):
+        return "The CCTV URL is not valid"
+    return None
+
+
 class StationSettings(BaseModel):
     version: int = SCHEMA_VERSION
     location: Location = Field(default_factory=Location)
     hardware: Hardware = Field(default_factory=Hardware)
     providers: Providers = Field(default_factory=Providers)
     display: Display = Field(default_factory=Display)
+    cctv: Cctv = Field(default_factory=Cctv)
 
 
 class SettingsUpdate(StationSettings):
     """PUT body: settings plus an optional write-only key.
 
     api_key: a string sets it, an empty string clears it, absent/null keeps it.
+    cctv_password: the same, for the camera password (its own Credential Manager entry).
     """
 
     api_key: str | None = None
+    cctv_password: str | None = Field(None, max_length=512)
 
     @field_validator("location")
     @classmethod
@@ -214,9 +265,17 @@ def compute_site_check(loc: Location, pwi4_site: tuple[float, float, float] | No
 
 
 class SettingsStore:
-    def __init__(self, path: Path | None = None, secrets: SecretStore | None = None) -> None:
+    def __init__(
+        self,
+        path: Path | None = None,
+        secrets: SecretStore | None = None,
+        cctv_secrets: SecretStore | None = None,
+    ) -> None:
         self.path = Path(path) if path else default_settings_path()
         self.secrets: SecretStore = secrets if secrets is not None else default_secret_store()
+        self.cctv_secrets: SecretStore = (
+            cctv_secrets if cctv_secrets is not None else default_cctv_secret_store()
+        )
         self._lock = threading.Lock()
         self.load_error: str | None = None
         self.current = StationSettings()
@@ -263,8 +322,13 @@ class SettingsStore:
             self.first_run = False
             return True
 
-    def save(self, new: StationSettings, api_key: str | None = None) -> StationSettings:
-        """Persist settings; api_key: str = set, empty = clear, None = keep."""
+    def save(
+        self,
+        new: StationSettings,
+        api_key: str | None = None,
+        cctv_password: str | None = None,
+    ) -> StationSettings:
+        """Persist settings; api_key / cctv_password: str = set, empty = clear, None = keep."""
         with self._lock:
             clean = StationSettings.model_validate(new.model_dump())
             # The Settings screen does not carry the home pose: a PUT that omits it must keep the
@@ -274,11 +338,21 @@ class SettingsStore:
             for name in ("home_alt_deg", "home_az_deg", "camera_pixel_um"):
                 if name not in fs:
                     setattr(clean.hardware, name, getattr(self.current.hardware, name))
+            # The CCTV url / username never travel to the web: a PUT that omits them keeps them.
+            cf = new.cctv.model_fields_set
+            for name in ("url", "username"):
+                if name not in cf:
+                    setattr(clean.cctv, name, getattr(self.current.cctv, name))
             if api_key is not None:
                 if api_key == "":
                     self.secrets.clear()
                 else:
                     self.secrets.set(api_key)
+            if cctv_password is not None:
+                if cctv_password == "":
+                    self.cctv_secrets.clear()
+                else:
+                    self.cctv_secrets.set(cctv_password)
             self._write(clean)
             self.current = clean
             self.first_run = False
@@ -290,7 +364,23 @@ class SettingsStore:
         except Exception:
             return False
 
+    def cctv_password_set(self) -> bool:
+        try:
+            return bool(self.cctv_secrets.get())
+        except Exception:
+            return False
+
     def public(self) -> dict:
         d = self.current.model_dump()
         d["api_key_set"] = self.api_key_set()
+        c = self.current.cctv
+        # write-only towards the web: only whether each is set, never the value
+        d["cctv"] = {
+            "enabled": c.enabled,
+            "type": c.type,
+            "url_set": bool(c.url),
+            "username_set": bool(c.username),
+            "password_set": self.cctv_password_set(),
+            "configured": c.configured,
+        }
         return d

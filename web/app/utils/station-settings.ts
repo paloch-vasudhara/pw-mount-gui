@@ -9,6 +9,19 @@ export interface StationSettingsDto {
   hardware: { mount: string, ota: string, lim_el_deg: number, camera_pixel_um?: number | null }
   providers: { astrometry: string, satellite_db: string }
   display: { lat_format: AngleFmt, lon_format: AngleFmt, alt_unit: AltUnit }
+  /** T5.7: the camera URL / username / password are write-only; only whether each is set comes back. */
+  cctv?: CctvSettingsDto
+}
+
+export interface CctvSettingsDto {
+  enabled: boolean
+  type: 'mjpeg' | 'hls'
+  url_set: boolean
+  username_set: boolean
+  password_set: boolean
+  configured: boolean
+  /** Not configured / Connecting / Live / Unreachable: reason */
+  status: string
 }
 
 export interface SiteCheckDto {
@@ -41,9 +54,22 @@ export interface SettingsForm {
   apiKey: string
   /** "clear key" was pressed. */
   clearKey: boolean
+  /** T5.7 CCTV: enable, type, and the write-only url / username / password (empty = untouched). */
+  cctvEnabled: boolean
+  cctvType: 'mjpeg' | 'hls'
+  cctvUrl: string
+  cctvUser: string
+  cctvPass: string
+  /** Whether the gateway already holds each (placeholders + the clear links). */
+  cctvUrlSet: boolean
+  cctvUserSet: boolean
+  cctvPassSet: boolean
+  clearCctvUrl: boolean
+  clearCctvUser: boolean
+  clearCctvPass: boolean
 }
 
-export type FieldErrors = Partial<Record<'lat' | 'lon' | 'alt' | 'timezone' | 'limEl' | 'cameraPixelUm', string>>
+export type FieldErrors = Partial<Record<'lat' | 'lon' | 'alt' | 'timezone' | 'limEl' | 'cameraPixelUm' | 'cctvUrl', string>>
 
 export const LIM_EL_MIN = 0
 export const LIM_EL_MAX = 90
@@ -69,7 +95,35 @@ export function formFromDto(d: StationSettingsDto): SettingsForm {
     satelliteDb: d.providers.satellite_db,
     apiKey: '',
     clearKey: false,
+    cctvEnabled: d.cctv?.enabled ?? false,
+    cctvType: d.cctv?.type ?? 'mjpeg',
+    cctvUrl: '',
+    cctvUser: '',
+    cctvPass: '',
+    cctvUrlSet: d.cctv?.url_set ?? false,
+    cctvUserSet: d.cctv?.username_set ?? false,
+    cctvPassSet: d.cctv?.password_set ?? false,
+    clearCctvUrl: false,
+    clearCctvUser: false,
+    clearCctvPass: false,
   }
+}
+
+/** Why a typed camera URL is refused (mirrors the gateway), else null. */
+export function cctvUrlError(url: string): string | null {
+  const v = url.trim()
+  if (v === '') return null
+  if (/\s/.test(v)) return 'The URL must not contain spaces'
+  let u: URL
+  try {
+    u = new URL(v)
+  }
+  catch {
+    return 'Enter a full URL, e.g. http://192.168.1.20/mjpeg'
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return 'Only http:// or https:// (RTSP goes through the relay)'
+  if (u.username || u.password || /^[a-z]+:\/\/[^/?#]*@/i.test(v)) return 'Put the login in Username / Password, not in the URL'
+  return null
 }
 
 function inRange(v: number | null, lo: number, hi: number): boolean {
@@ -84,6 +138,9 @@ export function validateForm(f: SettingsForm, zones: readonly string[]): FieldEr
   if (!f.timezone || !zones.includes(f.timezone)) e.timezone = 'Choose a time zone from the list'
   if (!inRange(f.limEl, LIM_EL_MIN, LIM_EL_MAX)) e.limEl = 'Lim EL must be between 0 and 90'
   if (f.cameraPixelUm != null && !inRange(f.cameraPixelUm, PIXEL_UM_MIN, PIXEL_UM_MAX)) e.cameraPixelUm = 'Camera pixel size must be between 0.5 and 30 µm'
+  const urlErr = cctvUrlError(f.cctvUrl)
+  if (urlErr) e.cctvUrl = urlErr
+  else if (f.cctvEnabled && f.cctvUrl.trim() === '' && (!f.cctvUrlSet || f.clearCctvUrl)) e.cctvUrl = 'Enter the camera stream URL'
   return e
 }
 
@@ -98,6 +155,15 @@ export function buildPayload(f: SettingsForm): Record<string, unknown> {
   }
   if (f.clearKey) body.api_key = ''
   else if (f.apiKey !== '') body.api_key = f.apiKey
+  // CCTV url / username / password are sent only when typed or cleared; an omitted field is kept.
+  const cctv: Record<string, unknown> = { enabled: f.cctvEnabled, type: f.cctvType }
+  if (f.clearCctvUrl) cctv.url = ''
+  else if (f.cctvUrl.trim() !== '') cctv.url = f.cctvUrl.trim()
+  if (f.clearCctvUser) cctv.username = ''
+  else if (f.cctvUser !== '') cctv.username = f.cctvUser
+  body.cctv = cctv
+  if (f.clearCctvPass) body.cctv_password = ''
+  else if (f.cctvPass !== '') body.cctv_password = f.cctvPass
   return body
 }
 
@@ -138,6 +204,8 @@ const EPS = 1e-7
  */
 export function isDirty(f: SettingsForm, baseline: SettingsForm): boolean {
   if (f.apiKey !== '' || f.clearKey) return true
+  if (f.cctvUrl !== '' || f.cctvUser !== '' || f.cctvPass !== '') return true
+  if (f.clearCctvUrl || f.clearCctvUser || f.clearCctvPass) return true
   const num = (a: number | null, b: number | null) =>
     a === b || (a != null && b != null && Math.abs(a - b) <= EPS)
   return !(
@@ -148,6 +216,7 @@ export function isDirty(f: SettingsForm, baseline: SettingsForm): boolean {
     && f.altUnit === baseline.altUnit
     && f.mount === baseline.mount && f.ota === baseline.ota
     && f.astrometry === baseline.astrometry && f.satelliteDb === baseline.satelliteDb
+    && f.cctvEnabled === baseline.cctvEnabled && f.cctvType === baseline.cctvType
   )
 }
 

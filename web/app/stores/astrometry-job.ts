@@ -5,8 +5,9 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { useGatewayApi } from '~/composables/useGatewayApi'
 import {
-  ERR_JOB_LOST, isActiveState, isDismissed, markDismissed, parseJob, relayErrorText, type AstrometryJob,
+  ERR_JOB_LOST, isActiveState, isDismissed, isReviewed, markDismissed, markReviewed, parseJob, relayErrorText, type AstrometryJob,
 } from '../utils/astrometry-job'
+import { needsScaleReview } from '../utils/iod'
 
 export const POLL_MS = 2500
 const FETCH_TIMEOUT_MS = 5000
@@ -24,11 +25,20 @@ export const useAstrometryJobStore = defineStore('astrometry-job', () => {
   const resuming = ref(false)
   /** A Retry started job `to` in place of `from`: the IOD dialog moves the row that held `from`. */
   const resumed = ref<{ from: string, to: string, n: number } | null>(null)
+  /** T5.2f: the pill's Use / Discard on a job whose row is in IOD; the IOD dialog performs it on the row (n: a new request). */
+  const reviewAction = ref<{ kind: 'use' | 'discard', n: number } | null>(null)
+  const reviewTick = ref(0)
   const api = useGatewayApi()
   let timer: ReturnType<typeof setTimeout> | null = null
   let gen = 0
 
   const active = computed(() => !!job.value && isActiveState(job.value.state))
+  /** A done job whose solved scale differs from the station's and has not been answered with Use yet (T5.2f). */
+  const needsReview = computed(() => {
+    void reviewTick.value
+    const j = job.value
+    return !!j && j.state === 'done' && !!j.result && needsScaleReview(j.result) && !isReviewed(j.job_id)
+  })
 
   async function getJson(path: string): Promise<{ status: number, body: unknown }> {
     try {
@@ -134,6 +144,24 @@ export const useAstrometryJobStore = defineStore('astrometry-job', () => {
     applyRequested.value = true
     openIodTick.value += 1
   }
+  /** The scale review is answered with Use: the pill returns to its normal done state. */
+  function markUsed(jobId: string): void {
+    markReviewed(jobId)
+    reviewTick.value += 1
+  }
+  /** The pill's Use: with the row in IOD it uses the row; after a refresh (no row) the result goes into a free row directly. */
+  function reviewUse(): void {
+    const cur = job.value
+    if (!cur) return
+    if (row.value !== null) { reviewAction.value = { kind: 'use', n: (reviewAction.value?.n ?? 0) + 1 }; return }
+    markUsed(cur.job_id)
+    requestApply()
+  }
+  /** The pill's Discard: with the row in IOD the dialog empties it (and dismisses); without a row only the pill goes. */
+  function reviewDiscard(): void {
+    if (row.value !== null) reviewAction.value = { kind: 'discard', n: (reviewAction.value?.n ?? 0) + 1 }
+    else dismiss()
+  }
   function requestOpenIod(): void {
     openIodTick.value += 1
   }
@@ -147,9 +175,13 @@ export const useAstrometryJobStore = defineStore('astrometry-job', () => {
     resumeError.value = null
     resuming.value = false
     resumed.value = null
+    reviewAction.value = null
     applyRequested.value = false
     openIodTick.value = 0
   }
 
-  return { job, row, openIodTick, applyRequested, active, resumeError, resuming, resumed, start, reattach, cancel, resume, dismiss, requestApply, requestOpenIod, reset }
+  return {
+    job, row, openIodTick, applyRequested, active, needsReview, reviewAction, resumeError, resuming, resumed,
+    start, reattach, cancel, resume, dismiss, requestApply, requestOpenIod, markUsed, reviewUse, reviewDiscard, reset,
+  }
 })

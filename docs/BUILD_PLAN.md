@@ -185,6 +185,15 @@ Each phase ends with a **supervisor gate** (independent checks) and a **user che
 
 **User check:** an end-to-end IOD from uploaded images.
 
+### Phase 5b — Aircraft (ADS-B), added 2026-11-07
+| Task | Scope | Gate |
+|---|---|---|
+| T5.4 | ADS-B feed (WSS, gateway), validation, Settings ADS-B, CPR + aircraft state + predictor | Fake-platform replay; CPR vectors; no token leak |
+| T5.5 | Web: Aircrafts filter, Sky Viewer layer + hover, A1b card, AIRCRAFT tab | Browser pass on the fake feed |
+| T5.6 | Aircraft cueing: P23 probe, `track_aircraft` planner / executor, rules | Sim tracks from a replayed capture; user overflight |
+
+**User check:** a live feed, then a real overflight cued on the L-350.
+
 ### Phase 6 — Hardening & packaging
 | Task | Scope | Gate |
 |---|---|---|
@@ -1828,6 +1837,241 @@ The solved target RA/Dec at mid-exposure fills the IOD row. The job runs in the 
 
 ---
 
+### T5.2f — Astrometry: images from other setups, scale-mismatch review (spec, 2026-11-09, from the user's real cases)
+
+**Problem (user 11-09):** an image taken with a different OTA / camera solves on astrometry.net, but no target RA/Dec is produced. Two station constraints are applied to images they do not describe:
+- the gateway relay fills a missing focal length / pixel size with the station's (RASA11 620 mm + Settings `camera_pixel_um`), and astrometry.net is told ±25 % around that scale (it may then fail to solve);
+- after a solve, `scale_ok()` fails the job ("Solved scale does not match the camera") when the solved scale is > 25 % off the hint, so the solution is thrown away.
+
+**Decisions (user 11-09):**
+- **Q51 image source:** an "Image source: Station | Other setup" toggle in the Astrometry dialog, default Station. When the file's own optics (FITS `FOCALLEN` / `XPIXSZ`) differ from the station's by > 25 % in plate scale, the toggle switches to Other with a note; the user can switch back. Station = the station hints as now; **Other = no station hints** (the file's own hints if present, else a blind solve).
+- **Q52 mismatch:** a solve is never failed for its scale. When the solved scale does not match the station (> 25 % off), the job finishes with a **review**: solved scale + field extent vs the station's, and the user chooses **Use** or **Discard**. Same for both sources.
+- **Q53 where:** the pill (Use / Discard) and the waiting IOD row (Use / Discard in the row, the in-row confirm style). The row stays pending until a choice. (The Astrometry dialog closes on RUN, so "the dialog" = the IOD row.)
+- **Q54 site:** other-setup images are taken from the station's location; IOD keeps the Settings location (the user moves the Settings location to work another site). The row's source shows the image was an other-setup image.
+
+**1. Analysis (`analysis/astrometry/`)**
+- `RunIn`: new `source: "station" | "other"` (default `"station"`), `station_focal_mm: float | None`, `station_pixel_um: float | None` (the station's optics, for the comparison only; never used as a hint).
+- Hint (unchanged rule): `hint_scale_arcsec(focal_mm, pixel_um)` from the body's `focal_mm` / `pixel_um` (blind when missing).
+- **Remove the scale failure:** `scale_ok` no longer raises `ERR_SCALE` (keep the constant out of use, or delete it with its tests updated).
+- **Result `scale_check`** (always present in a DONE result):
+  `{source, solved_arcsec_px, field_deg: [w, h], station_arcsec_px | null, station_field_deg: [w, h] | null, match: true | false | null}`;
+  field = image width / height × scale; `match` = solved within 0.8–1.25 × the station scale; `null` when the station scale is unknown (no `camera_pixel_um`).
+- The fingerprint keeps including the hint scale (a Station and an Other run of the same image are different submissions; that is intended).
+- `FakeNova`: an env `PW_ASTROMETRY_FAKE_SCALE` (arcsec / px) overrides the returned scale, so a mismatch can be produced in tests and the browser gate.
+
+**2. Gateway relay (`POST /api/mount/astrometry/run`)**
+- `AstrometryRun` gains `source` (default `"station"`).
+- `station`: fill missing `focal_mm` / `pixel_um` with the station's (as now).
+- `other`: **never fill** from the station; pass only what the client sent (the file's own header values or nothing).
+- Always add `station_focal_mm = 620.0` and `station_pixel_um = Settings camera_pixel_um` (may be null).
+- The key handling / scrubbing is unchanged (tests stay green).
+- The resume relay is unchanged (the resumed job reuses the stored spec).
+
+**3. Web**
+- **Astrometry dialog:** the Image source toggle (`SegToggle`, `data-testid="as-source"`), default Station.
+  - Auto-suggest: when the loaded file's `focal_mm` and / or `pixel_um` give a plate scale > 25 % off the station's (station pixel from Settings; if the station pixel is unknown compare focal length only), switch to Other and show "File optics (N mm, M µm) differ from the station: treated as Other setup" on the status line.
+  - A user change of the toggle wins until the next image load.
+  - RUN sends `source`; with Other it sends only the file's own `focal_mm` / `pixel_um`.
+- **Job result → IOD row:**
+  - `scale_check.match === false` → the row becomes **review** (still not usable by IOD, like pending), text "Scale differs from the station: solved S″/px, F°×G° (station s″/px, f°×g°)", in-row **Use** / **Discard** (`iod-review-use` / `iod-review-discard`).
+  - Use → the row is filled as an Astrometry row (RA / Dec / epoch as a normal result, then H4 as now).
+  - Discard → the row becomes empty; the pill is dismissed.
+  - `match` true / null → applied directly as now.
+  - **Source label:** an other-setup row shows its source as "Astrometry (other)" when that fits the column at 1280×600 @1.5; otherwise a shorter form chosen by measurement, with the full text in its `title`. Station rows keep "Astrometry".
+- **Pill:** a done job awaiting review shows the title "Astrometry solved — scale differs" and **Use** / **Discard** buttons (`as-pill-use` / `as-pill-discard`), the same actions as the row. When its row is not in IOD (after a refresh), Use takes the "apply to a row…" path (the first free row) and applies it directly (the user already chose Use).
+- The review survives closing / reopening IOD (the memo) and a refresh (the pill reattaches to the done job; the row is restored as review from the job).
+
+**4. Tests**
+- analysis: no scale failure; `scale_check` fields (match true / false / null; the field extent); Other runs carry no station hint; the fake scale override.
+- gateway: `other` never filled from the station; `station` filled as before; the station values always added; the key-echo tests stay green.
+- web (vitest): the auto-suggest rule; the RUN body per source; the row review → Use / Discard; the pill review buttons; the source label.
+- Gates: touched tests + the non-sim suite once; web typecheck / lint / vitest. The supervisor runs the browser check (fake nova with `PW_ASTROMETRY_FAKE_SCALE`) at 1920 + 1280×600 @1.5. Real astrometry.net only by the user.
+
+---
+
+### T5.7 — Mount CCTV view, prepared for a live feed (spec, 2026-11-09)
+
+**Goal:**
+- The MOUNT STATUS panel shows either the 3D model or a live CCTV feed of the mount (one camera, watched from a distance).
+- The expanded view (Detailed Mount Status) adds **Side by side**.
+- With no CCTV configured, nothing changes: no CCTV options appear, the panel is exactly as today.
+- Built now with a fake camera, so the real camera only needs its URL and credentials entered in Settings.
+
+**Decisions (user 11-09):**
+- **Q56:** the stream goes **through the gateway**. The camera's address and credentials stay server-side (credentials in Windows Credential Manager); the browser only talks to our app (one origin, works remotely).
+- **Q57:** prepare for every common format; the camera will most likely be an IP camera.
+  - Built and tested now: **MJPEG** (multipart over HTTP, also the snapshot fallback) and **HLS** (hls.js in the browser).
+  - **RTSP** (the usual IP-camera stream) cannot play in a browser. It is handled by a relay sidecar (MediaMTX or go2rtc) that republishes RTSP as HLS; the gateway then proxies that HLS. The relay is set up when the camera is known (deployment, with T6.2); a documented config and a check script ship now.
+- **Q58:** one feed.
+
+**1. Settings (gateway store + Station Settings dialog)**
+- A new **CCTV** group: Enable, Type (MJPEG / HLS), Stream URL, Username, Password (write-only, Credential Manager key `cctv_password`, shown masked, never sent back), and a status line (Not configured / Connecting / Live / Unreachable: reason).
+- "Configured" = enabled and a URL is set. The web only learns `{configured, type, status}`, never the URL or credentials.
+- URL rules: `http`/`https` only (RTSP goes through the relay's HLS URL); no credentials inside the URL (use the fields); validated on save.
+- **Scrolling (user 11-09):** with the new group the dialog body must scroll where it does not fit (1280×600 @1.5 certainly). The body scrolls inside the dialog; the title bar and the CANCEL / SAVE SETTINGS bar stay fixed. The scrollbar is styled like the app's existing one in `VisibilityFilters.vue` (thin, the theme's track / thumb colours, Firefox `scrollbar-width` / `scrollbar-color` included), moved into one shared utility class so later scroll areas reuse it; no default white OS scrollbar.
+
+**2. Gateway (`gateway/cctv.py`)**
+- `GET /api/mount/cctv/status` → `{configured, type, state, error|null, viewers}` (auth as the other status routes).
+- **Stream ticket:** `<img>` / hls.js requests cannot carry our `X-Mount-Token` header.
+  - `POST /api/mount/cctv/ticket` (header auth) returns a ticket valid 60 s, bound to the session.
+  - The stream URLs take `?t=<ticket>`; a used ticket stays valid for that stream's lifetime.
+  - Tickets are never logged or audited.
+- **MJPEG:** `GET /api/mount/cctv/mjpeg?t=…` streams the camera's multipart response through (async, chunked, the camera's Content-Type kept).
+  - At most 2 concurrent viewers; a viewer that stops reading is dropped.
+  - The upstream connection closes when the last viewer leaves.
+- **Snapshot:** `GET /api/mount/cctv/snapshot?t=…` returns one JPEG (from the MJPEG stream, or a snapshot URL if the camera has one). This is the fallback when streaming fails.
+- **HLS:** `GET /api/mount/cctv/hls/{path}?t=…` proxies the playlist and segments.
+  - Playlist URIs are rewritten to our proxy path.
+  - Only paths under the configured playlist's base are fetched (**no open proxy**).
+  - Size and time limits per request.
+- Upstream auth: Basic or Digest with the stored username / password, added server-side only.
+- Errors map to readable states ("Camera unreachable", "Camera rejected the login", "Stream format not recognised"). Camera URLs and credentials never appear in responses, logs or the audit (the astrometry-key rules).
+- Read-only: the gateway never sends anything to the camera except GETs for the stream (no PTZ, no camera settings).
+
+**3. Web**
+- **Panel (compact):** when configured, a small two-option toggle **3D | CCTV** at the slot's top-right corner, inside `mount-3d-slot`.
+  - CCTV shows the stream fitted to the slot (`object-fit: contain`, letterboxed).
+  - While CCTV is shown, the 3D renderer stops rendering (no frames), as the idle rule.
+- **Expanded (Detailed Mount Status):** **3D | CCTV | Side by side**; side by side splits the 3D area into two halves (3D left, CCTV right).
+- **Per-viewer memory:** the choice is kept in localStorage (try / catch), default 3D. A remembered CCTV choice falls back to 3D when CCTV is no longer configured.
+- **Streams only while visible:** opened when shown, closed when hidden, when the dialog closes, or when the tab is hidden (`visibilitychange`), to save bandwidth.
+- **States over the video area:**
+  - "Connecting…";
+  - "CCTV feed unavailable — retrying" (backoff 2 → 30 s);
+  - after 3 failed stream attempts, a snapshot refreshed every 5 s, labelled "Snapshot".
+  - A small LIVE / SNAPSHOT chip in a corner.
+- **Player:** MJPEG = `<img src>`; HLS = `<video muted playsinline>` + hls.js (pinned exact version), or native HLS where the browser supports it.
+- **Sizing:** the toggle's size and position are measured and listed for the user before they are applied (the user tunes them), at 1920 and 1280×600 @1.5.
+
+**4. Fake camera + relay prep (tools)**
+- `tools/fake_cctv.py`: a local camera on a throwaway port.
+  - MJPEG: Pillow-rendered frames with a moving marker + clock, ~10 fps, optional Basic auth.
+  - Snapshot JPEG.
+  - HLS: via ffmpeg's test pattern when ffmpeg is on PATH; otherwise HLS is skipped with a notice.
+  - Used by the gateway tests (MJPEG / snapshot; HLS through recorded playlist + segment fixtures) and the browser check.
+- `tools/cctv_relay/`: a MediaMTX config template (RTSP in → HLS out) + a README (install, point it at the camera's RTSP URL, put the HLS URL in Settings) + `check_stream.py` (fetches the configured stream once and reports format / resolution / fps, without printing credentials).
+
+**5. Tests**
+- **gateway:**
+  - the ticket (expiry, session binding, never logged);
+  - the MJPEG pass-through and the 2-viewer cap;
+  - snapshot;
+  - HLS rewriting and the no-open-proxy rule;
+  - credentials never echoed (responses, logs, audit);
+  - the settings fields (password write-only) and the URL rules.
+- **web (vitest):** the toggle only when configured; the options per view (2 compact, 3 expanded); the memory fallback; streams closing when hidden; the state texts.
+- **Browser check (supervisor):** the fake camera (MJPEG and HLS) at 1920 + 1280×600 @1.5:
+  - the panel toggle;
+  - the expanded side by side;
+  - not configured = unchanged;
+  - feed loss → retry → snapshot.
+- Gates: touched tests + the non-sim suite once; web typecheck / lint / vitest.
+
+**Order:** T5.7 does not depend on the ADS-B work and can be built while the ADS-B capture is awaited.
+
+---
+
+### Phase 5b — Aircraft display + cueing from ADS-B (spec, 2026-11-07; approved by the user 11-07)
+
+> **Update 11-09 (user, Q55): the ADS-B pipeline comes from `adsb_core`**, the library of the sibling repo `C:\Users\soar\Desktop\DELV\adsb_interpreter` (read only for us; its D1). That repo is the reference for how ADS-B data is read and interpreted. Consequences for this spec:
+> - **sections 1–2 are implemented by importing `adsb_core`**, not by our own modules: `adsb_core.platform` (the WSS client), `adsb_core.cpr`, `adsb_core.geometry` (done there in its P1a, 11-09), and `messages` / `timebase` / `height` / `state` / `predict` (its P1b, pending on the capture). Our gateway keeps: the runner task, Settings (URL, token in Credential Manager), the snapshot to the web, and everything in sections 3–4 (cueing, UI). The Q35–Q50 rules live in `adsb_core` and its tests are the contract (its J3).
+> - install: an editable path install in dev, pinned to a git tag of adsb_interpreter for releases (its D7).
+> - **isolation (user 11-09): the satellite side must work when the ADS-B side does not.** The gateway imports `adsb_core` optionally: missing / broken / a different major version → the gateway starts normally, satellites and every mount function work, and the aircraft UI stays disabled with the reason ("ADS-B module not installed" / "ADS-B feed down"). A feed failure never blocks or slows the poller, the WS hub or a satellite track; the ADS-B runner is its own task with bounded queues.
+> - our gateway connects to the platform itself with its own read token; adsb_interpreter's servers (8500 / 8510) do not need to be running.
+> - T5.4b / T5.4c shrink to the integration (runner, settings, snapshot, isolation tests); the tracker rows keep their numbers.
+> - **clock:** adsb_interpreter measured this PC 0.41 s fast (Windows Time service not running, 11-09). That is ≈ 0.6° at 250 m/s and 10 km: the NTP sync is required before cueing (Q40).
+
+**Goal:**
+- Show live aircraft from the SIP AERO platform on the Sky Viewer (hover + info card), list them in Track Target › AIRCRAFT.
+- Cue the mount onto a chosen aircraft (TRACK AIRCRAFT) with a predicted custom alt/az path that is refreshed on every update.
+- Background and full reasoning: [docs/adsb_findings.html](adsb_findings.html) (the source review, error budget, Q35–Q50).
+
+**Decisions (user 11-07: all recommendations accepted):**
+- **Q35 transport:** WSS `wss://10.22.123.68/api/v1/ws`, read token in the first message, strict TLS with the bundled CA.
+- **Q36 kind:** `decoded`; `live` only if the capture shows `decoded` lagging > ~1 s.
+- **Q37:** the client runs in the **gateway** (the token never reaches the browser; the data sits next to the executor).
+- **Q38:** own CPR decoder (no pyModeS: GPL-3.0).
+- **Q39 height:** GNSS (TC 20–22) → baro + the TC19 GNSS−baro difference (≤ 60 s old) → baro alone (flagged). No refraction for aircraft.
+- **Q40 time:** the payload `timestamp` when `timestamp_status ≠ 0` and `timestamp_source` ∈ {1, 3, 4}; else `received_at` (flagged). The feed latency is measured and shown. NTP on the mount PC is required.
+- **Q41 prediction (user amendment):** primary = **the aircraft's reported velocity and heading** (TC19 east/north + vertical rate, ground track; turn rate from the recent track values). **Fallback = a Kalman filter (H3)** on the decoded positions when the velocity data is incomplete (no TC19 within 3 s, airspeed-only subtype without a usable vector, or a velocity that disagrees with the position history).
+- **Q42 display:** airborne, above 0°, within the range limit; faded after 10 s without a position, removed after 60 s; no trails.
+- **Q43 card:** the A1b spec (callsign / ICAO, Lat, Lon .5f°, Altitude .0f ft, Range .3f km) + Az / El, ground speed, track, vertical rate, data age, altitude-source flag.
+- **Q44 TRACK AIRCRAFT active when ALL:** a position ≤ 3 s old from a completed CPR fix; airborne; above Lim EL now (or predicted to cross it within the rendezvous); > 15° from the Sun; within the range limit. Near-zenith note as Q18.
+- **Q45:** no fresh fix for 5 s → STOP ("ADS-B data lost"); the predicted path entering the Sun's 16° circle → STOP before it ("Sun approaching"), no detour.
+- **Q46:** near-zenith overflights allowed with the lag note; refused above a peak elevation set from P23.
+- **Q47:** an ADS-B status line in Settings + a "feed down" chip on the Sky Viewer.
+- **Q48:** the public CA bundled in the repo (`gateway/certs/sip-aero-ca.crt`) with its SHA-256 fingerprint pinned in code + a test.
+- **Q49:** Phase 5b runs after the Phase 5 end (Tier 3) and before T6.
+- **Q50:** automated tests use only a fake platform replaying recorded captures; never the live platform.
+- **User 11-07 facts:**
+  - the receiver sits on the same building as the mount (a slightly different position): the **Settings location serves as the receiver position** (the range origin and the CPR sanity check; the offset of a few tens of metres is negligible); no separate receiver-location setting;
+  - recorded history will be available soon (the T5.4a input);
+  - the mount PC reaches `10.22.123.68:443` through ZeroTier (to be confirmed on that PC).
+
+**Reference (read only, like I1):** `C:\Users\soar\Desktop\DELV\sip-aero-python` (the vendor's client kit). Port the connection logic of `receive_ws.py` (`tls_context`, auth-first handshake + `hello` check, the packet loop, 1008 → fatal, 429 / 5xx → retry, backoff 1 → 30 s, TLS verify-reason text). Never modify that folder.
+
+**1. Gateway — feed (`gateway/adsb_feed.py`)**
+- An asyncio task started with the app when ADS-B is enabled in Settings; restarted on a Settings change.
+- `connect(url + "?kinds=decoded", ssl=strict ctx, proxy=None, open_timeout 10, ping 20/20, max_size 1 MB, max_queue None)`; first message `{"type":"auth","token":…}`; expect `hello` with `authentication: "read"` within 10 s.
+- Live-forward only: no `after_id`, no REST catch-up loop. On `gap`: log it, continue (old positions are useless). Optional at start: one `GET /api/v1/records?kind=decoded&limit=500` to warm callsigns / CPR pairs (only rows ≤ 60 s old are used).
+- States for the status line: `disabled`, `connecting`, `connected`, `auth_failed` (1008 / bad hello; no retry until the token or Settings change), `tls_error` (verify code + reason), `unreachable` (retry with backoff), `stale` (connected but no decoded message for 60 s; heartbeat seen).
+- Counters: messages, rejected (validation), last message age, latency p50 / p95 (`now − fix time`), decode fixes.
+- **Validation** (pydantic, from `decoded_payload.schema.json`): schema const, ICAO `^[0-9A-F]{6}$`, numeric ranges (altitude −1 500…60 000 ft, speed ≤ 1 000 kt, angles 0–360, vertical rate ≤ ±10 000 fpm), packets > 64 KB dropped, unknown `decoded.type` ignored. Rejections are counted, not logged per message.
+- **Secrets:** the token from the secret store (Credential Manager, key `adsb_read_token`), write-only in Settings like the astrometry key; never logged, audited, echoed or sent to the browser; the auth message is not logged.
+
+**2. Gateway — aircraft state (`gateway/aircraft.py`)**
+- Table by ICAO: callsign, category, CPR even / odd (codes, time), position (lat, lon, height, source, fix time, quality), velocity (east / north / up m/s, ground speed, track, time), GNSS−baro difference (time), signal, last seen.
+- **CPR** (`gateway/cpr.py`): global decode from an even + odd airborne pair ≤ 10 s apart with the same NL; afterwards local decode against the aircraft's last position. The first fix always comes from a global pair (even / odd frames alternate at ~2 Hz, so it costs ≈ 1 s); the Settings site is not used as a first-fix reference, because the receiver can hear aircraft beyond 180 NM, where a site-referenced local decode is ambiguous. Reject > 350 km from the site or > 1 000 kt implied since the last fix; on rejection drop back to global.
+- **Height (Q39)**, **time (Q40)** as decided.
+- **Geometry:** WGS84 geodetic → ECEF → ENU at the Settings site → az, el, slant range (pure numpy; tested vs skyfield / astropy to < 1″).
+- **Predictor (Q41):** `predict(icao, t) → (lat, lon, h)`.
+  - Primary: from the last position fix, dead-reckon with the latest velocity (≤ 3 s old) on the local tangent plane; a turn rate from the last ≥ 3 ground-track values over ≤ 10 s (coordinated-turn arc when |ω| > 0.3°/s, capped at 6°/s).
+  - Fallback: a constant-velocity Kalman filter (state E, N, U, vE, vN, vU) fed by the position fixes; used when the velocity is missing / stale or disagrees with the filter by > 30 m/s; the snapshot says which predictor is active.
+  - Residual monitor: each new fix is compared with the prediction made for its time; p50 / p95 per aircraft kept for the card / log (this is how the H3 gains get tuned later).
+- **Snapshot to the web** (WS hub, 1 Hz, a separate `aircraft` message, not inside the 10 Hz mount snapshot): per aircraft within the range limit and above 0°: ICAO, callsign, az, el, range, heading (track), alt ft, ground speed, vertical rate, age, flags (stale, alt source, predictor). The selected / tracked aircraft also gets lat / lon.
+- Expiry: no position for 60 s → removed; no message for 5 min → table row dropped.
+
+**3. Gateway — aircraft track (`gateway/airtrack.py`, using the P23 findings)**
+- New command `track_aircraft {icao}`; validated like `track_object` (control lock, I3, audit `track_aircraft` with ICAO + callsign only).
+- **Check** (`/api/mount/check` dry run + the card's live verdict): the Q44 rules; reasons in G7 style ("ADS-B position too old", "Below Lim EL", "Within 15° of the Sun", "Out of range", "Overflight too close to the zenith").
+- **Rendezvous:** like T4.2: slew estimate → aim at the predicted position at now + slew + margin (iterate); first path point = the current pose; if the aircraft is below Lim EL but crossing soon, wait at the predicted crossing (≤ 60 s ahead, else refused).
+- **Following loop** (each update, max 1 Hz):
+  - predicted path from **now − 0.5 s** to **now + H** (H = 10 s), 0.5 s points, geometric alt / az; the first point is never in the future (P23: the mount would hold still until it);
+  - **new + add_point_list + apply(update_wrap = 0)**;
+  - the wrap window is set once, BEFORE the rendezvous goto (P9), centred on the start azimuth and clamped to the mechanical range (±180° of room either way); an update whose path would leave the window ends the track ("Track left the wrap window"), like T4.2 (P23);
+  - every path is checked against Lim EL and the Sun's 16° circle; the path is cut before a violation and the track ends when the mount reaches the cut.
+- **End:** STOP, a Q45 condition, the aircraft below Lim EL / out of range, the zenith rule, or a newer command (Go To / Home / satellite track replaces it, G5). End = `stop` + `tracking_off` → STOPPED with the reason on the card; audit `track_done`.
+- The safety monitor (Sun / Lim EL predictive stop, link-loss stop G4) applies unchanged.
+
+**4. Web**
+- Settings › ADS-B group (enabled): Enable, WSS URL, read token (write-only), CA fingerprint (read-only), event kind (decoded / live), default range limit (20 / 50 / 100 / 200 / 350 km, default 100), status line (state, last message age, latency p50).
+- Filters › Aircrafts tree enabled when configured (child: Airborne).
+- Sky Viewer: aircraft icon (`/icons/aircraft.svg`) rotated to the ground track, callsign label (Labels toggle), dimmed below Lim EL, faded when stale; nearest-pointer hover tooltip (callsign / ICAO, alt, range, age); click selects; positions interpolated between the 1 Hz updates.
+- A1b Aircraft card (Q43) with [TRACK AIRCRAFT] + reason line; A1e pinning / stacking rules shared with satellite cards.
+- Track Target › AIRCRAFT tab: current aircraft within the preset, search callsign / ICAO, sort by range; TRACK SELECTED TARGET.
+- A "ADS-B feed down" chip on the Sky Viewer when enabled and not `connected`.
+
+**5. Tests**
+- Unit: CPR (the 1090 MHz Riddle vector ICAO 40621D → 52.2572°, 3.9194°; zone boundaries; rejections), height selection, time-quality rules, ENU vs skyfield, predictor (straight, turning, missing velocity → Kalman), validation, token never in logs / responses.
+- Fake platform (`PW_ADSB_FAKE=…`): a local WSS/WS server doing the auth handshake and replaying a recorded JSONL capture time-shifted to now; used by gateway tests and the browser gates.
+- Sim (Tier 2 at the task end): aircraft tracks on PWI4-sim driven by the replay (Sun pinned with `PW_TEST_SUN_ALTAZ`).
+- Real: the user only (a live feed check, then a real overflight on the L-350).
+
+**6. Tasks**
+
+| Task | Scope | Gate |
+|---|---|---|
+| T5.4a | Capture analysis (the user's recorded history): field names (CPR), kinds present, rates, latency, timestamp mix → spec update | Report + fixtures |
+| T5.4b | `adsb_feed` + validation + Settings ADS-B (token in the secret store, CA pinned) + the fake platform | Unit + fake-feed tests; no token leak |
+| T5.4c | `cpr` + `aircraft` state + geometry + predictor (velocity primary, Kalman fallback) + the 1 Hz snapshot | Vectors; replay → positions; residual stats |
+| T5.5 | Web: filters, Sky Viewer layer + hover, A1b card, AIRCRAFT tab, feed chip, Settings group | Browser pass 1920 + 1280×600 @1.5 on the fake feed |
+| T5.6a | ✅ Sim probe P23 (path replacement), done 11-07: replacement works (0.023° mean at 1 s updates) | Finding P23 |
+| T5.6b | `airtrack` planner / executor + rules + monitor | Sim tracks from the replay |
+| T5.6c | User live check: the real feed, then a real overflight | User |
+
+
+---
+
 ## 7. Progress tracker
 
 Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying · ✅ done · ⏸ paused/partial
@@ -1861,12 +2105,17 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | T5.1 | ✅ | ✅ 10-30 | ✅ 10-30 | ✅ 10-30 | ✅ 10-30 (+ T5.1d / T5.1e adjustments, user-checked) | O4; Q24–Q27 (5-min lead everywhere); a analysis engine (ssa comparison passed), b gateway lead (sim row passed), c web modal (browser pass 1920 + 1280×600 @1.5, real LEO [Track] → tracking) |
 | T5.2 | ✅ | ✅ 10-30 | ✅ 11-02 | ✅ 11-02 | ✅ 11-02 (+ T5.2e resilience; 3 real astrometry.net solves by the user) | Q29–Q31; a port (OW0021 identical to ssa), b nova + jobs + relay (key-echo hardening), c modal, d run + pill + IOD wiring + 2 layout fixes |
 | T5.3 | ✅ | ✅ 10-30 | ✅ 11-02 | ✅ 11-02 | ✅ 11-02 (+ T5.3d fixes; Vallado Ex. 7-2 verified by the user and as a test) | O6; Q28 built before T5.2; Q32–Q34; a engine (orekit reference: ours closer to truth), b modal (browser 1920 + 1280×600 @1.5) |
+| T5.2f | ✅ | ✅ 11-09 | ✅ 11-09 | ✅ 11-09 | pending (user's real cases) | Q51–Q54; other-setup images + scale review; browser 1920 + 1280×600 @1.5 |
+| T5.4 | ✅ spec approved 11-07 | | | | | Q35–Q50; waiting on the recorded history (T5.4a) |
+| T5.5 | ✅ spec approved 11-07 | | | | | |
+| T5.6 | ✅ spec approved 11-07 | | | | | a: P23 sim probe done 11-07 (path replacement works) |
+| T5.7 | ✅ spec approved 11-09 (+ Settings scrolling) | ✅ 11-09 | ✅ 11-09 (unit / API) | **browser check owed** | pending | | | | | CCTV view prep (Q56–Q58); independent of the ADS-B work |
 | T6.1 | ⬜ | | | | | |
 | T6.2 | ⬜ | | | | | |
 | T6.3 | ⬜ | | | | | |
 
-**Resume point (2026-11-02, T5 COMPLETE, user-checked):** T5.1 `e29ed97`; **T5.2 + T5.3 (+ T5.3d / T5.2e) committed `2e7d5cc`**. Next:
-1. **Phase 5 end (Tier 3):** full sim suite ×2 (ask the user to stop 8400), the harness, the full browser pass, the flaky list; then the Phase 5 close. Then Phase 6 (hardening & packaging), spec first.
+**Resume point (2026-11-07, Phase 5 end Tier 3 done):** Phase 5 complete (`e29ed97`, `2e7d5cc`, Tier 3 11-07). Phase 5b (aircraft, ADS-B) spec approved by the user 11-07; P23 sim probe done. Next:
+1. **T5.4a when the user supplies the recorded ADS-B history** (the user nudges); then T5.4b–T5.6; then Phase 6.
 2. **The real-mount session** (user) whenever available: the checklist below plus D-SUN custom-path following (10°/s arcs, 15°/s straights) and HOME routing vs the real homing path.
 - **Real-mount session checklist** (the user's first session on the real L-350; homing + jog will be tested together):
   - PWI4's real jog behaviour (does a release keep tracking? speeds? P20; option A provisional);
@@ -1907,6 +2156,9 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | 2026-10-20 | T1.1 | WebSocket can't pass Nitro devProxy (HTTP only) → in dev the page connects straight to the gateway (`runtimeConfig.public.gatewayWs`); token fetch stays proxied; prod = same-origin (gateway serves the app) |
 | 2026-10-20 | A4-i | **Red warnings** (user): Status red on FAULT; Sun Distance red when ≤ 15° (green > 15°). Implemented in T1.4 |
 | 2026-10-27 | T3.4e | Azimuth jog across PWI4's wrap edge swung 360° silently. Option B: the gateway slides PWI4's wrap window along with an azimuth jog (no turn while the axis has mechanical room, sim ±300°); near the real mechanical limit the jog stops with a margin and prompts "turn 360° / stay"; Turn = a goto-like validated reposition (pad dimmed, STOP available; D-SUN routing in T3.5 like gotos); Stay = stop at the limit, prompt again on the next jog that way | user |
+| 2026-11-09 | Q55–Q58 | ADS-B: pw-mount-control imports adsb_interpreter's `adsb_core` (optional import; the satellite side works without it; own platform connection). CCTV (T5.7): one camera, streamed through the gateway (credentials server-side), prepared for MJPEG / HLS now and RTSP via a relay sidecar (likely an IP camera); panel 3D | CCTV, expanded adds Side by side; nothing shown when not configured | user |
+| 2026-11-09 | T5.2f Q51–Q54 | Astrometry: an Image source toggle (Station / Other setup, auto-suggested from the file's FITS optics); Other = no station hints; a solve is never failed for its scale: a scale that differs from the station is reviewed (Use / Discard) in the pill and the waiting IOD row; other-setup images are from the station's location (the Settings location is moved for another site) | user |
+| 2026-11-07 | Phase 5b Q35–Q50 | ADS-B from the SIP AERO platform: WSS + read token in the gateway, `decoded` kind, own CPR decoder, height GNSS → baro + TC19 difference → baro, payload time when GNSS/NTP-qualified, prediction from the reported velocity + heading with a Kalman fallback when the data is incomplete, display / card / rules / stop rules as recommended, CA bundled + pinned, fake-platform tests only, Phase 5b before T6. The receiver is on the mount's building (Settings location = receiver position) | user |
 | 2026-10-30 | T5.3 user check | IOD checked live (accuracy tested end-to-end after T5.2). Sort ▲ as Pass Analysis; width 660 kept; the gateway must be up to use the tools; the in-row confirm kept; O6 3° rule kept as a standing rule until real-data tests; T5.3 is committed together with T5.2 | user |
 | 2026-10-30 | T5.2 / T5.3 Q28–Q34 | Build IOD (T5.3) before Astrometry (T5.2). Astrometry: image work + the nova job in analysis, the gateway relays the API key server-to-server; scale hint from FITS FOCALLEN / XPIXSZ else a new Settings camera pixel size + RASA11 620 mm; server-side jobs survive a refresh (one at a time, job pill). IOD: SGP4-fitted coarse TLE; display + copy only; the modal state is recalled until a refresh | user |
 | 2026-10-30 | T5.1 user confirmations | Sort arrows ▲ asc / ▼ desc (not the render); a satellite change clears the result, mode / window keep it; reopening recalls the last modal state until a page refresh; rises / sets outside the listed window show "—" (duration clipped to the window); exact search matches first (Track Target + picker) | user |
@@ -1965,6 +2217,7 @@ Agreement (first 50 satellites × 7 epochs): TEME position diff max 1.4e-7 km; a
 | P20 | **PWI4's own jog (Move Mount), recorded on the sim 10-27 while the user jogged:**<ul><li>the sim jog never moves the mount;</li><li>the offset-rate fields stay 0, so PWI4's jog uses an internal path that is not in the HTTP API (the public API has no jog / axis-velocity endpoint);</li><li>**a jog press on a stopped mount turns tracking on**: 5 tracking starts vs the user's 2 Track presses;</li><li>tracking ended on the user's STOPs, not visibly on release.</li></ul>**API probe:** `axis0_set_rate_arcsec_per_sec` does nothing on a stopped mount; while tracking it is exact (6.05° in 3 s at 2°/s incl. sidereal) | **T3.4 Q8 = option A (user 10-27):**<ul><li>jog from STOPPED = `tracking_on` + axis rate offset while held; on release (or a keep-alive timeout / disconnect) the rate goes to zero and the mount stops (`stop` + `tracking_off`), ending STOPPED;</li><li>before `tracking_on` the gateway checks axis 0 is inside its wrap window (P19), otherwise it refuses "Wrap out of range: re-home or Go To first";</li><li>while TRACKING: rate offsets only, tracking continues.</li></ul>**Real-mount session:** re-check PWI4's jog behaviour (does a release keep tracking? the speeds?) together with homing; the mechanics may change then |
 | P21 | **Custom alt/az path (sim, T3.5a, 10-27):**<ul><li>`apply(update_wrap=0)` takes 0.06–0.11 s; the mount waits still until the first point's time, then follows the polyline;</li><li>straight lines: cross-track 0.000, mean error 0.02° at 5°/s, ≤ 0.06° at 10–15°/s;</li><li>curves add the chord sagitta (v·dt)²/(8R) + lag: r = 16° arc 0.05° / 0.21° at 5 / 10°/s with 0.5 s points; a 45° corner peaks at 0.10° / 0.23°, gone in ≈ 1 s;</li><li>a first point in the past: first-order catch-up (tau ≈ 0.5 s); a far first point: slewed to at ≤ 17°/s;</li><li>during the path `is_tracking` True, `is_slewing` False; **after the last point the mount holds the last alt/az with `is_tracking` still True** (not sidereal);</li><li>STOP freezes the sim at once (≤ 30 ms), tracking off;</li><li>**an axis-0 route crossing the wrap-window edge unwinds ≈ 346° mid-path even with `update_wrap=0`** (supervisor re-read the raw trace: +111 → −235); with the wrap min set so the window holds the whole route it follows continuously.</li></ul> | D-SUN executor:<ul><li>LEAD 2 s, first point = the current pose;</li><li>cruise 5°/s, points every 0.5 s (planner as is);</li><li>set the wrap min so the whole route's axis-0 range (+ margin) is inside the window, before apply; a route spanning ≥ 358° (`wrap_turn`) cannot fit: the path stops 2° short of the window edge and the final goto finishes;</li><li>wait route end + 2 s, then the final command (`tracking_off` is needed: the path hold reports tracking);</li><li>completion by the route clock + position, never by the flags;</li><li>real mount: STOP coasts v²/(2a).</li></ul> |
 | P22 | **Satellite tracking on the sim (T4.2a, 10-28; synthetic ISS-like TLEs over the sim site; raw data `scratchpad/t42a/raw/`; supervisor re-checked the minimum altitudes and the wrap changes):**<ul><li>**`follow_tle` goes straight to the object's CURRENT position, with no altitude floor.** Pre-positioned at the 15° crossing point:<ul><li>call at t_in − 5 s: min 14.62°, acquired (< 0.05°) in 1.5 s;</li><li>call at t_in: no dip (15.06°), error 0.0006° at once;</li><li>call at t_in + 5 s: 1.5 s to acquire.</li></ul></li><li>From far away (180° in axis 0): acquired in 11.2 s; the altitude never went below the object's own.</li><li>Following error: 0.003° mean, 0.007° max against PWI4's refracted position (a constant ≈ 0.04° against geometric).</li><li>**`follow_tle` rewrites the axis-0 wrap min within 0.1 s, by tens of degrees, clamped at −300** (P17 confirmed). No unwind was seen, because the axis was already inside the new window.</li><li>**Custom altaz path along a pass** (`update_wrap=0`, wrap set beforehand): 0.003° mean, 0.015° max (0.006° after 3 s); 1 s points as good as 0.5 s.<ul><li>Path coordinates are PWI4's refracted alt/az.</li><li>Holds the last pose with `is_tracking` True after the last point.</li><li>Accepts ≥ 10 000 points in one `add_point_list` (110 ms).</li><li>**`add_point_list` + `apply(update_wrap=0)` without `new` extends a running path seamlessly**; `add_point_list` alone does nothing.</li></ul></li><li>**Near-zenith pass (peak 87.99°):** axis 0 demanded 28–29°/s and was saturated at 20.4°/s, with the same result for `follow_tle` and for a custom path. Peak error 0.62°, back < 0.05° in 3.8 s; no flip or unwind. A peak of about 89° would demand about 56°/s (not measured).</li><li>STOP during `follow_tle`: 28 ms, no coast (sim).</li></ul> | T4.2:<ul><li>a `follow_tle` hand-off must be called at t_in, not earlier, from the pre-positioned pose;</li><li>re-read the wrap after `follow_tle`;</li><li>a custom path can carry a whole pass (and its D-SUN detour) and can be extended for long tracks;</li><li>a custom path needs PWI4's refraction applied to the sgp4 alt (T3.3b model);</li><li>near-zenith passes lag near the peak;</li><li>real-mount checklist: tracking on the L-350, axis rates near the zenith.</li></ul> |
+| P23 | **Aircraft-style path replacement (sim, T5.6a, 11-07; synthetic fly-bys, status at 10 Hz; script + raw JSON in the session scratchpad `p23/`):**<ul><li>**`custom_path/new` + `add_point_list` + `apply(update_wrap=0)` on a RUNNING path replaces it smoothly**: apply 0.05–0.09 s; no stop, no jump. A small bump after each replacement (0.035–0.04° in the first 0.3 s, 0.015° later).</li><li>GA fly-by (3 km, 130 m/s, 2 km aside, peak 56°, az ≤ 3.7°/s), error vs the true position: one upload 0.015° mean / 0.066° max; replaced every **1 s 0.023° / 0.17°**, every **2 s 0.019° / 0.15°**, every 0.5 s 0.030° / 0.19° (more bumps).</li><li>**The first point must be in the past** (now − 0.5 s): with the first point 0.5 s ahead the mount holds still until it (P21) at every replacement → 0.14° mean / 0.37° max.</li><li>Prediction with 1 s feed latency: straight flight, velocity-based extrapolation 0.025° / 0.17° (= exact); **3°/s turn with a straight-line prediction 0.18° / 0.27°**; the same **without latency compensation ≈ 2.0°** (the along-track lag v·L/R).</li><li>Cruise overflights (10.7 km, 250 m/s): peak 82.5° (az 10.2°/s) 0.015° / 0.11°; peak 86.3° (az 20.3°/s) 0.015° / 0.10°; the sim axis 0 reached 36°/s. **The sim does not show the real azimuth limit**: the zenith refusal (Q46) must come from the real mount's rates.</li><li>Feed stop: the path ends at its last point (+10 s) and the mount **holds that pose with `is_tracking` True** (P21 confirmed) → the executor must STOP on feed loss (Q45).</li><li>Probe mistake, re-run: the first C / D runs placed the route beyond the sim's +300° axis-0 limit (the axis stopped at 300.01°). With the wrap window set before the goto and the route inside ±290° they were clean.</li></ul> | T5.6b:<ul><li>replace the path at **1 s** (2 s is as good; not faster than 1 s) with points from **now − 0.5 s** to now + 10 s;</li><li>latency compensation is mandatory (fix time → now);</li><li>set the wrap window once, before the rendezvous goto, centred on the start azimuth and clamped to the mechanical range (±180° of room); a later path outside it ends the track;</li><li>STOP on feed loss (5 s), never rely on the path hold;</li><li>Q46 zenith limit from the real L-350 (real-mount checklist: azimuth rate on an overflight).</li></ul> |
 
 Harness note: `08_watchdog.explicit_stop_latency_s` is mis-measured in the supervisor run (includes the silent period); conclusion unaffected — fix opportunistically.
 
@@ -3120,6 +3373,68 @@ The user stopped 8400 / 3200 / 8410 (PWI4 kept running) and gave a 150 min budge
   - The pointing budget is set by latency (1 s at 250 m/s = 1.4° at 10 km vs FOV ≈ 3°) → timestamped dead reckoning, NTP on the mount PC.
   - Cueing = custom alt/az path replaced each update; needs sim probe P23 first.
 - **Waiting on the user:** a 10–15 min capture (`--kinds decoded,live,telemetry`), the receiver location, the mount-PC route to `10.22.123.68:443`, answers Q35–Q50.
+
+### T5.6a sim probe P23 (2026-11-07, supervisor, user request)
+
+- **Question (user):** can the aircraft pipeline (a trajectory updated continuously) run on PWI4?
+- **Answer: yes.** A running custom alt/az path can be replaced every 1–2 s (new + add + apply, `update_wrap=0`) without stops or jumps; 0.02° mean following error on the sim (finding P23 in section 8, PWI4 behaviour).
+- **Run:** PWI4 in Simulator mode (`sim_guard` passed; the user's 8400 / 8410 down; the sim mount was disconnected and was left disconnected); 11 scenarios + 3 re-runs, ≈ 25 min; Sun ≥ 30° from every path.
+- **Design consequences** (folded into the T5.6 spec): 1 s updates, first point at now − 0.5 s, latency compensation mandatory, wrap set before the goto, STOP on feed loss, the zenith limit from the real mount.
+
+### Phase 5 end, Tier 3 (2026-11-07)
+
+The user stopped 3200 (8400 / 8410 already down; PWI4 kept running in Simulator mode) and gave a 3 h window (08:47–11:47 UTC); done 11:07.
+**New `PWI4.cfg` baseline `54bd3e19…`** (written by PWI4 at 08:03 after the user's real-mount session; site 13.8451° N / 100.5696° E, 100 m; `Simulator.Mount` limits unchanged ±300 / −40…91). PWI4 4.1.6.99, unchanged.
+
+| Step | Result |
+|---|---|
+| Full sim suite run A | 60 / 67 in 44.2 min. All 7 failures from one fragile test: `test_stall_pwi4sim[0]` added +180° to axis 0 (at 150°) expecting a target of 330° past the +300° limit, but 330° and −30° are equally far and PWI4 picked −30° today (reproduced with the sim client), so nothing stalled; the failed test left the mount tracking with the offset, and the 6 object-track tests after it failed (`test_normal_pass` alone: passed) |
+| Fix (test only) | the stall offset is now +170° (target 320°, unambiguously the nearer side): reproduced the stall at 300.21°; both stall tests pass |
+| Full sim suite run B | **66 / 67** in 43.5 min. The one failure, `test_near_zenith_pass[88.0]`, was the executor's designed "Missed the pass: could not reach the rendezvous in time" after one replan: the test's pass is already up and the mount starts wherever the previous test left it. Alone 4 / 4 (2 runs × 2 params); passed in Phase 4 run B → flaky list |
+| PWI4 harness | 10 / 10 scenarios; harness tests 17 / 17; the sim left disconnected |
+| Non-sim | 854 passed; ruff check clean. `ruff format --check`: 34 files would be reformatted (Phase 5 analysis code: the astrometry port, `iod.py`, `chunks.py`, `app.py`, their tests; 1 gateway test, 1 harness file); lint-clean, style only, not changed (no bulk format; user decision) |
+| Web | typecheck 0, lint 0 errors (11 old warnings), vitest 585 / 585 |
+| Full browser pass | 1920 + 1280×600 @1.5 on throwaway ports (Nuxt 13272, gateway 18734 with memory secrets, analysis 18711 with the fake nova). All checks passed, no page overflow:<ul><li>**Pass Analysis:** ISS picked through the Track Target picker (the AIRCRAFT tab disabled "No ADS-B source configured"), 2 passes listed (11:12 and 22:43 UTC, durations shown), recalled on reopen, no [Track] on a pass > 5 min ahead (Q27b)</li><li>**IOD:** a manual row at 6 decimals shows 3 (123.457° / 45.123°); Replace on the filled row 1 → Yes → focus in row 1's Az; Edit prefills the full precision (33.123456 / 44.654321); Esc keeps the row</li><li>**Astrometry (fake nova):** OW0021 → 40 streaks + target (8 edge excluded) → RUN → pill "Uploading…" inside the Sky Viewer → row 2 solved (70.535° / 68.891°), pill "Astrometry solved · row 2"</li><li>**Pill Retry:** an injected failed resumable job shows the title, the reason (truncated at 1280, full text on hover), Retry and ✕; dismiss clears it</li><li>**Settings:** the Pixel field shows 3.76, no error</li><li>**Phase 4 spot:** CONNECT the sim mount → TRACK TARGET enabled → ISS "Below the horizon" → DISCONNECT</li></ul>A dev-only resource 404 on the first page load (not in the gateway / Nuxt logs; seen before) |
+| Flaky list | `test_compute_pass_budget_30ms` 9 / 9 on an idle machine (fails only under CPU load) → keep listed; `test_near_zenith_pass[88.0]` (start-pose dependent) → new entry; fix both in T6.3 (e.g. a fixed start pose before the near-zenith test, a looser budget under load) |
+
+**Phase 5 (T5.1–T5.3) is complete.** Next: the user's review of the Phase 5b spec (section 6), then T5.4a when the recorded ADS-B history is available.
+
+### T5.2f log (2026-11-09, from the user's real astrometry cases)
+
+- **Cause:** station hints applied to other setups' images. The relay filled a missing focal / pixel with RASA11 620 mm + Settings pixel (astrometry.net ±25 % around it), and `scale_ok` then failed a solve > 25 % off ("Solved scale does not match the camera"), dropping the RA / Dec.
+- **Worker (Sonnet):** implemented the spec:
+  - analysis `source` / station optics / `scale_check`, no scale failure, `PW_ASTROMETRY_FAKE_SCALE`;
+  - the relay's Other path never filled from the station;
+  - web: the toggle + auto-suggest, review rows / pill Use / Discard, "Astro (oth)" label (title "Astrometry (other)").
+  - Deviation (accepted): after a refresh the review is on the pill only (the IOD memo clears on refresh by design); the pill's Use applies to the first free row.
+- **Supervisor:**
+  - reviewed the relay / solve diffs (key handling untouched);
+  - gates: touched tests 108, ruff clean, typecheck 0, lint 0 errors, vitest 601;
+  - **change:** the review row now shows the short "S″/px vs station s″/px" (the full text clipped to "Scale differs from the station: sol…" in its ~190 px cell at both sizes); the full text is in `title` and on the pill; vitest updated.
+- **Browser check** (throwaway Nuxt 13272 / gateway 18734 / analysis 18711 with the fake nova at 4.1″/px vs the station 1.25″/px; the user stopped 3200 / 8400 / 8410; PWI4 not running, so the cfg-only simulator check; no mount commands), 1920 + 1280×600 @1.5:
+  - a scratch FITS copy with FOCALLEN 200 mm / 9 µm → Other + the note (the original sample, 1600 mm / 9 µm = 1.16″/px, is correctly not suggested);
+  - a TIFF → Station; the toggle resets per image;
+  - Station and Other runs → a review row "4.1″/px vs station 1.25″/px" (not clipped) + Use / Discard; the pill "Astrometry solved — scale differs" + Use / Discard;
+  - row Use → the values + "Astrometry"; pill Use (IOD closed) → "Astro (oth)" (fits 70 px), kept on reopen;
+  - row Discard and pill Discard (IOD closed) → the row empty, the pill gone;
+  - no page overflow.
+  - Note: with IOD open, a pill click only closes the modal (outside click); the review stays.
+- **User facts to know:** the auto-suggest needs FITS optics; a JPG / TIFF from another setup needs the toggle set to Other by hand (else the station hint may keep astrometry.net from solving).
+
+### T5.7 log (2026-11-09)
+
+- **Worker (Sonnet), per the spec:**
+  - `gateway/cctv.py`: status, a 60 s session-bound ticket, an MJPEG pass-through (2 viewers, shared upstream), snapshot, and an HLS proxy (playlist rewriting, no open proxy, traversal-free paths, Basic / Digest upstream auth, no redirects followed, the ticket redacted from the access log, httpx request logging silenced).
+  - Settings: a CCTV group (On / Off, MJPEG / HLS, URL, user, password in the secret store `cctv_password`, status line); the body scrolls with a shared `.app-scroll` class (VisibilityFilters reuses it, unchanged look).
+  - Web: `CctvPlayer` (MJPEG `<img>` / HLS `<video>` + hls.js 1.5.17 on demand or native, overlays, LIVE / SNAPSHOT chip, closes when hidden), `CctvViewToggle` (panel 3D | CCTV, only when configured; expanded 3D | CCTV | Side by side); the 3D renderer stops while hidden; per-viewer memory.
+  - `tools/fake_cctv.py` (MJPEG / snapshot / HLS via ffmpeg / Basic auth / a `/__mode/` feed-loss hook); `tools/cctv_relay/` (MediaMTX RTSP → HLS template, README, `check_stream.py` without credentials).
+  - **Deviation (kept, the user did not ask to change it):** the URL and the username are write-only like the password ("•••• set" + clear); the browser never learns them. Showing them for editing is a one-line change in `public()`.
+- **Supervisor:**
+  - code review of the proxy guards; **added `trust_env=False`** on the camera client (never a system proxy);
+  - **test fix:** `test_stall.py::test_lim_el_and_sun_use_the_refracted_frame` failed tonight. It read `now` twice ms apart, and a setting Sun looked like negative refraction (−1.5e-5°; refraction is exactly 0 that far below the horizon). Both reads now use one instant; 25 / 25.
+  - **user 11-09 spacing:** the Settings scroll area bottom padding 4 → 20 px, the CCTV group bottom padding 8 → 14 px, the button bar top padding 12 → 16 px.
+  - Gates: CCTV + settings + security + relay 125; non-sim 917 + the fixed test (worker run); ruff clean; typecheck 0; lint 0 errors; vitest 631.
+- **Owed:** the real-browser check, which needs the user's 3200 / 8400 / 8410 stopped (the fake camera, MJPEG and HLS, 1920 + 1280×600 @1.5: the toggle, side by side, not-configured = unchanged, feed loss → retry → snapshot, the toggle sizes measured for the user's tuning; CSS values now ≈ 84 × 23 px at 1920, ≈ 70 × 19 px at 1280).
 
 ## 9. Known limitations & risks
 

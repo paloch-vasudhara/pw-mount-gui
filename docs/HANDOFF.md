@@ -1,43 +1,19 @@
-# Session handoff — updated 2026-11-02 end of day (T5 complete + user-checked; the user commits; next Phase 5 end Tier 3)
+# Session handoff — updated 2026-11-09 end (T5.2f + T5.7 built; T5.7 browser check owed)
 
 Read this first, then `docs/BUILD_PLAN.md` (§7 tracker + **resume point**, §6 task specs, §8 logs/findings), then `docs/logic_sheet.txt` as needed.
 
 ## START HERE (after compaction / next session)
 
 1. **First: `git log` / `git status`, and the file mtimes vs this handoff** (a worker's lingering task once rewrote files after a handoff).
-   - T5.2 + T5.3 (+ T5.3d, T5.2e) are COMMITTED as `2e7d5cc` (11-02, user).
-   - The tree was clean at the handoff.
-2. **Phase 5 work is complete and user-checked:**
-   - T5.1 Pass Analysis (`e29ed97`);
-   - T5.3 IOD (Vallado Ex. 7-2 verified);
-   - T5.2 Astrometry (3 real astrometry.net solves, no failures / doubles).
-   - The user keeps exercising the astrometry engine and will report any uncaught error cases.
-3. **Next: Phase 5 end (Tier 3).**
-   - Full sim suite ×2: ask the user to stop 8400 first.
-   - The PWI4 harness.
-   - The full browser pass at 1920 + 1280×600 @1.5: Pass Analysis, IOD (replace / edit / 6 decimals), Astrometry with `PW_ASTROMETRY_FAKE=1`, the two-line pill + Retry, Settings Pixel; plus the Phase 4 flows.
-   - The flaky list: `test_compute_pass_budget_30ms` fails only under CPU load.
-   - Then the Phase 5 close and the Phase 6 spec (hardening & packaging; ask design questions first).
-4. **Decisions in force:**
-   - Q24–Q34;
-   - user 11-02: H4 = the Settings location (no PWI4); angles 6 decimals (display 3); Edit Entry (Astrometry → Manual; failed rows replaced, not edited); the two-line pill in the Sky Viewer bottom-left;
-   - astrometry.net: retries, a 30 min limit, resume / re-attach, never a 2nd upload unless "could not solve" or the detections were edited;
-   - the O6 3° rule is standing;
-   - the gateway must be up to use the tools;
-   - ▲ asc / ▼ desc.
-5. **Tooling:**
-   - `tools/browser_gate/cdp.mjs` (+ the `files` step);
-   - `PW_ASTROMETRY_FAKE=1`;
-   - throwaway gateway: `PW_SECRET_STORE=memory`, the token via `/api/mount/session` with `Sec-Fetch-Site: none`, the settings PUT needs `location.timezone`;
-   - gate scripts in the session scratchpad (`t52d_gate/`, `t53_gate/`, `iod_fix/`, `t51_cmp/`, `t53_ref/`);
-   - the analysis log lines `nova step=…` trace astrometry.net steps.
-   - Workers must leave no background process running.
-6. **ssa-toolkit:** the user's `.gitignore` `+database/` line (don't touch). Reference runs: conda `orekit310`, in-process, `PYTHONDONTWRITEBYTECODE=1`.
-7. **The GEO Sun wording (T4.2f open item) is fixed (11-06):** "Target is too close to the Sun; try again later". Real-mount test 11-06 passed (HOME, D-SUN; BUILD_PLAN §8). ADS-B: source reviewed 11-07 → `docs/adsb_findings.html` (Q35–Q50, Phase 5b before T6); waiting on the user's capture, receiver location, route check and answers.
-8. **Environment:**
-   - The `PWI4.cfg` baseline is `b714321830fb…` (site 13.12 / 100.92; Lim EL 10; tz Asia/Bangkok).
-   - Sim runs need the user's 8400 stopped.
-   - No `.py` files in the repo `scratchpad/`.
+2. **Done 11-09** (the user commits; see BUILD_PLAN section 8):
+   - **T5.2f** astrometry: the Image source toggle (Station / Other, auto from FITS optics), no scale failure, a Use / Discard review in the pill + the IOD row. Browser-checked. **The user tests it with real other-setup images.**
+   - **T5.7** CCTV view prep (gateway proxy, Settings CCTV group + scrolling, panel 3D | CCTV, expanded Side by side, fake camera, RTSP relay template). **The real-browser check is owed** (ask the user to stop 3200 / 8400 / 8410); then show the user the measured toggle sizes.
+   - Test fixes: the stall offset 170° (Phase 5 end), the Sun-refraction test's single instant.
+3. **ADS-B (Phase 5b):** pw-mount-control imports `adsb_core` from `C:/Users/soar/Desktop/DELV/adsb_interpreter` (Q55, read only for us); optional import, the satellite side works without it. Waiting on the recorded history (T5.4a) and adsb_core's P1b (messages / state / predict). **This PC's clock is 0.41 s fast (Windows Time service off): NTP before any cueing.**
+4. **Open user choices:** CCTV URL / username write-only (now) or visible for editing; format the 34 lint-clean Phase 5 files or leave them.
+5. **Flaky list (T6.3):** `test_compute_pass_budget_30ms` (CPU load), `test_near_zenith_pass[88.0]` (start pose).
+6. **Environment:** `PWI4.cfg` baseline `54bd3e19…` (site 13.8451 / 100.5696). Throwaway ports only (Nuxt 13270–13272, analysis 18710/18711, gateway 18733/18734, fake camera 18740–18749). Sim / browser checks need the user's servers stopped. No `.py` in the repo `scratchpad/`. Workers leave no background process.
+7. **Read only:** ssa-toolkit (the user's own edits there), sip-aero-python, adsb_interpreter.
 
 ## Where we are
 

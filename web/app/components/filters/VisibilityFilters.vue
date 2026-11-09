@@ -7,7 +7,7 @@ const f = useFiltersStore().filters
 </script>
 
 <template>
-  <fieldset class="vis" data-testid="visibility-filters">
+  <fieldset class="vis app-scroll" data-testid="visibility-filters">
     <legend>Visibility</legend>
 
     <label class="row top">
@@ -67,7 +67,7 @@ const f = useFiltersStore().filters
   --ind-pad: clamp(10px, calc(var(--u, 1px) * 14), 14px);
   display: flex; flex-direction: column; gap: clamp(2px, calc(var(--u, 1px) * 6), 6px); border: 1px solid var(--panel-border);
   padding: clamp(4px, calc(var(--u, 1px) * 10), 10px) clamp(9px, calc(var(--u, 1px) * 14), 14px); margin: 0; min-width: 0;
-  min-height: 0; flex: 0 1 auto; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--control-border) transparent;
+  min-height: 0; flex: 0 1 auto;
 }
 .vis legend { padding: 0 6px; font-size: clamp(11px, calc(var(--u, 1px) * 13), 13px); line-height: clamp(13px, calc(var(--u, 1px) * 19.5), 19.5px); font-weight: 600; color: var(--label-slate); }
 .row {

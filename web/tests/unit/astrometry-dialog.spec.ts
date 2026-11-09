@@ -12,6 +12,7 @@ let detectStatus = 200
 let snapStatus = 200
 let detectCount = 0
 let detectWarnings: string[] = []
+let metaOver: Record<string, unknown> = {}
 
 const META = { format: 'FITS', bit_depth: 16, dims: [800, 600], epoch_iso: '2025-04-04T13:01:30', exposure_s: 30, focal_mm: null, pixel_um: null, warnings: [] as string[] }
 const IMAGE = { image_id: 'img1', preview: { png_b64: 'AAAA', width: 400, height: 300, scale: 0.5 }, meta: META }
@@ -48,7 +49,7 @@ async function stageClick(x: number, y: number) {
 
 beforeEach(() => {
   calls.length = 0
-  imageStatus = 200; detectStatus = 200; snapStatus = 200; detectCount = 12; detectWarnings = []
+  imageStatus = 200; detectStatus = 200; snapStatus = 200; detectCount = 12; detectWarnings = []; metaOver = {}
   Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => 400 })
   Object.defineProperty(HTMLElement.prototype, 'clientHeight', { configurable: true, get: () => 300 })
   HTMLElement.prototype.getBoundingClientRect = () => ({ left: 0, top: 0, right: 400, bottom: 300, width: 400, height: 300, x: 0, y: 0, toJSON: () => ({}) })
@@ -57,9 +58,11 @@ beforeEach(() => {
     calls.push({ url, body })
     if (url === '/api/astrometry/image') {
       return imageStatus === 200
-        ? { ok: true, status: 200, json: async () => IMAGE }
+        ? { ok: true, status: 200, json: async () => ({ ...IMAGE, meta: { ...META, ...metaOver } }) }
         : { ok: false, status: imageStatus, json: async () => ({ detail: 'Unsupported file type' }) }
     }
+    if (url === '/api/mount/session') return { ok: true, status: 200, json: async () => ({ token: 't' }) }
+    if (url === '/api/mount/settings') return { ok: true, status: 200, json: async () => ({ hardware: { camera_pixel_um: 3.76 } }) }
     if (url === '/api/astrometry/detect') {
       return detectStatus === 200
         ? { ok: true, status: 200, json: async () => ({ detections: mkDets(detectCount), n_streaks: detectCount, target: null, warnings: detectWarnings }) }
@@ -253,5 +256,47 @@ describe('AstrometryDialog', () => {
     expect(q('[data-testid="as-status"]')!.textContent).toContain('streaks detected')
     await w!.setProps({ runStatus: { kind: 'error', text: 'Set the astrometry.net API key in Station Settings' } })
     expect(q('[data-testid="as-status"]')!.textContent).toContain('Set the astrometry.net API key')
+  })
+
+  describe('image source (T5.2f)', () => {
+    const active = () => q('[data-testid="as-source"] button.active')!.textContent!.trim().toLowerCase()
+    const pick = async (label: string) => click([...qa('[data-testid="as-source"] button')].find(b => b.textContent!.trim().toLowerCase() === label)!)
+    const runEmit = async () => {
+      await click(q('[data-testid="as-detect"]')!)
+      await click(run())
+      return w!.emitted('run')!.at(-1)![0] as { source: string }
+    }
+
+    it('defaults to Station; a file without optics stays Station and RUN sends it', async () => {
+      await openDialog()
+      expect(active()).toBe('station')
+      await loadImage()
+      expect(active()).toBe('station')
+      expect((await runEmit()).source).toBe('station')
+    })
+
+    it('a file whose optics differ > 25 % switches to Other with a note; the user can switch back and that wins', async () => {
+      metaOver = { focal_mm: 1000, pixel_um: 3.76 }
+      await openDialog()
+      await loadImage()
+      expect(active()).toBe('other')
+      expect(q('[data-testid="as-status"]')!.textContent).toContain('File optics (1000 mm, 3.76 µm) differ from the station: treated as Other setup')
+      await pick('station')
+      expect(active()).toBe('station')
+      expect((await runEmit()).source).toBe('station')
+    })
+
+    it('matching optics stay Station; the next load re-suggests (a user pick lasts until then)', async () => {
+      metaOver = { focal_mm: 620, pixel_um: 3.76 }
+      await openDialog()
+      await pick('other')
+      await loadImage()
+      expect(active()).toBe('station')
+      await pick('other')
+      expect((await runEmit()).source).toBe('other')
+      metaOver = { focal_mm: 2000, pixel_um: 3.76 }
+      await loadImage()
+      expect(active()).toBe('other')
+    })
   })
 })

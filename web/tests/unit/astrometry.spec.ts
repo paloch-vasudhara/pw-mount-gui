@@ -163,3 +163,27 @@ describe('detect status summary (T5.2d)', () => {
     expect(detectTitle(w)).toContain('only 9 usable stars')
   })
 })
+
+describe('image source auto-suggest (T5.2f)', () => {
+  it('matching optics (within 25 % in plate scale) stay Station', async () => {
+    const { suggestOther } = await import('../../app/utils/astrometry')
+    expect(suggestOther({ focal_mm: 620, pixel_um: 3.76 }, 3.76)).toBeNull()
+    expect(suggestOther({ focal_mm: 700, pixel_um: 3.76 }, 3.76)).toBeNull() // ratio 0.886
+    expect(suggestOther({ focal_mm: 500, pixel_um: 3.76 }, 3.76)).toBeNull() // ratio 1.24
+    expect(suggestOther({ focal_mm: null, pixel_um: null }, 3.76)).toBeNull()
+    expect(suggestOther({ focal_mm: null, pixel_um: 3.76 }, null)).toBeNull() // nothing to compare
+  })
+  it('a plate scale more than 25 % off switches to Other, with the note', async () => {
+    const { suggestOther } = await import('../../app/utils/astrometry')
+    expect(suggestOther({ focal_mm: 1000, pixel_um: 3.76 }, 3.76)).toBe('File optics (1000 mm, 3.76 µm) differ from the station: treated as Other setup')
+    expect(suggestOther({ focal_mm: 450, pixel_um: 3.76 }, 3.76)).not.toBeNull() // ratio 1.378
+    expect(suggestOther({ focal_mm: 620, pixel_um: 9 }, 3.76)).not.toBeNull() // pixel alone makes it 2.4x
+    expect(suggestOther({ focal_mm: null, pixel_um: 9 }, 3.76)).toBe('File optics (9 µm) differ from the station: treated as Other setup')
+    expect(suggestOther({ focal_mm: 1000, pixel_um: null }, 3.76)).toBe('File optics (1000 mm) differ from the station: treated as Other setup')
+  })
+  it('with the station pixel unknown only the focal length is compared', async () => {
+    const { suggestOther } = await import('../../app/utils/astrometry')
+    expect(suggestOther({ focal_mm: 1000, pixel_um: 9 }, null)).toContain('1000 mm')
+    expect(suggestOther({ focal_mm: 620, pixel_um: 9 }, null)).toBeNull()
+  })
+})

@@ -1,6 +1,8 @@
 // Astrometry job model (T5.2d): the analysis job record, its states, the readable texts, and the dismissed-job memory.
 // Pure helpers; the store (stores/astrometry-job.ts) owns polling.
 
+import type { ScaleCheck } from './iod'
+
 export type JobState = 'uploading' | 'queued' | 'solving' | 'mapping' | 'done' | 'failed' | 'cancelled' | 'timeout'
 
 export interface JobResult {
@@ -12,6 +14,8 @@ export interface JobResult {
   scale_arcsec_px?: number
   n_stars_used?: number
   warnings?: string[]
+  /** T5.2f: the solved scale / field vs the station's; `match === false` waits for Use / Discard. */
+  scale_check?: ScaleCheck | null
 }
 
 export interface AstrometryJob {
@@ -104,5 +108,42 @@ export function resetDismissed(): void {
   dismissed.clear()
   loaded = false
   try { sessionStorage.removeItem(KEY) }
+  catch { /* ignore */ }
+}
+
+// ----- scale reviews already answered with Use (a Discard dismisses the job): the pill shows Use / Discard until then
+
+const REVIEWED_KEY = 'astrometry-reviewed'
+const reviewed = new Set<string>()
+let reviewedLoaded = false
+
+function loadReviewed(): void {
+  if (reviewedLoaded) return
+  reviewedLoaded = true
+  try {
+    const raw = sessionStorage.getItem(REVIEWED_KEY)
+    const a = raw ? JSON.parse(raw) : []
+    if (Array.isArray(a)) for (const id of a) if (typeof id === 'string') reviewed.add(id)
+  }
+  catch { /* storage unavailable: module scope only */ }
+}
+
+export function isReviewed(id: string): boolean {
+  loadReviewed()
+  return reviewed.has(id)
+}
+
+export function markReviewed(id: string): void {
+  loadReviewed()
+  reviewed.add(id)
+  try { sessionStorage.setItem(REVIEWED_KEY, JSON.stringify([...reviewed].slice(-20))) }
+  catch { /* ignore */ }
+}
+
+/** Forget the answered reviews (tests). */
+export function resetReviewed(): void {
+  reviewed.clear()
+  reviewedLoaded = false
+  try { sessionStorage.removeItem(REVIEWED_KEY) }
   catch { /* ignore */ }
 }

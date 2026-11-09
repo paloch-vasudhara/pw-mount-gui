@@ -104,8 +104,9 @@ def test_gateway_stops_a_mount_stalled_at_its_mechanical_limit(pwi, tmp_path, ax
     # Fixed pose (Phase 3 end fix): the gateway's Sun is pinned far (SUN_FAR), so the real Sun is
     # irrelevant. The old real-Sun choice (alt 20 when the Sun is high) made the to-pose descent
     # trip the gateway's (correct) predictive Lim EL stop. Alt 45 is well clear of Lim EL.
-    # Axis 0 reads 150 deg inside a wrap window [0, 360), so +180 deg puts the target at 330 >
-    # the +300 limit.
+    # Axis 0 reads 150 deg inside a wrap window [0, 360), so +170 deg puts the target at 320 >
+    # the +300 limit. Not +180: 330 and -30 are then equally far and PWI4 picked -30 on
+    # 2026-11-07 (Phase 5 end), so nothing stalled; +170 makes 320 the nearer representation.
     base_alt, base_az = 45.0, 150.0
     wrap0 = s0.mount.axis0_wrap_range_min_degs
     pwi.mount_stop()
@@ -153,7 +154,7 @@ def test_gateway_stops_a_mount_stalled_at_its_mechanical_limit(pwi, tmp_path, ax
             )
             if axis == 0:
                 sign = 1  # axis 0 reads ~150 (see above)
-                pwi.mount_offset(axis0_add_arcsec=sign * 180 * 3600)
+                pwi.mount_offset(axis0_add_arcsec=sign * 170 * 3600)
             else:
                 # push ~9 deg past the axis-1 upper limit from wherever the base pose is (a fixed
                 # +40 deg from the 20 deg base, picked by the real Sun, never reached the limit)

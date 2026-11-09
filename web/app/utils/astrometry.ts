@@ -281,6 +281,31 @@ export function detectSummary(n: number, hasTarget: boolean, warnings: readonly 
 /** The full detect warnings, for the status line's `title`. */
 export const detectTitle = (warnings: readonly string[]): string => warnings.join(' ')
 
+// ----- image source (T5.2f): Station | Other setup
+
+export type ImageSource = 'station' | 'other'
+export const SOURCE_OPTIONS = [{ value: 'station', label: 'Station' }, { value: 'other', label: 'Other' }]
+/** The station's OTA (fixed, RASA11); the pixel size comes from Settings. */
+export const STATION_FOCAL_MM = 620
+const SOURCE_TOL = 0.25
+
+const num = (v: number): string => String(Number(v.toFixed(2)))
+
+/** The file's own optics (FITS FOCALLEN / XPIXSZ) vs the station's: a plate scale more than 25 % off (a missing half of the
+ *  pair is taken from the station; with the station pixel unknown only the focal length is compared) suggests "Other setup".
+ *  Returns the status-line note, or null when the file matches / has nothing to compare. */
+export function suggestOther(meta: Pick<ImageMeta, 'focal_mm' | 'pixel_um'>, stationPixelUm: number | null): string | null {
+  const f = typeof meta.focal_mm === 'number' && meta.focal_mm > 0 ? meta.focal_mm : null
+  const p = typeof meta.pixel_um === 'number' && meta.pixel_um > 0 ? meta.pixel_um : null
+  const sp = typeof stationPixelUm === 'number' && stationPixelUm > 0 ? stationPixelUm : null
+  let ratio: number | null = null // file plate scale / station plate scale
+  if (f !== null) ratio = (STATION_FOCAL_MM / f) * (p !== null && sp !== null ? p / sp : 1)
+  else if (p !== null && sp !== null) ratio = p / sp
+  if (ratio === null || (ratio >= 1 - SOURCE_TOL && ratio <= 1 + SOURCE_TOL)) return null
+  const parts = [f !== null ? `${num(f)} mm` : null, p !== null ? `${num(p)} µm` : null].filter(Boolean).join(', ')
+  return `File optics (${parts}) differ from the station: treated as Other setup`
+}
+
 /** What the dialog emits on RUN (T5.2d sends it to the gateway relay). `slot` = the IOD row the dialog was opened for. */
 export interface AstrometryRunPayload {
   image_id: string
@@ -289,4 +314,6 @@ export interface AstrometryRunPayload {
   exposure_s: number | null
   meta: ImageMeta
   slot: number | null
+  /** Station: the relay fills the missing hints from the station; Other: only the file's own focal_mm / pixel_um are sent. */
+  source: ImageSource
 }

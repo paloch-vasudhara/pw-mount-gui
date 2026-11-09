@@ -141,6 +141,48 @@ def test_relay_blind_when_pixel_unknown(tmp_path):
     assert a.sent()["pixel_um"] is None and a.sent()["focal_mm"] == 620.0
 
 
+def test_relay_station_source_fills_and_always_adds_station_optics(tmp_path):
+    a = FakeAnalysis()
+    c, _ = make(tmp_path, a)
+    c.put("/api/mount/settings", headers=AUTH, json=body(hardware={"camera_pixel_um": 3.76}))
+    c.post(URL, headers=AUTH, json=web_body(source="station"))
+    sent = a.sent()
+    assert sent["source"] == "station"
+    assert sent["focal_mm"] == 620.0 and sent["pixel_um"] == 3.76
+    assert sent["station_focal_mm"] == 620.0 and sent["station_pixel_um"] == 3.76
+    c.post(URL, headers=AUTH, json=web_body())   # default source
+    assert a.sent()["source"] == "station"
+
+
+def test_relay_other_source_is_never_filled_from_the_station(tmp_path):
+    a = FakeAnalysis()
+    c, _ = make(tmp_path, a)
+    c.put("/api/mount/settings", headers=AUTH, json=body(hardware={"camera_pixel_um": 3.76}))
+    r = c.post(URL, headers=AUTH, json=web_body(source="other"))
+    assert r.status_code == 202
+    sent = a.sent()
+    assert sent["source"] == "other" and sent["focal_mm"] is None and sent["pixel_um"] is None
+    assert sent["station_focal_mm"] == 620.0 and sent["station_pixel_um"] == 3.76
+    assert sent["apikey"] == KEY and KEY not in r.text
+    c.post(URL, headers=AUTH, json=web_body(source="other", focal_mm=1000, pixel_um=5,
+                                            station_focal_mm=1, station_pixel_um=1))
+    sent = a.sent()
+    assert sent["focal_mm"] == 1000 and sent["pixel_um"] == 5   # the file's own values
+    assert sent["station_focal_mm"] == 620.0 and sent["station_pixel_um"] == 3.76
+
+
+def test_relay_station_optics_pixel_null_when_unknown(tmp_path):
+    a = FakeAnalysis()
+    c, _ = make(tmp_path, a)
+    c.post(URL, headers=AUTH, json=web_body(source="other"))
+    assert a.sent()["station_pixel_um"] is None and a.sent()["station_focal_mm"] == 620.0
+
+
+def test_relay_rejects_unknown_source(tmp_path):
+    c, _ = make(tmp_path, FakeAnalysis())
+    assert c.post(URL, headers=AUTH, json=web_body(source="x")).status_code == 422
+
+
 def test_relay_no_key_409_and_nothing_sent(tmp_path):
     a = FakeAnalysis()
     c, _ = make(tmp_path, a, key=None)

@@ -1,10 +1,13 @@
 <script setup lang="ts">
 // Detailed Mount Status modal (A4-ii, concept/Detialed Info.png): expanded 3D view on the left,
 // live parameters and the live mount-control groups (MountControlPanel, T3.2) on the right.
-import { computed } from 'vue'
+import { computed, watch } from 'vue'
+import CctvPlayer from '@/components/mount/CctvPlayer.vue'
+import CctvViewToggle from '@/components/mount/CctvViewToggle.vue'
 import MountControlPanel from '@/components/mount/MountControlPanel.vue'
 import MountHemisphere3D from '@/components/mount/MountHemisphere3D.vue'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
+import { useCctvStore } from '@/stores/cctv'
 import { useMountStore } from '@/stores/mount'
 import { buildDetailsDisplay, SUP_H, SUP_M, SUP_S } from '@/utils/mount-details-format'
 import type { DisplayField, ValueTone } from '@/utils/mount-format'
@@ -13,6 +16,11 @@ const open = defineModel<boolean>('open', { default: false })
 
 const store = useMountStore()
 const d = computed(() => buildDetailsDisplay(store.snapshot, store.linkStale))
+
+// T5.7: 3D | CCTV | Side by side when a camera is configured; the feed lives only while this is open.
+const cctv = useCctvStore()
+const view = computed(() => (cctv.configured ? cctv.expandedView : '3d'))
+watch(open, (o) => { if (o) void cctv.refresh() }, { immediate: true })
 
 const TONE: Record<ValueTone, string> = {
   normal: 'text-foreground',
@@ -67,8 +75,17 @@ const groups = computed<Row[][]>(() => [
       </DialogDescription>
 
       <div class="md-body">
-        <div class="md-view" data-testid="mount-details-3d">
-          <MountHemisphere3D mode="expanded" />
+        <div class="md-view" :data-view="view" data-testid="mount-details-3d">
+          <div v-show="view !== 'cctv'" class="md-pane" data-testid="md-pane-3d">
+            <MountHemisphere3D mode="expanded" :active="view !== 'cctv'" />
+          </div>
+          <div v-if="view !== '3d'" class="md-pane" data-testid="md-pane-cctv">
+            <CctvPlayer :type="cctv.type" :active="open" />
+          </div>
+          <CctvViewToggle
+            v-if="cctv.configured" class="md-toggle" expanded :model-value="view"
+            @update:model-value="v => cctv.setView(true, v)"
+          />
         </div>
 
         <div class="md-side">
@@ -103,7 +120,10 @@ const groups = computed<Row[][]>(() => [
 .mount-dialog { background: var(--page-bg); border: 1px solid var(--panel-border); width: 100%; max-width: min(1240px, calc(100vw - 2rem)); max-height: calc(100vh - 1.5rem); overflow-y: auto; }
 .mount-dialog .md-chip { position: absolute; top: -1px; left: -1px; z-index: 10; border: 1px solid var(--panel-border); padding: 1px 6px; font-size: 13px; line-height: 1.25; font-weight: 700; letter-spacing: 0.05em; color: var(--chip-text); text-transform: uppercase; }
 .mount-dialog .md-body { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 24px; padding: 44px 24px 24px 24px; }
-.mount-dialog .md-view { position: relative; height: min(800px, calc(100vh - 8rem)); min-height: 360px; background: #08090b; overflow: hidden; }
+.mount-dialog .md-view { position: relative; display: flex; height: min(800px, calc(100vh - 8rem)); min-height: 360px; background: #08090b; overflow: hidden; }
+.mount-dialog .md-pane { position: relative; flex: 1 1 0; min-width: 0; }
+.mount-dialog .md-view[data-view='both'] .md-pane + .md-pane { border-left: 1px solid var(--panel-border); }
+.mount-dialog .md-toggle { position: absolute; top: 8px; right: 8px; z-index: 10; }
 .mount-dialog .md-side { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .mount-dialog .md-group { border: 1px solid var(--panel-border); border-radius: 6px; padding: 8px 16px 10px; margin: 0; min-width: 0; }
 .mount-dialog .md-group legend { padding: 0 6px; font-size: 15px; font-weight: 600; color: var(--label-slate); }

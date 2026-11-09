@@ -1,15 +1,19 @@
 <script setup lang="ts">
 // Station Settings modal (A2b-iii, concept/Settings.png). Cancel / X discards; Save (enabled only when something changed) checks the proposed site
 // against PWI4 first, then PUTs. The API key is write-only: the box is always empty on open, "set" is only a placeholder.
+// T5.7: the CCTV url / username / password are write-only the same way. The body scrolls inside the dialog (the title and
+// the CANCEL / SAVE bar stay put).
 import { computed, ref, watch } from 'vue'
 import AltitudeField from '@/components/widgets/AltitudeField.vue'
 import AngleField from '@/components/widgets/AngleField.vue'
 import FormatSelect from '@/components/widgets/FormatSelect.vue'
 import NumberField from '@/components/widgets/NumberField.vue'
+import SegToggle from '@/components/widgets/SegToggle.vue'
 import TimezoneSelect from '@/components/settings/TimezoneSelect.vue'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { GatewayError, useGatewayApi } from '@/composables/useGatewayApi'
+import { useCctvStore } from '@/stores/cctv'
 import {
   buildPayload, buildSiteCheckBody, formFromDto, isDirty, LIM_EL_MAX, LIM_EL_MIN, PIXEL_UM_MAX, PIXEL_UM_MIN, pcTimeZone, siteWarning, timeZoneList, validateForm,
   type SettingsForm, type SettingsResponse, type SiteCheckDto,
@@ -18,11 +22,13 @@ import {
 const open = defineModel<boolean>('open', { default: false })
 
 const api = useGatewayApi()
+const cctvStore = useCctvStore()
 const zones = timeZoneList()
 
 const form = ref<SettingsForm | null>(null)
 const baseline = ref<SettingsForm | null>(null)
 const apiKeySet = ref(false)
+const cctvStatus = ref('Not configured')
 const loading = ref(false)
 const saving = ref(false)
 const loadError = ref<string | null>(null)
@@ -38,6 +44,37 @@ const keyPlaceholder = computed(() => {
   if (form.value?.clearKey) return 'key will be cleared'
   return apiKeySet.value ? '•••• set' : 'not set'
 })
+
+const ON_OFF = [{ value: 'on', label: 'On' }, { value: 'off', label: 'Off' }]
+const CCTV_TYPES = [{ value: 'mjpeg', label: 'MJPEG' }, { value: 'hls', label: 'HLS' }]
+const cctvOn = computed({
+  get: () => (form.value?.cctvEnabled ? 'on' : 'off'),
+  set: (v: string) => { if (form.value) form.value.cctvEnabled = v === 'on' },
+})
+const cctvKind = computed({
+  get: () => form.value?.cctvType ?? 'mjpeg',
+  set: (v: string) => { if (form.value) form.value.cctvType = v === 'hls' ? 'hls' : 'mjpeg' },
+})
+
+type CctvSecret = 'Url' | 'User' | 'Pass'
+function cctvPlaceholder(which: CctvSecret): string {
+  const f = form.value
+  if (!f) return ''
+  if (f[`clearCctv${which}`]) return 'will be cleared'
+  return f[`cctv${which}Set`] ? '•••• set' : 'not set'
+}
+function cctvTyped(which: CctvSecret, v: string): void {
+  const f = form.value
+  if (!f) return
+  f[`cctv${which}`] = v
+  if (v !== '') f[`clearCctv${which}`] = false
+}
+function cctvClear(which: CctvSecret): void {
+  const f = form.value
+  if (!f) return
+  f[`cctv${which}`] = ''
+  f[`clearCctv${which}`] = true
+}
 
 async function load(): Promise<void> {
   loading.value = true
@@ -57,6 +94,7 @@ async function load(): Promise<void> {
     }
     form.value = f
     apiKeySet.value = d.api_key_set
+    cctvStatus.value = d.cctv?.status ?? 'Not configured'
   }
   catch (e) {
     loadError.value = e instanceof GatewayError
@@ -104,6 +142,7 @@ async function save(): Promise<void> {
     }
     const d = await api.put<SettingsResponse>('/api/mount/settings', buildPayload(form.value))
     apiKeySet.value = d.api_key_set
+    void cctvStore.refresh() // the mount panel learns at once whether a camera is configured
     close()
   }
   catch (e) {
@@ -168,6 +207,7 @@ const SATDB = [{ value: 'DELV Aerospace', label: 'DELV Aerospace' }]
       </div>
 
       <form v-else-if="form" class="ss-body" novalidate @submit.prevent="save">
+        <div class="ss-scroll app-scroll" data-testid="ss-scroll">
         <div class="ss-grid">
           <fieldset class="ss-group ss-loc" data-testid="ss-location">
             <legend>Location</legend>
@@ -274,6 +314,79 @@ const SATDB = [{ value: 'DELV Aerospace', label: 'DELV Aerospace' }]
             <legend>ADS-B</legend>
             <p>Section awaiting protocol template</p>
           </fieldset>
+
+          <fieldset class="ss-group ss-cctv" data-testid="ss-cctv">
+            <legend>CCTV</legend>
+            <div class="ss-cctv-grid">
+              <div>
+                <div class="form-row">
+                  <label class="ss-label">Enable</label>
+                  <SegToggle v-model="cctvOn" :options="ON_OFF" seg-class="ss-seg" data-testid="ss-cctv-enable" />
+                </div>
+                <div class="form-row">
+                  <label class="ss-label">Type</label>
+                  <SegToggle v-model="cctvKind" :options="CCTV_TYPES" seg-class="ss-seg" data-testid="ss-cctv-type" />
+                </div>
+                <div class="form-row">
+                  <label class="ss-label">Status</label>
+                  <span class="ss-cctv-status" data-testid="ss-cctv-status" :title="cctvStatus">{{ cctvStatus }}</span>
+                </div>
+              </div>
+              <div>
+                <div class="form-row">
+                  <label class="ss-label">Stream URL</label>
+                  <span class="ss-key-wrap">
+                    <input
+                      class="ov-dms-box ss-key" type="text" autocomplete="off" spellcheck="false"
+                      :value="form.cctvUrl" :placeholder="cctvPlaceholder('Url')" data-testid="ss-cctv-url"
+                      @input="cctvTyped('Url', ($event.target as HTMLInputElement).value)"
+                    >
+                    <button
+                      v-if="form.cctvUrlSet && !form.clearCctvUrl && !form.cctvUrl" type="button" class="ss-link ss-clearkey"
+                      data-testid="ss-cctv-clear-url" @click="cctvClear('Url')"
+                    >
+                      clear
+                    </button>
+                  </span>
+                </div>
+                <p v-if="errors.cctvUrl" class="ss-err" data-testid="ss-cctv-url-err">
+                  {{ errors.cctvUrl }}
+                </p>
+                <div class="form-row">
+                  <label class="ss-label">Username</label>
+                  <span class="ss-key-wrap">
+                    <input
+                      class="ov-dms-box ss-key" type="text" autocomplete="off" spellcheck="false"
+                      :value="form.cctvUser" :placeholder="cctvPlaceholder('User')" data-testid="ss-cctv-user"
+                      @input="cctvTyped('User', ($event.target as HTMLInputElement).value)"
+                    >
+                    <button
+                      v-if="form.cctvUserSet && !form.clearCctvUser && !form.cctvUser" type="button" class="ss-link ss-clearkey"
+                      data-testid="ss-cctv-clear-user" @click="cctvClear('User')"
+                    >
+                      clear
+                    </button>
+                  </span>
+                </div>
+                <div class="form-row">
+                  <label class="ss-label">Password</label>
+                  <span class="ss-key-wrap">
+                    <input
+                      class="ov-dms-box ss-key" type="password" autocomplete="new-password" spellcheck="false"
+                      :value="form.cctvPass" :placeholder="cctvPlaceholder('Pass')" data-testid="ss-cctv-pass"
+                      @input="cctvTyped('Pass', ($event.target as HTMLInputElement).value)"
+                    >
+                    <button
+                      v-if="form.cctvPassSet && !form.clearCctvPass && !form.cctvPass" type="button" class="ss-link ss-clearkey"
+                      data-testid="ss-cctv-clear-pass" @click="cctvClear('Pass')"
+                    >
+                      clear
+                    </button>
+                  </span>
+                </div>
+              </div>
+            </div>
+          </fieldset>
         </div>
 
         <p v-if="warning" class="ss-warn" role="alert" data-testid="ss-warning">
@@ -282,6 +395,7 @@ const SATDB = [{ value: 'DELV Aerospace', label: 'DELV Aerospace' }]
         <p v-if="saveError" class="ss-err ss-save-err" role="alert" data-testid="ss-save-error">
           {{ saveError }}
         </p>
+        </div>
 
         <div class="ss-actions">
           <Button
@@ -307,10 +421,13 @@ const SATDB = [{ value: 'DELV Aerospace', label: 'DELV Aerospace' }]
   --ss-col: calc(var(--ss-label) + var(--ss-span) + 2 * var(--ss-pad) + 2px);
   background: var(--page-bg); border: 1px solid var(--control-border); width: 100%;
   max-width: min(calc(2 * var(--ss-col) + 16px + 48px + 2px), calc(100vw - 2rem));
+  display: flex; flex-direction: column; max-height: calc(100dvh - 2rem);
 }
-.station-dialog .ss-head { padding: 12px 14px; border-bottom: 1px solid var(--control-border); }
+.station-dialog .ss-head { flex: none; padding: 12px 14px; border-bottom: 1px solid var(--control-border); }
 .station-dialog .ss-title { font-size: 16px; font-weight: 700; letter-spacing: 0.02em; text-transform: uppercase; }
-.station-dialog .ss-body { padding: 16px 24px 24px; }
+/* The title and the CANCEL / SAVE bar are fixed; only .ss-scroll (app-scroll: the thin app scrollbar) moves. */
+.station-dialog .ss-body { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+.station-dialog .ss-scroll { flex: 1 1 auto; min-height: 0; padding: 16px 24px 20px; }
 .station-dialog .ss-state { padding: 40px 24px; text-align: center; color: var(--muted-foreground); font-size: 13px; }
 .station-dialog .ss-state-err { color: var(--danger); }
 .station-dialog .ss-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
@@ -337,7 +454,12 @@ const SATDB = [{ value: 'DELV Aerospace', label: 'DELV Aerospace' }]
 .station-dialog .ss-err { margin: -4px 0 6px; color: var(--danger); font-size: 12px; }
 .station-dialog .ss-warn { margin: 12px 0 0; padding: 8px 10px; border: 1px solid #c9962b; background: rgba(201, 150, 43, 0.12); color: #e6b84f; font-size: 13px; }
 .station-dialog .ss-save-err { margin-top: 10px; }
-.station-dialog .ss-actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 14px; }
+.station-dialog .ss-actions { flex: none; display: flex; justify-content: flex-end; gap: 12px; padding: 16px 24px 16px; border-top: 1px solid var(--panel-border); }
+.station-dialog .ss-cctv { grid-column: 1 / -1; padding-bottom: 14px; }
+.station-dialog .ss-cctv-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.station-dialog .ss-seg { flex: 0 0 var(--ss-field); width: var(--ss-field); }
+.station-dialog .ss-cctv-status { flex: 1 1 auto; min-width: 0; font-size: 13px; font-weight: 600; color: var(--foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 820px) { .station-dialog .ss-cctv-grid { grid-template-columns: minmax(0, 1fr); } }
 .station-dialog .ss-btn { height: 34px; min-width: 130px; border-radius: 0; font-size: 14px; font-weight: 700; letter-spacing: 0.02em; border: 1px solid var(--control-border); }
 .station-dialog .ss-save { background: linear-gradient(to bottom right, var(--primary-from), var(--primary-to)); border-color: var(--accent-green-border); color: #fff; }
 .station-dialog .ss-save:disabled { opacity: 0.45; }

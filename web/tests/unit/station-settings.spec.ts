@@ -2,6 +2,7 @@
 // T1.2: station-settings logic (validation, payload shape, mismatch text) + dialog behaviour.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
+import { createPinia, setActivePinia } from 'pinia'
 import StationSettingsDialog from '../../app/components/settings/StationSettingsDialog.vue'
 import {
   buildPayload, buildSiteCheckBody, formFromDto, isDirty, siteWarning, validateForm,
@@ -16,6 +17,7 @@ const DTO: StationSettingsDto = {
   hardware: { mount: 'PW L-350', ota: 'Celestron RASA11', lim_el_deg: 15, camera_pixel_um: null },
   providers: { astrometry: 'astrometry.net', satellite_db: 'DELV Aerospace' },
   display: { lat_format: 'dd', lon_format: 'dd', alt_unit: 'm' },
+  cctv: { enabled: false, type: 'mjpeg', url_set: false, username_set: false, password_set: false, configured: false, status: 'Not configured' },
 }
 
 describe('station-settings utils', () => {
@@ -61,7 +63,60 @@ describe('station-settings utils', () => {
 
   it('payload shape matches the gateway schema', () => {
     const p = buildPayload(formFromDto(DTO))
-    expect(p).toEqual(DTO)
+    // the CCTV block on the wire is the writable part only (url / username / password are write-only)
+    const { cctv: _status, ...rest } = DTO
+    expect(p).toEqual({ ...rest, cctv: { enabled: false, type: 'mjpeg' } })
+  })
+
+  it('CCTV url / username / password are sent only when typed or cleared', () => {
+    const f = formFromDto({ ...DTO, cctv: { ...DTO.cctv!, enabled: true, url_set: true, username_set: true, password_set: true, configured: true } })
+    expect(buildPayload(f).cctv).toEqual({ enabled: true, type: 'mjpeg' })
+    expect('cctv_password' in buildPayload(f)).toBe(false)
+    f.cctvUrl = ' http://10.0.0.5/mjpeg '
+    f.cctvUser = 'cam'
+    f.cctvPass = 's3'
+    f.cctvType = 'hls'
+    expect(buildPayload(f).cctv).toEqual({ enabled: true, type: 'hls', url: 'http://10.0.0.5/mjpeg', username: 'cam' })
+    expect(buildPayload(f).cctv_password).toBe('s3')
+    f.cctvUrl = ''
+    f.cctvUser = ''
+    f.cctvPass = ''
+    f.clearCctvUrl = f.clearCctvUser = f.clearCctvPass = true
+    expect(buildPayload(f).cctv).toMatchObject({ url: '', username: '' })
+    expect(buildPayload(f).cctv_password).toBe('')
+  })
+
+  it('CCTV URL rules and "enabled needs a URL"', () => {
+    for (const bad of ['rtsp://cam/x', 'cam.local/x', 'http://u:p@cam/x', 'http://u@cam/x', 'http://cam/a b']) {
+      const f = formFromDto(DTO)
+      f.cctvUrl = bad
+      expect(validateForm(f, ZONES).cctvUrl, bad).toBeTruthy()
+    }
+    for (const ok of ['http://10.0.0.5/mjpeg', 'https://cam.example:8443/live/index.m3u8?x=1']) {
+      const f = formFromDto(DTO)
+      f.cctvUrl = ok
+      expect(validateForm(f, ZONES).cctvUrl, ok).toBeUndefined()
+    }
+    const f = formFromDto(DTO)
+    f.cctvEnabled = true
+    expect(validateForm(f, ZONES).cctvUrl).toBeTruthy() // enabled, no URL stored or typed
+    f.cctvUrlSet = true
+    expect(validateForm(f, ZONES).cctvUrl).toBeUndefined() // the stored one stands
+    f.clearCctvUrl = true
+    expect(validateForm(f, ZONES).cctvUrl).toBeTruthy()
+  })
+
+  it('CCTV edits make the form dirty; an old gateway without cctv loads as off', () => {
+    const base = formFromDto(DTO)
+    const f = formFromDto(DTO)
+    expect(isDirty(f, base)).toBe(false)
+    f.cctvEnabled = true
+    expect(isDirty(f, base)).toBe(true)
+    f.cctvEnabled = false
+    f.cctvPass = 'x'
+    expect(isDirty(f, base)).toBe(true)
+    const { cctv: _c, ...old } = DTO
+    expect(formFromDto(old).cctvEnabled).toBe(false)
   })
 
   it('site warning only when ok is false', () => {
@@ -154,6 +209,7 @@ describe('StationSettingsDialog', () => {
   }
 
   beforeEach(() => {
+    setActivePinia(createPinia())
     calls.length = 0
     apiKeySet = false
     checkResponse = { pwi4_reachable: false, ok: null }
@@ -310,6 +366,53 @@ describe('StationSettingsDialog', () => {
     expect(q('tz-trigger')!.textContent!.trim()).toBe('UTC')
     w.unmount()
     DTO.location.timezone = orig
+  })
+
+  it('CCTV group: write-only fields, the body scrolls and the title / button bar stay outside it', async () => {
+    const orig = DTO.cctv
+    DTO.cctv = { enabled: true, type: 'hls', url_set: true, username_set: true, password_set: true, configured: true, status: 'Live' }
+    const w = await openDialog()
+    expect(q('ss-cctv')).not.toBeNull()
+    expect((q('ss-cctv-status')!).textContent).toBe('Live')
+    // set values are never shown: placeholders only
+    for (const id of ['ss-cctv-url', 'ss-cctv-user', 'ss-cctv-pass']) {
+      const i = q(id) as HTMLInputElement
+      expect(i.value).toBe('')
+      expect(i.placeholder).toContain('set')
+    }
+    // layout: only .ss-scroll scrolls; the head and the actions are not inside it
+    const scroll = q('ss-scroll')!
+    expect(scroll.classList.contains('app-scroll')).toBe(true)
+    expect(scroll.contains(q('ss-location'))).toBe(true)
+    expect(scroll.contains(q('ss-cctv'))).toBe(true)
+    expect(scroll.contains(q('ss-save'))).toBe(false)
+    expect(scroll.contains(document.body.querySelector('.ss-head'))).toBe(false)
+    // typing a password and a url makes it saveable; they are sent once
+    const pass = q('ss-cctv-pass') as HTMLInputElement
+    pass.value = 'CAM-PW'
+    pass.dispatchEvent(new Event('input'))
+    const url = q('ss-cctv-url') as HTMLInputElement
+    url.value = 'http://10.0.0.5/live/index.m3u8'
+    url.dispatchEvent(new Event('input'))
+    await flushPromises()
+    ;(q('ss-save') as HTMLButtonElement).click()
+    await flushPromises()
+    const body = JSON.parse(calls.find(c => c.method === 'PUT')!.body!)
+    expect(body.cctv).toEqual({ enabled: true, type: 'hls', url: 'http://10.0.0.5/live/index.m3u8' })
+    expect(body.cctv_password).toBe('CAM-PW')
+    w.unmount()
+    DTO.cctv = orig
+  })
+
+  it('CCTV: a bad URL blocks Save and shows the reason', async () => {
+    const w = await openDialog()
+    const url = q('ss-cctv-url') as HTMLInputElement
+    url.value = 'rtsp://cam/stream'
+    url.dispatchEvent(new Event('input'))
+    await flushPromises()
+    expect(q('ss-cctv-url-err')).not.toBeNull()
+    expect((q('ss-save') as HTMLButtonElement).disabled).toBe(true)
+    w.unmount()
   })
 
   it('Cancel closes without a PUT', async () => {

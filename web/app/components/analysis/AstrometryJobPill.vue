@@ -2,22 +2,30 @@
 // Astrometry job pill (T5.2d): a small two-line pill at the bottom-left of the Sky Viewer frame, mounted once (user 11-02:
 // the title on top, the status below at full width). Running: "Astrometry" / "<stage>" + spinner + Cancel. Done: "Astrometry
 // solved" / "row N" (click opens IOD) or, when no IOD row holds the job (after a refresh), "apply to a row…" (click opens IOD
-// and puts the result into the first free row). Failed: "Astrometry failed" / the readable reason (or the last Retry error) + Retry when the job is resumable. The x dismisses a finished
+// and puts the result into the first free row). Done with a solved scale that differs from the station's (T5.2f): "Astrometry
+// solved — scale differs" / the comparison + Use / Discard until the user chooses (Use with no row = the "apply to a row…" path,
+// applied directly). Failed: "Astrometry failed" / the readable reason (or the last Retry error) + Retry when the job is resumable. The x dismisses a finished
 // job (client-side). The job itself lives in the astrometry-job store (polled there).
 import { computed, onMounted } from 'vue'
 import { useAstrometryJobStore } from '~/stores/astrometry-job'
 import { failureText, isActiveState, stageLabel } from '~/utils/astrometry-job'
+import { reviewText } from '~/utils/iod'
 
 const store = useAstrometryJobStore()
 
 onMounted(() => { void store.reattach() })
 
 const job = computed(() => store.job)
-const kind = computed<'running' | 'done' | 'failed' | null>(() => {
+const kind = computed<'running' | 'done' | 'review' | 'failed' | null>(() => {
   const j = job.value
   if (!j) return null
   if (isActiveState(j.state)) return 'running'
-  return j.state === 'done' ? 'done' : 'failed'
+  if (j.state === 'done') return store.needsReview ? 'review' : 'done'
+  return 'failed'
+})
+const reviewDetail = computed(() => {
+  const c = job.value?.result?.scale_check
+  return c ? reviewText(c) : ''
 })
 const doneText = computed(() => (store.row !== null ? `row ${store.row + 1}` : 'apply to a row…'))
 const failText = computed(() => store.resumeError ?? (job.value ? failureText(job.value) : ''))
@@ -39,6 +47,18 @@ function onDone(): void {
       </span>
       <button type="button" class="as-pill-btn" data-testid="as-pill-cancel" @click="store.cancel()">
         Cancel
+      </button>
+    </template>
+    <template v-else-if="kind === 'review'">
+      <span class="as-pill-body" :title="reviewDetail">
+        <span class="as-pill-title" data-testid="as-pill-title">Astrometry solved — scale differs</span>
+        <span class="as-pill-text" data-testid="as-pill-text">{{ reviewDetail }}</span>
+      </span>
+      <button type="button" class="as-pill-btn as-pill-use" data-testid="as-pill-use" title="Use this result" @click="store.reviewUse()">
+        Use
+      </button>
+      <button type="button" class="as-pill-btn" data-testid="as-pill-discard" title="Discard this result" @click="store.reviewDiscard()">
+        Discard
       </button>
     </template>
     <template v-else-if="kind === 'done'">
@@ -76,6 +96,10 @@ function onDone(): void {
   font-size: 12px; font-weight: 600; color: var(--foreground); box-shadow: 0 2px 8px rgb(0 0 0 / 0.35);
 }
 .as-pill.is-done { border-color: var(--accent-green-border); }
+.as-pill.is-review { border-color: var(--accent-green-border); }
+.as-pill.is-review .as-pill-title { color: var(--accent-green-border); }
+.as-pill-use { background: var(--accent-green-border); border-color: var(--accent-green-border); color: #fff; }
+.as-pill-use:hover { border-color: var(--accent-green-border); filter: brightness(1.1); }
 .as-pill.is-failed { border-color: var(--danger); }
 .as-pill-body { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
 .as-pill-title { font-size: 11px; font-weight: 600; color: var(--muted-foreground); white-space: nowrap; }

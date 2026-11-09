@@ -10,7 +10,8 @@ Errors are readable strings only - never exception text. T5.2b adds ``/run`` and
 
 T5.2b endpoints (``/run`` is called only by the gateway, which adds ``apikey``):
   POST /api/astrometry/run {image_id, detections[], epoch_iso, exposure_s?, focal_mm?,
-       pixel_um?, apikey} -> 202 {job_id, state}; 422 readable; 404 EXPIRED;
+       pixel_um?, source?, station_focal_mm?, station_pixel_um?, apikey} -> 202 {job_id, state};
+       422 readable; 404 EXPIRED;
        409 "An astrometry solve is already running"
   GET  /api/astrometry/job/{id} -> {job_id, state, stage_text, started, result?, error?}
   GET  /api/astrometry/job      -> the active job, else the latest finished one, else 404
@@ -26,7 +27,8 @@ Injection / test switches:
   * env ``PW_ASTROMETRY_FAKE=1`` - ``create_app`` installs ``nova.fake_factory``: a
     deterministic fake that "solves" after ~3 s with a north-up TAN WCS centred on the image
     (RA 150, Dec 20; 5 arcsec/px, or the hint scale when one is sent). For the browser gate
-    only - it never touches the network.
+    only - it never touches the network. ``PW_ASTROMETRY_FAKE_SCALE`` (arcsec / px) overrides
+    the fake's returned scale, to produce a scale mismatch.
 """
 
 from __future__ import annotations
@@ -61,7 +63,6 @@ ERR_KEY = "Invalid astrometry.net API key"
 ERR_UNREACHABLE = "astrometry.net unreachable (network)"
 ERR_FAILED = "astrometry.net could not solve this frame"
 ERR_TIMEOUT = "Solve timed out"
-ERR_SCALE = "Solved scale does not match the camera"
 ALLOWED_EXTS = SUPPORTED_EXTS - {".fts"}   # the spec's list: fits fit tif tiff jpg jpeg png
 
 
@@ -87,6 +88,10 @@ class RunIn(BaseModel):
     exposure_s: float | None = Field(default=None, ge=0, le=1e5)
     focal_mm: float | None = Field(default=None, gt=0, lt=1e5)
     pixel_um: float | None = Field(default=None, gt=0, lt=1e3)
+    source: Literal["station", "other"] = "station"
+    # the station's optics: for the scale comparison only, never a hint
+    station_focal_mm: float | None = Field(default=None, gt=0, lt=1e5)
+    station_pixel_um: float | None = Field(default=None, gt=0, lt=1e3)
     apikey: str | None = Field(default=None, max_length=256)
 
 
@@ -132,7 +137,8 @@ def _nova_error_text(e: nova.NovaError) -> str:
 
 def _make_worker(client, *, spec: dict):
     """The job body. ``client`` holds the key; the job never does. ``spec`` is what a
-    resume needs (width, height, epoch, exposure_s, target, stars, hint_scale). If the job
+    resume needs (width, height, epoch, exposure_s, target, stars, hint_scale, source,
+    station_scale). If the job
     already carries a ``nova_subid`` the submission is re-attached, never re-uploaded; if it
     carries a ``solution`` no nova call is made at all."""
     width, height, epoch = spec["width"], spec["height"], spec["epoch"]
@@ -168,9 +174,6 @@ def _make_worker(client, *, spec: dict):
             job.solution = sol
         job.check_cancel()
         job.set_state(jobs_mod.MAPPING)
-        if not solve_mod.scale_ok(sol.scale_arcsec_px, hint_scale):
-            job.no_resume = True
-            raise JobError(ERR_SCALE)
         wcs = solve_mod.build_wcs(sol.wcs_header)
         if wcs is None:
             job.no_resume = True
@@ -181,12 +184,15 @@ def _make_worker(client, *, spec: dict):
             job.no_resume = True
             raise JobError(ERR_FAILED) from None
         mid_iso, mid_unix, warnings = solve_mod.mid_exposure(epoch, exposure_s)
+        scale_check = solve_mod.scale_check(spec.get("source", "station"), sol.scale_arcsec_px,
+                                            width, height, spec.get("station_scale"))
         return {
             "ra_deg": round(ra, 6), "dec_deg": round(dec, 6),
             "epoch_mid_iso": mid_iso, "epoch_mid_unix": mid_unix,
             "residual_arcsec": round(solve_mod.sigma_arcsec(sol.scale_arcsec_px), 3),
             "scale_arcsec_px": round(sol.scale_arcsec_px, 4),
             "n_stars_used": sol.n_stars_used, "warnings": warnings,
+            "scale_check": scale_check,
         }
 
     return work
@@ -290,7 +296,9 @@ def make_router(sessions: ImageSessions, jobs: JobRegistry | None = None) -> API
         hint = solve_mod.hint_scale_arcsec(body.focal_mm, body.pixel_um)
         spec = {"width": int(s.image.width), "height": int(s.image.height), "epoch": epoch,
                 "exposure_s": body.exposure_s, "target": target, "stars": stars,
-                "hint_scale": hint}
+                "hint_scale": hint, "source": body.source,
+                "station_scale": solve_mod.hint_scale_arcsec(body.station_focal_mm,
+                                                             body.station_pixel_um)}
         fp = _fingerprint(body.image_id, stars, hint)
         prev = jobs.find_reusable(fp)
 

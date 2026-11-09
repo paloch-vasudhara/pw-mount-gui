@@ -275,7 +275,7 @@ footer { color: var(--muted); font-size: 13px; margin-top: 28px; }
     <tr><td>U4</td><td><b>The receiver's location</b>. Telemetry carries no station lat/lon</td><td>Decoding CPR against a reference needs a position within 180 NM. We also need to know whether the receiver sits with the mount</td><td>You</td></tr>
     <tr><td>U5</td><td>Real message rates, the actual mix of <code>timestamp_status</code>/<code>source</code>, and the share of <code>full_raw_crc_checked</code> frames</td><td>How far to trust the timing; whether to trust CRC-checked frames only for cueing</td><td>Sample capture</td></tr>
     <tr><td>U6</td><td>Whether the <b>mount PC</b> can reach <code>10.22.123.68:443</code></td><td>The gateway runs there</td><td>You</td></tr>
-    <tr><td>U7</td><td>How PWI4 behaves when a running custom path is <b>replaced</b> (new + add + apply) every second</td><td>Aircraft paths change with every update. P22 only measured extending a path</td><td>A sim probe (new finding P23)</td></tr>
+    <tr><td>U7</td><td>How PWI4 behaves when a running custom path is <b>replaced</b> (new + add + apply) every second</td><td>Aircraft paths change with every update. P22 only measured extending a path</td><td><b>Answered 11-07 (P23):</b> replacement works, 0.023° mean at 1 s updates; the first point must be in the past</td></tr>
   </table>
 </section>
 
@@ -418,12 +418,7 @@ footer { color: var(--muted); font-size: 13px; margin-top: 28px; }
         <li>the feed is lost.</li>
       </ul></li>
   </ol>
-  <div class="callout warn"><b>Probe first (U7).</b> Replacing a running path every second has not been measured on PWI4. Before building the executor, measure on the sim:
-    <ul>
-      <li>the disturbance at each replacement;</li>
-      <li>the apply delay (0.06–0.11 s in P21);</li>
-      <li>any hold or jump.</li>
-    </ul></div>
+  <div class="callout ok"><b>Probe done (P23, 11-07, PWI4 Simulator).</b> Replacing a running path every 1 s works: apply ≈ 0.06 s, no stop or jump, 0.023° mean / 0.17° max following error on a GA fly-by (2 s updates: 0.019° / 0.15°). With a 1 s feed delay, the velocity-based prediction held 0.18° mean through a 3°/s turn; without delay compensation the error was ≈ 2°. The first path point must be in the past (a future first point makes the mount pause: 0.14° mean). After the last point the mount holds still, so the gateway must STOP on feed loss. Overflights peaking at 82.5° and 86.3° followed at 0.015° mean on the sim, but the sim axis reached 36°/s, so the real zenith limit has to come from the L-350.</div>
 
   <h3 id="rates">Angular rates</h3>
   <table>
@@ -544,6 +539,7 @@ footer { color: var(--muted); font-size: 13px; margin-top: 28px; }
 
 <section id="decisions">
   <h2><span class="id">11</span> Decisions (Q35–Q50)</h2>
+  <div class="callout ok"><b>User 2026-11-07: all recommendations accepted.</b> Q41 amended: the reported velocity + heading is the primary predictor, with a Kalman filter as the fallback when the velocity data is incomplete. The receiver is on the mount's building, so the Settings location serves as the receiver position.</div>
   <table>
     <tr><th>#</th><th>Decision</th><th>Recommended</th><th>Alternative</th></tr>
     <tr><td>Q35</td><td>Transport</td><td><b>WSS + read token</b>: the documented client contract, port 443, revocable, read-only</td><td>MQTT direct: possibly less delay on <code>adsb/frames</code>, but needs MQTT credentials, broker access rights and an MQTT library</td></tr>

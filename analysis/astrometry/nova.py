@@ -32,6 +32,7 @@ import json
 import logging
 import math
 import numbers
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Protocol
@@ -367,6 +368,12 @@ class FakeNova:
     def solve(self, image_path, *, width, height, scale_est_arcsec, timeout=SOLVE_TIMEOUT_S,
               progress=None, check_cancel=None, resume_subid=None) -> NovaSolution:
         scale = float(scale_est_arcsec) if scale_est_arcsec else FAKE_SCALE
+        override = os.environ.get("PW_ASTROMETRY_FAKE_SCALE")   # tests / browser gate: a mismatch
+        if override:
+            try:
+                scale = float(override)
+            except ValueError:
+                pass
         stages = [("uploading", {}), ("queued", {"subid": 1}), ("solving", {"jobid": 1})]
         for stage, kw in stages:
             if progress:

@@ -69,7 +69,7 @@ class Job:
     nova_jobid: Optional[int] = None
     fingerprint: Optional[str] = None    # (image, detections used, hint scale) - see api.py
     unsolvable: bool = False             # astrometry.net itself said "could not solve"
-    no_resume: bool = False              # a re-poll cannot help (scale mismatch, bad WCS)
+    no_resume: bool = False              # a re-poll cannot help (bad WCS)
     spec: Optional[dict] = None          # what a resume needs (never the key)
     solution: Optional[object] = None    # the SolveResult once nova answered
     _cancel: bool = False

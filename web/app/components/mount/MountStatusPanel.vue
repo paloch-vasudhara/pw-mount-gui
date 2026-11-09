@@ -1,7 +1,10 @@
 <script setup lang="ts">
 // MOUNT STATUS panel (A4-i): 3D slot, Azimuth/Elevation boxes, Status + Sun Distance rows.
-import { computed } from 'vue'
+import { computed, onMounted } from 'vue'
+import CctvPlayer from '~/components/mount/CctvPlayer.vue'
+import CctvViewToggle from '~/components/mount/CctvViewToggle.vue'
 import MountHemisphere3D from '~/components/mount/MountHemisphere3D.vue'
+import { useCctvStore } from '~/stores/cctv'
 import { useMountStore } from '~/stores/mount'
 import type { ValueTone } from '~/utils/mount-format'
 
@@ -9,6 +12,11 @@ const emit = defineEmits<{ 'open-details': [] }>()
 
 const store = useMountStore()
 const d = computed(() => store.display)
+
+// T5.7: with a camera configured the slot shows the 3D model or the CCTV feed (never both here).
+const cctv = useCctvStore()
+const showCctv = computed(() => cctv.configured && cctv.panelView === 'cctv')
+onMounted(() => { void cctv.refresh() })
 
 const TONE: Record<ValueTone, string> = {
   normal: 'text-foreground',
@@ -20,8 +28,13 @@ const TONE: Record<ValueTone, string> = {
 
 <template>
   <div class="msp-root flex h-full min-h-0 flex-col" data-testid="mount-status-panel">
-    <div class="min-h-0 flex-[6]" data-testid="mount-3d-slot">
-      <MountHemisphere3D mode="compact" />
+    <div class="relative min-h-0 flex-[6]" data-testid="mount-3d-slot">
+      <MountHemisphere3D mode="compact" :active="!showCctv" />
+      <CctvPlayer v-if="showCctv" :type="cctv.type" />
+      <CctvViewToggle
+        v-if="cctv.configured" class="absolute top-1.5 right-1.5 z-10" :model-value="cctv.panelView"
+        @update:model-value="v => cctv.setView(false, v)"
+      />
     </div>
 
     <div class="msp-cols flex shrink-0 justify-center pt-2">

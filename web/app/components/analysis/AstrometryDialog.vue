@@ -4,16 +4,20 @@
 // toggle, - / zoom % / +, wheel-to-cursor zoom, drag-pan). Focusing a coordinate arms "specify": the next click
 // on the image sets that point (the target is snapped by /snap). DETECT STREAKS replaces the table (a confirm
 // when it has edits); CLEAR starts over; RUN ASTROMETRY emits `run` once >= 10 streaks + a target + an epoch.
-// What RUN does (gateway relay, job pill, IOD row) belongs to T5.2d: this dialog only emits.
+// What RUN does (gateway relay, job pill, IOD row) belongs to T5.2d: this dialog only emits. Image source (T5.2f): Station | Other
+// setup; a file whose FITS optics differ from the station's by > 25 % in plate scale switches it to Other on load (the user's
+// change wins until the next load).
 import { computed, nextTick, ref, watch } from 'vue'
 import DateTimeField from '@/components/widgets/DateTimeField.vue'
+import SegToggle from '@/components/widgets/SegToggle.vue'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
+import { useGatewayApi } from '~/composables/useGatewayApi'
 import { useZoomPane, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP } from '~/composables/useZoomPane'
 import {
   ACCEPT_ATTR, addStreak, applySpecify, astrometryErrorText, DETECT_CONFIRM_TEXT, emptyTable, ERR_EXPIRED, ERR_UNSUPPORTED,
   fileAllowed, fmtCell, fromDetections, needsDetectConfirm, overlayShapes, parseEpoch, parseExposure, previewToImage, removeStreak, rowAfterRemove,
-  runReadiness, setCell, specAfterRemove, specFor, specifyLabel, specSame, toDetections, detectSummary, detectTitle,
-  type AsTable, type AstrometryRunPayload, type CellKey, type Detection, type ImageInfo, type ImageMeta, type RowRef, type Spec,
+  runReadiness, setCell, SOURCE_OPTIONS, specAfterRemove, specFor, specifyLabel, specSame, suggestOther, toDetections, detectSummary, detectTitle,
+  type AsTable, type AstrometryRunPayload, type CellKey, type Detection, type ImageInfo, type ImageMeta, type ImageSource, type RowRef, type Spec,
 } from '~/utils/astrometry'
 
 const open = defineModel<boolean>('open', { default: false })
@@ -27,6 +31,7 @@ const props = withDefaults(defineProps<{
 }>(), { iodSlot: null, busy: false, runStatus: null })
 const emit = defineEmits<{ run: [payload: AstrometryRunPayload] }>()
 
+const api = useGatewayApi()
 const FETCH_TIMEOUT_MS = 120_000
 const COLS: Array<{ key: CellKey, label: string }> = [{ key: 'x', label: 'X' }, { key: 'y', label: 'Y' }]
 
@@ -46,6 +51,7 @@ const confirmDetect = ref(false)
 const overlayOn = ref(true)
 const paneEl = ref<HTMLElement | null>(null)
 const fileEl = ref<HTMLInputElement | null>(null)
+const source = ref<ImageSource>('station')
 
 const content = computed(() => (image.value ? { w: image.value.pw, h: image.value.ph } : null))
 const zp = useZoomPane(paneEl, content)
@@ -92,6 +98,18 @@ async function post(path: string, init: RequestInit): Promise<{ ok: boolean, sta
   }
   catch {
     return { ok: false, status: 0, body: null }
+  }
+}
+
+/** The station's pixel size (Settings), for the auto-suggest only; null = unknown or unreachable (focal length alone is compared). */
+async function stationPixelUm(): Promise<number | null> {
+  try {
+    const d = await api.get<{ hardware?: { camera_pixel_um?: number | null } }>('/api/mount/settings')
+    const v = d?.hardware?.camera_pixel_um
+    return typeof v === 'number' && v > 0 ? v : null
+  }
+  catch {
+    return null
   }
 }
 
@@ -149,9 +167,12 @@ async function loadFile(file: File): Promise<void> {
   sel.value = null
   confirmDetect.value = false
   epoch.value = parseEpoch(info.meta.epoch_iso)
+  const note = info.meta.focal_mm != null || info.meta.pixel_um != null ? suggestOther(info.meta, await stationPixelUm()) : null
+  if (my !== seq) return
+  source.value = note ? 'other' : 'station'
   exposureText.value = typeof info.meta.exposure_s === 'number' ? String(info.meta.exposure_s) : ''
   zp.reset()
-  setStatus('info', (info.meta.warnings ?? []).join(' '))
+  setStatus('info', [note, ...(info.meta.warnings ?? [])].filter(Boolean).join(' '))
   void nextTick(zp.measure)
 }
 
@@ -195,6 +216,7 @@ function onClear(): void {
   table.value = emptyTable()
   epoch.value = null
   exposureText.value = ''
+  source.value = 'station'
   spec.value = null
   sel.value = null
   confirmDetect.value = false
@@ -294,6 +316,7 @@ function onRun(): void {
     exposure_s: parseExposure(exposureText.value),
     meta: m,
     slot: props.iodSlot,
+    source: source.value,
   })
 }
 
@@ -327,6 +350,8 @@ watch(open, (o) => {
             id="as-exp" v-model="exposureText" class="as-exp" data-testid="as-exposure" type="text" inputmode="decimal" autocomplete="off"
             aria-label="Exposure (s)"
           >
+          <label class="as-flbl as-src-lbl">Image source</label>
+          <SegToggle v-model="source" :options="SOURCE_OPTIONS" seg-class="as-seg" data-testid="as-source" />
         </div>
         <div class="as-main">
           <div class="as-left">
@@ -529,6 +554,9 @@ watch(open, (o) => {
   box-sizing: border-box; width: 72px; height: 24px; padding: 0 4px; background: var(--field-bg); border: 1px solid var(--control-border);
   border-radius: 0; color: var(--foreground); font-family: inherit; font-size: 13px; font-weight: 600;
 }
+.as-dialog .as-src-lbl { margin-left: auto; }
+.as-dialog .as-seg { flex: none; }
+.as-dialog .as-seg button { flex: none; width: 74px; }
 .as-dialog .as-exp:focus { outline: none; border-color: var(--accent-green-border); }
 .as-dialog .as-table {
   flex: 1 1 auto; min-height: 0; overflow-y: auto; background: color-mix(in srgb, var(--page-bg) 70%, #000); padding: 0 0 4px;

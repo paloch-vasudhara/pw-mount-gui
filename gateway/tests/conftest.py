@@ -166,3 +166,4 @@ def _isolated_settings(tmp_path, monkeypatch):
     # Deterministic Sun for tests (T3.1b): far below the horizon unless a test overrides it.
     monkeypatch.setenv("PW_TEST_SUN_ALTAZ", "-60,0")
     monkeypatch.setattr(settings_mod, "default_secret_store", settings_mod.MemorySecretStore)
+    monkeypatch.setattr(settings_mod, "default_cctv_secret_store", settings_mod.MemorySecretStore)

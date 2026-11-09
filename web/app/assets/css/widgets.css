@@ -188,6 +188,11 @@ input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; marg
 .ov-label-group-wide .ov-fmt-sel.fmt-select-trigger { width: 60px; flex: 0 0 60px; }
 .ov-input-group { flex: 1; display: flex; min-width: 0; }
 
+/* ── scroll area ──────────────────────────────────────────────────────── */
+/* The app's thin scrollbar (theme track / thumb colours, Firefox + Chromium standard properties):
+   put `app-scroll` on any vertically scrolling box instead of the default OS scrollbar. */
+.app-scroll { overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--control-border) transparent; }
+
 /* ── segmented toggle ─────────────────────────────────────────────────── */
 .vt-seg { display: flex; gap: 0; border: 1px solid var(--control-border); }
 .vt-seg button {

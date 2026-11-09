@@ -117,8 +117,16 @@ def test_mid_exposure_epoch_and_warning():
 def test_hint_scale_and_scale_check():
     assert solve_mod.hint_scale_arcsec(620, 3.76) == pytest.approx(1.2510, abs=1e-3)
     assert solve_mod.hint_scale_arcsec(None, 3.76) is None
-    assert solve_mod.scale_ok(1.3, 1.25) and not solve_mod.scale_ok(2.5, 1.25)
-    assert solve_mod.scale_ok(99.0, None)
+    sc = solve_mod.scale_check("station", 1.3, 400, 300, 1.25)
+    assert sc["match"] is True and sc["station_arcsec_px"] == 1.25
+    assert sc["field_deg"] == pytest.approx([400 * 1.3 / 3600, 300 * 1.3 / 3600], abs=1e-4)
+    assert sc["station_field_deg"] == pytest.approx([400 * 1.25 / 3600, 300 * 1.25 / 3600],
+                                                    abs=1e-4)
+    assert solve_mod.scale_check("other", 2.5, 400, 300, 1.25)["match"] is False
+    assert solve_mod.scale_check("other", 1.0, 400, 300, 1.25)["match"] is True   # ratio 0.8
+    sc = solve_mod.scale_check("station", 99.0, 400, 300, None)
+    assert sc["match"] is None and sc["station_arcsec_px"] is None
+    assert sc["station_field_deg"] is None and sc["source"] == "station"
 
 
 def test_synthetic_field_has_a_peak_at_each_star():
@@ -139,6 +147,15 @@ def test_fake_nova_wcs_from_image_size_and_cancel():
     with pytest.raises(jobs_mod.JobCancelled):
         nova.FakeNova(delay_s=1.0).solve("x", width=1, height=1, scale_est_arcsec=None,
                                          check_cancel=boom)
+
+
+def test_fake_nova_scale_override_env(monkeypatch):
+    monkeypatch.setenv("PW_ASTROMETRY_FAKE_SCALE", "2.5")
+    sol = nova.FakeNova(delay_s=0.0).solve("x", width=100, height=60, scale_est_arcsec=1.25)
+    assert sol.pixscale_arcsec == 2.5
+    monkeypatch.setenv("PW_ASTROMETRY_FAKE_SCALE", "junk")
+    assert nova.FakeNova(delay_s=0.0).solve(
+        "x", width=100, height=60, scale_est_arcsec=1.25).pixscale_arcsec == 1.25
 
 
 # -- /run validation -----------------------------------------------------------
@@ -203,7 +220,10 @@ def test_job_done_result_shape_and_states(env):
     assert j["state"] == "done" and "error" not in j
     res = j["result"]
     assert set(res) == {"ra_deg", "dec_deg", "epoch_mid_iso", "epoch_mid_unix",
-                        "residual_arcsec", "scale_arcsec_px", "n_stars_used", "warnings"}
+                        "residual_arcsec", "scale_arcsec_px", "n_stars_used", "warnings",
+                        "scale_check"}
+    sc = res["scale_check"]
+    assert sc["source"] == "station" and sc["match"] is None and sc["station_arcsec_px"] is None
     assert res["scale_arcsec_px"] == pytest.approx(1.251, abs=1e-3)
     assert res["epoch_mid_iso"] == "2025-04-04T13:01:35.000Z"
     assert res["n_stars_used"] == 12 and res["warnings"] == []
@@ -253,15 +273,47 @@ def test_job_errors(env, kind, state, text):
     assert j["state"] == state and j["error"] == text and "result" not in j
 
 
-def test_scale_mismatch_fails(env):
+def test_scale_mismatch_is_not_a_failure_but_a_review(env):
     c, _, fake, iid = env
-    fake.scale = 3.0   # hint is 1.25 "/px
-    jid = c.post("/api/astrometry/run", json=_body(iid)).json()["job_id"]
+    fake.scale = 3.0   # the station scale is 1.251 "/px
+    jid = c.post("/api/astrometry/run", json=_body(
+        iid, station_focal_mm=620.0, station_pixel_um=3.76)).json()["job_id"]
     j = _wait(c, jid)
-    assert j["state"] == "failed" and j["error"] == "Solved scale does not match the camera"
+    assert j["state"] == "done" and "error" not in j
+    sc = j["result"]["scale_check"]
+    assert sc["match"] is False and sc["solved_arcsec_px"] == 3.0
+    assert sc["station_arcsec_px"] == pytest.approx(1.251, abs=1e-3)
+    assert sc["field_deg"] == pytest.approx([W * 3.0 / 3600, H * 3.0 / 3600], abs=1e-4)
+    assert sc["station_field_deg"] == pytest.approx([W * 1.251 / 3600, H * 1.251 / 3600],
+                                                    abs=1e-4)
 
 
-def test_scale_mismatch_ignored_when_blind(env):
+def test_scale_check_null_when_station_scale_unknown(env):
+    c, _, fake, iid = env
+    fake.scale = 3.0
+    jid = c.post("/api/astrometry/run", json=_body(iid, source="other")).json()["job_id"]
+    sc = _wait(c, jid)["result"]["scale_check"]
+    assert sc["source"] == "other" and sc["match"] is None
+    assert sc["station_arcsec_px"] is None and sc["station_field_deg"] is None
+
+
+def test_other_run_without_hint_is_blind_and_compares_to_station(env):
+    c, _, fake, iid = env
+    fake.scale = 1.3
+    jid = c.post("/api/astrometry/run", json=_body(
+        iid, source="other", focal_mm=None, pixel_um=None,
+        station_focal_mm=620.0, station_pixel_um=3.76)).json()["job_id"]
+    j = _wait(c, jid)
+    assert fake.calls[0]["scale"] is None   # the station optics are never a hint
+    assert j["result"]["scale_check"]["match"] is True
+
+
+def test_run_rejects_unknown_source(env):
+    c, _, _, iid = env
+    assert c.post("/api/astrometry/run", json=_body(iid, source="x")).status_code == 422
+
+
+def test_blind_solve_with_mismatch_is_done(env):
     c, _, fake, iid = env
     fake.scale = 3.0
     jid = c.post("/api/astrometry/run", json=_body(iid, focal_mm=None, pixel_um=None)

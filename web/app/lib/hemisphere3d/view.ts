@@ -60,6 +60,7 @@ export class HemisphereView {
   private framesRendered = 0
   private viewFitted = false
   private disposed = false
+  private paused = false
   private readonly viewDist: number
 
   constructor(container: HTMLElement, mode: HemisphereMode) {
@@ -141,6 +142,21 @@ export class HemisphereView {
     if (changed) this.requestFrame()
   }
 
+  /** T5.7: false while the view is hidden (the CCTV feed shows instead): no frames are drawn. */
+  setActive(active: boolean): void {
+    if (this.disposed || this.paused === !active) return
+    this.paused = !active
+    if (this.paused) {
+      if (this.raf) cancelAnimationFrame(this.raf)
+      this.raf = 0
+      this.last = 0
+    }
+    else {
+      this.resize() // the container may have been hidden (0 px) or resized meanwhile
+      this.requestFrame()
+    }
+  }
+
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
@@ -185,7 +201,7 @@ export class HemisphereView {
   // --- internals ---------------------------------------------------------------------------
 
   private readonly requestFrame = (): void => {
-    if (this.disposed || this.raf) return
+    if (this.disposed || this.paused || this.raf) return
     this.raf = requestAnimationFrame(this.frame)
   }
 

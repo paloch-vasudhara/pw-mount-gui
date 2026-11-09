@@ -12,9 +12,10 @@ export const NOT_CONVERGED_TEXT = 'Osculating elements (fit did not converge)'
 export const NO_SITE_REASON = 'Station location not available'
 
 export type IodSource = 'Manual' | 'Astrometry'
-/** empty = no data; pending / failed = an astrometry job (T5.2); partial = the typed pair is set, the other pair
+/** empty = no data; pending / failed = an astrometry job (T5.2); review = the job solved at a scale that differs from the
+ *  station's and waits for Use / Discard (T5.2f, not usable by IOD yet); partial = the typed pair is set, the other pair
  *  is not (yet) computed; valid = az / el / ra / dec all known. IOD needs RA / Dec: see `rowValid`. */
-export type IodRowState = 'empty' | 'pending' | 'failed' | 'partial' | 'valid'
+export type IodRowState = 'empty' | 'pending' | 'failed' | 'review' | 'partial' | 'valid'
 export type IodPair = 'altaz' | 'radec'
 
 export interface IodRow {
@@ -33,6 +34,20 @@ export interface IodRow {
   jobId?: string | null
   /** Why an astrometry row failed (the title of its "Astrometry failed" text). */
   reason?: string | null
+  /** An astrometry row from an other-setup image (T5.2f). */
+  other?: boolean
+  /** A row in review: the solved RA / Dec (degrees) and the scale comparison, applied on Use. */
+  review?: { ra: number, dec: number, scale: ScaleCheck } | null
+}
+
+/** The analysis job's `scale_check` (T5.2f): the solved scale and field vs the station's. `match` null = the station scale is unknown. */
+export interface ScaleCheck {
+  source: 'station' | 'other'
+  solved_arcsec_px: number
+  field_deg: [number, number]
+  station_arcsec_px: number | null
+  station_field_deg: [number, number] | null
+  match: boolean | null
 }
 
 export const emptyRow = (): IodRow => ({ state: 'empty', source: null, t: null, az: null, el: null, ra: null, dec: null, bright: null })
@@ -45,12 +60,54 @@ export const astrometryPending = (t: number | null, jobId: string | null = null)
   ({ ...emptyRow(), state: 'pending', source: 'Astrometry', t, jobId })
 export const astrometryFailed = (t: number | null, reason: string | null = null, jobId: string | null = null): IodRow =>
   ({ ...emptyRow(), state: 'failed', source: 'Astrometry', t, reason, jobId })
-export const astrometrySolved = (t: number, ra: number, dec: number, jobId: string | null = null): IodRow =>
-  ({ ...emptyRow(), state: 'partial', source: 'Astrometry', t, ra, dec, bright: 'radec', jobId })
+export const astrometrySolved = (t: number, ra: number, dec: number, jobId: string | null = null, other = false): IodRow =>
+  ({ ...emptyRow(), state: 'partial', source: 'Astrometry', t, ra, dec, bright: 'radec', jobId, ...(other ? { other } : {}) })
+export const astrometryReview = (t: number, ra: number, dec: number, scale: ScaleCheck, jobId: string | null = null): IodRow =>
+  ({ ...emptyRow(), state: 'review', source: 'Astrometry', t, jobId, review: { ra, dec, scale }, ...(scale.source === 'other' ? { other: true } : {}) })
+
+type JobResultLike = { epoch_mid_unix: number, ra_deg: number, dec_deg: number, scale_check?: ScaleCheck | null }
+const wrapRa = (ra: number): number => (ra >= 0 && ra < 360 ? ra : ((ra % 360) + 360) % 360)
 
 /** A done job's result as a row (the mid-exposure epoch in whole seconds, as every IOD row; RA / Dec bright, H4 fills the rest). */
-export const rowFromJobResult = (jobId: string, r: { epoch_mid_unix: number, ra_deg: number, dec_deg: number }): IodRow =>
-  astrometrySolved(Math.round(r.epoch_mid_unix), r.ra_deg >= 0 && r.ra_deg < 360 ? r.ra_deg : ((r.ra_deg % 360) + 360) % 360, r.dec_deg, jobId)
+export const rowFromJobResult = (jobId: string, r: JobResultLike): IodRow =>
+  astrometrySolved(Math.round(r.epoch_mid_unix), wrapRa(r.ra_deg), r.dec_deg, jobId, r.scale_check?.source === 'other')
+
+/** The result's scale differs from the station's (> 25 %): the user chooses Use / Discard first. */
+export const needsScaleReview = (r: { scale_check?: ScaleCheck | null }): boolean => r.scale_check?.match === false
+
+/** A done job whose scale differs, as a row waiting for Use / Discard. */
+export const reviewRowFromJobResult = (jobId: string, r: JobResultLike & { scale_check: ScaleCheck }): IodRow =>
+  astrometryReview(Math.round(r.epoch_mid_unix), wrapRa(r.ra_deg), r.dec_deg, r.scale_check, jobId)
+
+/** Use on a review row: the row as a normal astrometry result. */
+export const rowFromReview = (r: IodRow): IodRow | null =>
+  r.state === 'review' && r.review && r.t !== null
+    ? astrometrySolved(r.t, r.review.ra, r.review.dec, r.jobId ?? null, !!r.other)
+    : null
+
+const fmtNum2 = (v: number): string => String(Number(v.toFixed(2)))
+
+/** The review row's text and the pill's detail line: solved scale / field vs the station's. */
+export function reviewText(c: ScaleCheck): string {
+  const st = c.station_arcsec_px !== null && c.station_field_deg
+    ? ` (station ${fmtNum2(c.station_arcsec_px)}″/px, ${fmtNum2(c.station_field_deg[0])}°×${fmtNum2(c.station_field_deg[1])}°)`
+    : ''
+  return `Scale differs from the station: solved ${fmtNum2(c.solved_arcsec_px)}″/px, ${fmtNum2(c.field_deg[0])}°×${fmtNum2(c.field_deg[1])}°${st}`
+}
+
+/** The review row's own text: the review cell is ~190 px at 1280×600 @1.5, so it shows the two scales only (the full
+ *  reviewText sits in its `title` and on the pill). */
+export function reviewShortText(c: ScaleCheck): string {
+  const st = c.station_arcsec_px !== null ? ` vs station ${fmtNum2(c.station_arcsec_px)}″/px` : ''
+  return `${fmtNum2(c.solved_arcsec_px)}″/px${st}`
+}
+
+/** The Source cell: an other-setup image is marked. The column is ~66 px wide at 13 px and "Astrometry (other)" is ~106 px
+ *  (Barlow 600 metrics), so the cell shows the short form (~62 px) and the full text sits in its `title`. */
+export function sourceLabel(r: IodRow): { text: string, title?: string } {
+  if (r.source === 'Astrometry' && r.other) return { text: 'Astro (oth)', title: 'Astrometry (other)' }
+  return { text: r.source ?? '' }
+}
 
 /** The row can feed the IOD: an epoch and RA / Dec are known (a RA / Dec row stays valid while H4 is unreachable). */
 export const rowValid = (r: IodRow): boolean => (r.state === 'valid' || r.state === 'partial') && fin(r.t) && fin(r.ra) && fin(r.dec)
@@ -236,6 +293,7 @@ export function iodReadiness(rows: IodRow[], hasSite = true): Readiness {
     const r = rows[i]!
     if (r.state === 'pending') return { ready: false, reason: `Row ${i + 1}: Astrometry is still running` }
     if (r.state === 'failed') return { ready: false, reason: `Row ${i + 1}: Astrometry failed (remove or replace the row)` }
+    if (r.state === 'review') return { ready: false, reason: `Row ${i + 1}: Astrometry scale differs (Use or Discard it)` }
     if (r.state === 'partial' && !rowValid(r)) return { ready: false, reason: `Row ${i + 1} has no R.A. / Dec. yet` }
   }
   const valid = rows.filter(rowValid)
@@ -321,6 +379,7 @@ export function fmtEpoch(t: number | null): string {
 export type RowDisplay =
   | { kind: 'empty' }
   | { kind: 'status', text: string }
+  | { kind: 'review', text: string, title: string }
   | { kind: 'values' }
 
 /** What the angle cells of a committed row show: nothing, the astrometry job state, or the four values. */
@@ -328,6 +387,7 @@ export function rowDisplay(r: IodRow): RowDisplay {
   if (r.state === 'empty') return { kind: 'empty' }
   if (r.state === 'pending') return { kind: 'status', text: PENDING_TEXT }
   if (r.state === 'failed') return { kind: 'status', text: FAILED_TEXT }
+  if (r.state === 'review' && r.review) return { kind: 'review', text: reviewShortText(r.review.scale), title: reviewText(r.review.scale) }
   return { kind: 'values' }
 }
 

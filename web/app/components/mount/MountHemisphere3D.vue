@@ -6,7 +6,8 @@ import { useMountStore } from '~/stores/mount'
 import { HemisphereView, type HemisphereMode } from '~/lib/hemisphere3d/view'
 import { buildHemisphereInputs, type HemisphereSnapshotLike } from '~/lib/hemisphere3d/inputs'
 
-const props = withDefaults(defineProps<{ mode?: HemisphereMode }>(), { mode: 'compact' })
+// `active` false = hidden behind the CCTV feed (T5.7): the renderer stops drawing frames.
+const props = withDefaults(defineProps<{ mode?: HemisphereMode, active?: boolean }>(), { mode: 'compact', active: true })
 
 const store = useMountStore()
 const host = ref<HTMLElement | null>(null)
@@ -26,9 +27,11 @@ onMounted(() => {
     failed.value = true // WebGL unavailable: leave the slot empty rather than break the dashboard
     return
   }
+  view.setActive(props.active)
   push()
 })
 
+watch(() => props.active, a => view?.setActive(a))
 watch(() => [store.snapshot, store.linkStale] as const, push)
 
 onBeforeUnmount(() => {

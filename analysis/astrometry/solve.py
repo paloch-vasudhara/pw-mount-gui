@@ -32,7 +32,7 @@ ARCSEC_PER_RAD_MM = 206265.0
 STAR_ARCSEC = 3.0         # synthetic star FWHM when the scale is known (ssa _STAR_ARCSEC)
 MIN_FWHM_PX = 2.0
 BLIND_FWHM_PX = 3.0
-SCALE_RATIO_LO, SCALE_RATIO_HI = 0.8, 1.25   # nova is given +-25 % on the hint
+SCALE_RATIO_LO, SCALE_RATIO_HI = 0.8, 1.25   # nova's +-25 % on the hint; the station match
 CENTROID_PX = 0.7         # ssa sigma_for: sub-pixel centroid estimate, x plate scale
 
 
@@ -125,12 +125,24 @@ def map_point(wcs, x: float, y: float) -> tuple[float, float]:
     return float(ra) % 360.0, float(dec)
 
 
-def scale_ok(solved_arcsec: float, hint_arcsec: Optional[float]) -> bool:
-    """False only when a hint exists and the solved scale is off by more than 25 %."""
-    if not hint_arcsec:
-        return True
-    ratio = solved_arcsec / hint_arcsec
-    return SCALE_RATIO_LO <= ratio <= SCALE_RATIO_HI
+def scale_check(source: str, solved_arcsec: float, width: int, height: int,
+                station_arcsec: Optional[float]) -> dict:
+    """The solved scale vs the station's, for the user's Use / Discard review. ``match`` is
+    None when the station scale is unknown. A solve is never failed for its scale."""
+    def field_deg(scale: float) -> list[float]:
+        return [round(width * scale / 3600.0, 4), round(height * scale / 3600.0, 4)]
+
+    match = None
+    if station_arcsec:
+        match = SCALE_RATIO_LO <= solved_arcsec / station_arcsec <= SCALE_RATIO_HI
+    return {
+        "source": source,
+        "solved_arcsec_px": round(solved_arcsec, 4),
+        "field_deg": field_deg(solved_arcsec),
+        "station_arcsec_px": round(station_arcsec, 4) if station_arcsec else None,
+        "station_field_deg": field_deg(station_arcsec) if station_arcsec else None,
+        "match": match,
+    }
 
 
 def sigma_arcsec(scale_arcsec_px: float) -> float:

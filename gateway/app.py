@@ -5,7 +5,7 @@ import contextlib
 import json
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote
 
 import httpx
@@ -13,6 +13,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocke
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
+from . import cctv as cctv_mod
 from .audit import AuditLog
 from .commands import CommandError, validate_command
 from .config import Settings
@@ -28,7 +29,14 @@ from .security import (
     session_request_ok,
     token_ok,
 )
-from .settings import Location, SecretStore, SettingsStore, SettingsUpdate, compute_site_check
+from .settings import (
+    Location,
+    SecretStore,
+    SettingsStore,
+    SettingsUpdate,
+    cctv_url_error,
+    compute_site_check,
+)
 from .snapshot import site_key
 from .tle import TleSource
 from .trackcheck import TrackChecker
@@ -62,6 +70,7 @@ class AstrometryRun(BaseModel):
     exposure_s: float | None = None
     focal_mm: float | None = None
     pixel_um: float | None = None
+    source: Literal["station", "other"] = "station"
 
 
 class CheckRequest(BaseModel):
@@ -83,12 +92,14 @@ def create_app(
     secrets: SecretStore | None = None,
     tle_transport: httpx.BaseTransport | None = None,
     analysis_transport: httpx.AsyncBaseTransport | None = None,
+    cctv_transport: httpx.AsyncBaseTransport | None = None,
+    cctv_secrets: SecretStore | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     token = settings.token or new_token()
     hub = Hub()
     ephem = Ephem(settings.ephemeris)
-    store = SettingsStore(settings.settings_path, secrets)
+    store = SettingsStore(settings.settings_path, secrets, cctv_secrets)
     poller = Poller(settings, hub, ephem, transport, store)
     audit = AuditLog(settings.audit_dir)
     control = ControlService(Pwi4Writer(settings.pwi4_url, transport), poller, hub, audit)
@@ -164,6 +175,7 @@ def create_app(
         finally:
             await monitor.stop()
             tle_source.close()
+            await app.state.cctv.aclose()
             await control.shutdown()  # G4 graceful-exit stop
             if task is not None:
                 task.cancel()
@@ -195,6 +207,14 @@ def create_app(
         elif h.get("sec-fetch-site") not in (None, "same-origin", "none"):
             raise HTTPException(status_code=403, detail="forbidden")
 
+    cctv = cctv_mod.install(app, store, audit, settings, token, require_auth, cctv_transport)
+
+    def public_settings() -> dict:
+        """The settings for the web: the CCTV url / username / password never included."""
+        d = store.public()
+        d["cctv"]["status"] = cctv.status_line()
+        return d
+
     @app.get("/api/mount/health")
     def health() -> dict:
         return {"ok": True, "service": "gateway", "version": VERSION}
@@ -219,24 +239,31 @@ def create_app(
 
     @app.get("/api/mount/settings", dependencies=[Depends(require_auth)])
     def get_settings() -> JSONResponse:
-        return JSONResponse(store.public(), headers={"Cache-Control": "no-store"})
+        return JSONResponse(public_settings(), headers={"Cache-Control": "no-store"})
 
     @app.put("/api/mount/settings", dependencies=[Depends(require_auth)])
     async def put_settings(update: SettingsUpdate) -> JSONResponse:
+        if "url" in update.cctv.model_fields_set:
+            why = cctv_url_error(update.cctv.url)  # never echoes the URL (pydantic would)
+            if why:
+                raise HTTPException(status_code=422, detail=why)
         try:
-            store.save(update, update.api_key)
+            store.save(update, update.api_key, update.cctv_password)
         except Exception as exc:  # keyring / disk failure: never echo details (may touch a key)
             raise HTTPException(
                 status_code=503, detail=f"could not save ({type(exc).__name__})"
             ) from None
+        await cctv.config_changed()  # new camera settings: drop the old client / streams / result
         await poller.refresh_ephem(force=True)  # apply live: Sun/Moon for the new site now
-        return JSONResponse(with_check(store.public()), headers={"Cache-Control": "no-store"})
+        return JSONResponse(with_check(public_settings()), headers={"Cache-Control": "no-store"})
 
     @app.post("/api/mount/astrometry/run", dependencies=[Depends(require_auth)])
     async def astrometry_run(req: AstrometryRun) -> JSONResponse:
         """T5.2: relay RUN to analysis, adding the astrometry.net key server-to-server. Missing
-        hints: focal -> RASA11 620 mm, pixel -> Settings camera_pixel_um (both missing = blind).
-        The key is never logged, audited or returned."""
+        hints (source station): focal -> RASA11 620 mm, pixel -> Settings camera_pixel_um (both
+        missing = blind). Source other: never filled from the station (the file's own values or
+        blind). The station's optics are always added, for the scale comparison only. The key
+        is never logged, audited or returned."""
         try:
             key = store.secrets.get()
         except Exception:
@@ -244,10 +271,14 @@ def create_app(
         if not key:
             raise HTTPException(status_code=409, detail=ASTROMETRY_NO_KEY)
         body = req.model_dump()
-        if body.get("focal_mm") is None:
-            body["focal_mm"] = RASA11_FOCAL_MM
-        if body.get("pixel_um") is None:
-            body["pixel_um"] = store.current.hardware.camera_pixel_um
+        station_pixel = store.current.hardware.camera_pixel_um
+        if req.source == "station":
+            if body.get("focal_mm") is None:
+                body["focal_mm"] = RASA11_FOCAL_MM
+            if body.get("pixel_um") is None:
+                body["pixel_um"] = station_pixel
+        body["station_focal_mm"] = RASA11_FOCAL_MM
+        body["station_pixel_um"] = station_pixel
         body["apikey"] = key
         try:
             async with httpx.AsyncClient(

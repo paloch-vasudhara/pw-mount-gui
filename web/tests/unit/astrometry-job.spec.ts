@@ -11,9 +11,9 @@ import IodDialog from '../../app/components/analysis/IodDialog.vue'
 import { POLL_MS, useAstrometryJobStore } from '../../app/stores/astrometry-job'
 import { useMountStore } from '../../app/stores/mount'
 import {
-  failureText, isDismissed, markDismissed, parseJob, relayErrorText, resetDismissed, stageLabel, type AstrometryJob,
+  failureText, isDismissed, isReviewed, markDismissed, markReviewed, parseJob, relayErrorText, resetDismissed, resetReviewed, stageLabel, type AstrometryJob,
 } from '../../app/utils/astrometry-job'
-import { rowFromJobResult, rowValid } from '../../app/utils/iod'
+import { reviewText, rowDisplay, rowFromJobResult, rowFromReview, rowValid, reviewRowFromJobResult, sourceLabel, type ScaleCheck } from '../../app/utils/iod'
 import { getIodMemo, resetIodMemo, setIodMemo } from '../../app/utils/iod-memo'
 import type { AstrometryRunPayload } from '../../app/utils/astrometry'
 
@@ -21,6 +21,8 @@ const EPOCH = Date.UTC(2025, 3, 4, 13, 1, 30) / 1000
 const RESULT = { ra_deg: 123.4567, dec_deg: -12.3456, epoch_mid_iso: '2025-04-04T13:01:45Z', epoch_mid_unix: EPOCH + 15.4, residual_arcsec: 1.2 }
 const running = (id = 'j1', stage = 'solving on astrometry.net'): AstrometryJob => ({ job_id: id, state: 'solving', stage_text: stage })
 const done = (id = 'j1'): AstrometryJob => ({ job_id: id, state: 'done', stage_text: 'done', result: RESULT })
+const SCALE: ScaleCheck = { source: 'other', solved_arcsec_px: 3, field_deg: [0.5, 0.33], station_arcsec_px: 1.251, station_field_deg: [0.2, 0.14], match: false }
+const doneReview = (id = 'j1', sc: ScaleCheck = SCALE): AstrometryJob => ({ job_id: id, state: 'done', stage_text: 'done', result: { ...RESULT, scale_check: sc } })
 
 let jobById: Record<string, AstrometryJob | number> = {}
 let latest: AstrometryJob | number = 404
@@ -47,7 +49,7 @@ const tick = async () => { await flushPromises(); await nextTick() }
 
 beforeEach(() => {
   setActivePinia(createPinia())
-  resetDismissed(); resetIodMemo()
+  resetDismissed(); resetReviewed(); resetIodMemo()
   jobById = {}; latest = 404; fetches = []; posts.length = 0
   postImpl = async (path, body) => (path === '/api/transform'
     ? (body.dir === 'radec_to_altaz' ? { result: { alt: 41, az: 201 } } : { result: { ra_h: 6, dec_deg: -10 } })
@@ -97,6 +99,23 @@ describe('astrometry-job helpers', () => {
     const r = rowFromJobResult('j1', RESULT)
     expect(r).toMatchObject({ state: 'partial', source: 'Astrometry', t: EPOCH + 15, ra: 123.4567, dec: -12.3456, bright: 'radec', jobId: 'j1' })
     expect(rowValid(r)).toBe(true)
+  })
+  it('scale review model: text, review row, Use, source label, reviewed ids', () => {
+    expect(reviewText(SCALE)).toBe('Scale differs from the station: solved 3″/px, 0.5°×0.33° (station 1.25″/px, 0.2°×0.14°)')
+    expect(reviewText({ ...SCALE, station_arcsec_px: null, station_field_deg: null, match: null })).toBe('Scale differs from the station: solved 3″/px, 0.5°×0.33°')
+    const rv = reviewRowFromJobResult('j1', { ...RESULT, scale_check: SCALE })
+    expect(rv).toMatchObject({ state: 'review', source: 'Astrometry', t: EPOCH + 15, jobId: 'j1', other: true })
+    expect(rowValid(rv)).toBe(false)
+    expect(rowDisplay(rv)).toEqual({ kind: 'review', text: '3″/px vs station 1.25″/px', title: reviewText(SCALE) })
+    const used = rowFromReview(rv)!
+    expect(used).toMatchObject({ state: 'partial', source: 'Astrometry', t: EPOCH + 15, ra: 123.4567, dec: -12.3456, bright: 'radec', jobId: 'j1', other: true })
+    expect(rowFromReview(used)).toBeNull()
+    expect(sourceLabel(used)).toEqual({ text: 'Astro (oth)', title: 'Astrometry (other)' })
+    expect(sourceLabel(rowFromJobResult('j1', RESULT))).toEqual({ text: 'Astrometry' })
+    expect(sourceLabel(rowFromJobResult('j1', { ...RESULT, scale_check: { ...SCALE, match: true } })).title).toBe('Astrometry (other)')
+    expect(isReviewed('a')).toBe(false)
+    markReviewed('a')
+    expect(isReviewed('a')).toBe(true)
   })
 })
 
@@ -321,5 +340,162 @@ describe('IOD wiring', () => {
     expect(cell(1, 'iod-source').textContent!.trim()).toBe('Astrometry')
     expect(store.applyRequested).toBe(false)
     expect(store.row).toBe(0)
+  })
+})
+
+describe('scale review (T5.2f)', () => {
+  const row = (slot: number) => q(`[data-testid="iod-row"][data-slot="${slot}"]`)!
+  const cell = (slot: number, id: string) => row(slot).querySelector(`[data-testid="${id}"]`) as HTMLElement | null
+  const click = async (el: HTMLElement) => { el.click(); await tick() }
+  const payload = (source: 'station' | 'other', extra: Partial<AstrometryRunPayload['meta']> = {}): AstrometryRunPayload => ({
+    image_id: 'img1', detections: [], epoch_iso: '2025-04-04T13:01:30Z', exposure_s: 30, slot: 0, source,
+    meta: { dims: [10, 10], epoch_iso: null, exposure_s: null, focal_mm: null, pixel_um: null, warnings: [], ...extra },
+  })
+  let pillW: VueWrapper | null = null
+  afterEach(() => { pillW?.unmount(); pillW = null })
+
+  async function openIod() {
+    useMountStore().snapshot = { site: { lat: 10, lon: 20, height_m: 30 }, limits: { lim_el_deg: 12 } } as never
+    w = mount(IodDialog, { props: { open: false }, attachTo: document.body })
+    await w.setProps({ open: true })
+    await tick()
+  }
+  async function runJob(source: 'station' | 'other' = 'other', extra: Partial<AstrometryRunPayload['meta']> = {}) {
+    await click(cell(1, 'iod-menu-btn')!)
+    await click(q('[data-testid="iod-add-astrometry"]')!)
+    w!.findComponent(AstrometryDialog).vm.$emit('run', payload(source, extra))
+    await tick()
+  }
+  async function finish(j: AstrometryJob) {
+    jobById.j1 = j
+    await vi.advanceTimersByTimeAsync(POLL_MS + 1)
+    await tick()
+  }
+  const pillKind = () => q('[data-testid="as-pill"]')?.getAttribute('data-kind')
+
+  it('RUN sends the source; Other sends only the file own hints (never station ones)', async () => {
+    await openIod()
+    await runJob('other', { focal_mm: 1000 })
+    const relay = posts.find(p => p.path === '/api/mount/astrometry/run')!
+    expect(relay.body).toMatchObject({ source: 'other', focal_mm: 1000 })
+    expect('pixel_um' in relay.body).toBe(false)
+    useAstrometryJobStore().reset()
+    posts.length = 0
+    await runJob('station')
+    const body = posts.find(p => p.path === '/api/mount/astrometry/run')!.body
+    expect(body.source).toBe('station')
+    expect('focal_mm' in body || 'pixel_um' in body).toBe(false)
+  })
+
+  it('match === false -> a review row (not usable by IOD) with in-row Use / Discard, no H4 yet', async () => {
+    await openIod()
+    await runJob('other')
+    posts.length = 0
+    await finish(doneReview())
+    expect(row(1).dataset.state).toBe('review')
+    expect(cell(1, 'iod-row-status')!.textContent!.trim()).toBe('3″/px vs station 1.25″/px')
+    expect(cell(1, 'iod-row-status')!.getAttribute('title')).toBe(reviewText(SCALE))
+    expect(cell(1, 'iod-review-use')).toBeTruthy()
+    expect(cell(1, 'iod-review-discard')).toBeTruthy()
+    expect(posts.some(p => p.path === '/api/transform')).toBe(false)
+    expect((q('[data-testid="iod-run"]') as HTMLButtonElement).title).toContain('Row 1: Astrometry scale differs')
+  })
+
+  it('Use fills the row as a normal astrometry result (other label, H4 runs)', async () => {
+    await openIod()
+    await runJob('other')
+    await finish(doneReview())
+    await click(cell(1, 'iod-review-use')!)
+    await tick()
+    expect(row(1).dataset.state).toBe('valid')
+    expect(cell(1, 'iod-ra')!.textContent!.trim()).toBe('123.457°')
+    expect(cell(1, 'iod-az')!.textContent!.trim()).toBe('201.000°')
+    expect(cell(1, 'iod-source')!.textContent!.trim()).toBe('Astro (oth)')
+    expect(cell(1, 'iod-source')!.title).toBe('Astrometry (other)')
+    expect(posts.some(p => p.path === '/api/transform')).toBe(true)
+    expect(cell(1, 'iod-review-use')).toBeNull()
+    expect(isReviewed('j1')).toBe(true)
+  })
+
+  it('Discard empties the row and dismisses the pill', async () => {
+    await openIod()
+    pillW = mount(AstrometryJobPill, { attachTo: document.body })
+    await runJob('other')
+    await finish(doneReview())
+    expect(pillKind()).toBe('review')
+    await click(cell(1, 'iod-review-discard')!)
+    expect(row(1).dataset.state).toBe('empty')
+    expect(q('[data-testid="as-pill"]')).toBeNull()
+    expect(isDismissed('j1')).toBe(true)
+  })
+
+  it('match true / null applies directly; a station row keeps the plain label', async () => {
+    await openIod()
+    await runJob('station')
+    await finish(doneReview('j1', { ...SCALE, source: 'station', match: true }))
+    expect(row(1).dataset.state).toBe('valid')
+    expect(cell(1, 'iod-source')!.textContent!.trim()).toBe('Astrometry')
+    expect(cell(1, 'iod-source')!.title).toBe('')
+  })
+
+  it('the review survives closing and reopening IOD (memo)', async () => {
+    await openIod()
+    await runJob('other')
+    await w!.setProps({ open: false }); await tick()
+    await finish(doneReview())
+    expect(getIodMemo()!.rows[0]!.state).toBe('review')
+    await w!.setProps({ open: true }); await tick()
+    expect(row(1).dataset.state).toBe('review')
+    expect(cell(1, 'iod-review-use')).toBeTruthy()
+  })
+
+  it('the pill shows the review title and Use / Discard; Use uses the row, Discard empties it', async () => {
+    await openIod()
+    pillW = mount(AstrometryJobPill, { attachTo: document.body })
+    await runJob('other')
+    await finish(doneReview())
+    expect(pillKind()).toBe('review')
+    expect(q('[data-testid="as-pill-title"]')!.textContent!.trim()).toBe('Astrometry solved — scale differs')
+    await click(q('[data-testid="as-pill-use"]')!)
+    expect(row(1).dataset.state).toBe('valid')
+    expect(pillKind()).toBe('done')
+    expect(q('[data-testid="as-pill-text"]')!.textContent!.trim()).toBe('row 1')
+    expect(q('[data-testid="as-pill-use"]')).toBeNull()
+  })
+
+  it('the pill Discard with the row in IOD empties the row and the pill goes', async () => {
+    await openIod()
+    pillW = mount(AstrometryJobPill, { attachTo: document.body })
+    await runJob('other')
+    await finish(doneReview())
+    await click(q('[data-testid="as-pill-discard"]')!)
+    expect(row(1).dataset.state).toBe('empty')
+    expect(q('[data-testid="as-pill"]')).toBeNull()
+  })
+
+  it('after a refresh (no row) the pill shows the review; Use applies directly to a free row, Discard dismisses', async () => {
+    latest = doneReview()
+    pillW = mount(AstrometryJobPill, { attachTo: document.body })
+    await tick()
+    expect(pillKind()).toBe('review')
+    const store = useAstrometryJobStore()
+    await openIod()
+    await click(q('[data-testid="as-pill-use"]')!)
+    await vi.advanceTimersByTimeAsync(10)
+    await tick()
+    expect(store.applyRequested).toBe(false)
+    expect(row(1).dataset.state).toBe('valid') // applied directly, no second review
+    expect(cell(1, 'iod-source')!.textContent!.trim()).toBe('Astro (oth)')
+    expect(pillKind()).toBe('done')
+    // a second refresh: Discard without a row dismisses
+    pillW.unmount(); pillW = null
+    setActivePinia(createPinia())
+    resetReviewed()
+    pillW = mount(AstrometryJobPill, { attachTo: document.body })
+    await tick()
+    expect(pillKind()).toBe('review')
+    useAstrometryJobStore().row = null
+    await click(q('[data-testid="as-pill-discard"]')!)
+    expect(q('[data-testid="as-pill"]')).toBeNull()
   })
 })

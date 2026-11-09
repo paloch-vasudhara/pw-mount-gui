@@ -452,6 +452,9 @@ def test_lim_el_and_sun_use_the_refracted_frame(monkeypatch):
         assert ack["ok"] is False and ack["reason"].startswith("Below station limit"), ack
         w.close()
     # the snapshot's Sun is the observed one: higher than the geometric altitude near the horizon
-    geo = app.state.ephem.sun_altaz(site, unrefracted=True)
-    obs = app.state.ephem.sun_altaz(site)
+    # one instant for both: two `now` reads ms apart differ by the Sun's own motion (~1e-5 deg),
+    # which read as negative refraction while the Sun was setting (found 2026-11-09)
+    t = datetime.now(UTC)
+    geo = app.state.ephem.sun_altaz(site, t, unrefracted=True)
+    obs = app.state.ephem.sun_altaz(site, t)
     assert abs(obs[1] - geo[1]) < 1e-3 and obs[0] >= geo[0]

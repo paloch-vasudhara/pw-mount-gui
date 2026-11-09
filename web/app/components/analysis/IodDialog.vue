@@ -18,7 +18,8 @@ import { failureText, isActiveState, relayErrorText, type AstrometryJob } from '
 import {
   applyIodTransform, astrometryFailed, astrometryPending, buildIodRequest, buildIodTransform, checkDraft, confirmText, doneText, draftFromRow, draftToRow, editDraft,
   emptyRow, emptyRows, epochArrow, ERR_IOD_UNAVAILABLE, fmtAngle, fmtEpoch, fmtStateVector, fmtTle, iodErrorText, iodReadiness, isDim,
-  menuState, needsConfirm, newDraft, nextEpochDir, NOT_CONVERGED_TEXT, parseIodResponse, rowDisplay, rowFromJobResult, rowValid, sortedSlots, SLOTS, STALE_TEXT,
+  menuState, needsConfirm, needsScaleReview, newDraft, nextEpochDir, NOT_CONVERGED_TEXT, parseIodResponse, rowDisplay, rowFromJobResult, rowFromReview,
+  reviewRowFromJobResult, rowValid, sortedSlots, SLOTS, sourceLabel, STALE_TEXT,
   type DraftField, type EpochDir, type IodDraft, type IodResponse, type IodRow,
 } from '~/utils/iod'
 import { getIodMemo, setIodMemo, type IodStatus } from '~/utils/iod-memo'
@@ -235,7 +236,7 @@ async function onAstroRun(p: AstrometryRunPayload): Promise<void> {
   if (slot === null || astroBusy.value) return
   astroBusy.value = true
   astroStatus.value = { kind: 'info', text: 'Sending…' }
-  const body: Record<string, unknown> = { image_id: p.image_id, detections: p.detections, epoch_iso: p.epoch_iso, exposure_s: p.exposure_s }
+  const body: Record<string, unknown> = { image_id: p.image_id, detections: p.detections, epoch_iso: p.epoch_iso, exposure_s: p.exposure_s, source: p.source }
   if (p.meta.focal_mm != null) body.focal_mm = p.meta.focal_mm
   if (p.meta.pixel_um != null) body.pixel_um = p.meta.pixel_um
   try {
@@ -258,10 +259,14 @@ async function onAstroRun(p: AstrometryRunPayload): Promise<void> {
 }
 
 // ----- the astrometry job -> rows (works while this modal is closed: it is mounted once with the Tools group)
-function applyJob(slot: number, j: AstrometryJob): void {
+/** `direct`: the user already chose Use (the pill's "apply to a row…"), so a scale review is skipped. */
+function applyJob(slot: number, j: AstrometryJob, direct = false): void {
   seq[slot] = (seq[slot] ?? 0) + 1
   converting.value = converting.value.map((c, i) => (i === slot ? false : c))
-  if (j.state === 'done' && j.result) {
+  if (j.state === 'done' && j.result && !direct && needsScaleReview(j.result) && j.result.scale_check) {
+    setRow(slot, reviewRowFromJobResult(j.job_id, { ...j.result, scale_check: j.result.scale_check }))
+  }
+  else if (j.state === 'done' && j.result) {
     const row = rowFromJobResult(j.job_id, j.result)
     setRow(slot, row)
     void convert(slot, row)
@@ -285,7 +290,26 @@ function applyToFreeRow(): void {
   let slot = rows.value.findIndex(r => r.state === 'empty')
   if (slot < 0) slot = rows.value.findIndex(r => !rowValid(r))
   if (slot < 0) { status.value = { kind: 'error', text: 'All rows are filled: remove one to use the astrometry result' }; return }
-  applyJob(slot, j)
+  applyJob(slot, j, true)
+}
+
+/** Use on a review row: it becomes a normal astrometry result (then H4 as usual). */
+function onReviewUse(slot: number): void {
+  const row = rowFromReview(rows.value[slot]!)
+  if (!row) return
+  seq[slot] = (seq[slot] ?? 0) + 1
+  if (row.jobId) astro.markUsed(row.jobId)
+  setRow(slot, row)
+  void convert(slot, row)
+  persistIfClosed()
+}
+
+/** Discard on a review row: the row is emptied and the pill goes. */
+function onReviewDiscard(slot: number): void {
+  const id = rows.value[slot]!.jobId
+  doRemove(slot)
+  if (id && astro.job?.job_id === id) astro.dismiss()
+  persistIfClosed()
 }
 
 const jobSlot = computed(() => {
@@ -307,6 +331,15 @@ watch(() => astro.resumed, (r) => {
   persistIfClosed()
 })
 watch(() => astro.applyRequested, (v) => { if (v && open.value) applyToFreeRow() })
+// the pill's Use / Discard on a job whose row sits here (open or not)
+watch(() => astro.reviewAction, (a) => {
+  const id = astro.job?.job_id
+  if (!a || !id) return
+  const slot = rows.value.findIndex(r => r.state === 'review' && r.jobId === id)
+  if (slot < 0) return
+  if (a.kind === 'use') onReviewUse(slot)
+  else onReviewDiscard(slot)
+})
 
 function doRemove(slot: number): void {
   seq[slot] = (seq[slot] ?? 0) + 1
@@ -482,6 +515,23 @@ const ariaSort = computed(() => (dir.value === 'desc' ? 'descending' : 'ascendin
                   </td>
                 </template>
 
+                <template v-else-if="editing?.slot !== slot && rowDisplay(rows[slot]!).kind === 'review'">
+                  <td data-testid="iod-epoch">
+                    {{ fmtEpoch(rows[slot]!.t) }}
+                  </td>
+                  <td colspan="5" data-testid="iod-review">
+                    <div class="iod-review">
+                      <span class="iod-review-text" data-testid="iod-row-status" :title="(rowDisplay(rows[slot]!) as { title: string }).title">{{ (rowDisplay(rows[slot]!) as { text: string }).text }}</span>
+                      <button type="button" class="iod-cbtn iod-cyes" data-testid="iod-review-use" @click="onReviewUse(slot)">
+                        Use
+                      </button>
+                      <button type="button" class="iod-cbtn" data-testid="iod-review-discard" @click="onReviewDiscard(slot)">
+                        Discard
+                      </button>
+                    </div>
+                  </td>
+                </template>
+
                 <template v-else-if="editing?.slot === slot">
                   <td>
                     <span class="iod-dt" :class="{ 'is-invalid': badFields.has('t') }" data-testid="iod-epoch">
@@ -518,8 +568,8 @@ const ariaSort = computed(() => (dir.value === 'desc' ? 'descending' : 'ascendin
                   <template v-else>
                     <td colspan="4" />
                   </template>
-                  <td data-testid="iod-source">
-                    {{ rows[slot]!.source ?? '' }}
+                  <td data-testid="iod-source" :title="sourceLabel(rows[slot]!).title">
+                    {{ sourceLabel(rows[slot]!).text }}
                   </td>
                 </template>
 
@@ -644,6 +694,9 @@ const ariaSort = computed(() => (dir.value === 'desc' ? 'descending' : 'ascendin
 .iod-dialog .iod-dots:hover { color: var(--accent-green-border); }
 .iod-dialog .iod-confirm { color: var(--foreground); }
 .iod-dialog .iod-confirm > span { margin-right: 10px; font-weight: 600; }
+.iod-dialog .iod-review { display: flex; align-items: center; }
+.iod-dialog .iod-review-text { flex: 1 1 auto; min-width: 0; margin-right: 8px; overflow: hidden; text-overflow: ellipsis; font-size: 12px; font-weight: 600; }
+.iod-dialog .iod-review .iod-cbtn { flex: none; }
 .iod-dialog .iod-cbtn {
   height: 22px; padding: 0 10px; margin-right: 6px; border: 1px solid var(--control-border); background: var(--secondary);
   color: var(--foreground); font-size: 12px; font-weight: 700; cursor: pointer;
