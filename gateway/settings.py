@@ -26,6 +26,7 @@ SCHEMA_VERSION = 1
 KEYRING_SERVICE = "pw-mount-control"
 KEYRING_USER = "astrometry.net"
 CCTV_KEYRING_USER = "cctv_password"
+ADSB_KEYRING_USER = "adsb_read_token"
 
 DEFAULT_LAT = 13.7862
 DEFAULT_LON = 101.4639
@@ -113,6 +114,16 @@ def default_cctv_secret_store() -> SecretStore:
     return KeyringSecretStore(CCTV_KEYRING_USER)
 
 
+_MEMORY_ADSB = MemorySecretStore()
+
+
+def default_adsb_secret_store() -> SecretStore:
+    """T5.4b: the ADS-B platform read token's own Credential Manager entry (`adsb_read_token`)."""
+    if os.environ.get("PW_SECRET_STORE") == "memory":
+        return _MEMORY_ADSB
+    return KeyringSecretStore(ADSB_KEYRING_USER)
+
+
 # ---------------------------------------------------------------- schema
 
 
@@ -195,6 +206,47 @@ def cctv_url_error(url: str) -> str | None:
     return None
 
 
+ADSB_DEFAULT_URL = "wss://10.22.123.68/api/v1/ws"
+ADSB_RANGE_LIMITS_KM = (20, 50, 100, 200, 350)
+ADSB_TOKEN_MAX_LEN = 4096
+
+
+class Adsb(BaseModel):
+    """T5.4b ADS-B platform connection. The read token is a secret (own Credential entry)."""
+
+    enabled: bool = False
+    url: str = Field(ADSB_DEFAULT_URL, max_length=2048)
+    range_limit_km: Literal[20, 50, 100, 200, 350] = 100
+
+
+def adsb_url_error(url: str) -> str | None:
+    """Why a platform URL is refused (the message never echoes it), else None."""
+    try:
+        u = urlsplit(url)
+        host = u.hostname
+        _ = u.port
+    except ValueError:
+        return "The ADS-B URL is not valid"
+    if u.scheme != "wss" or not host:
+        return "The ADS-B URL must start with wss://"
+    if u.username is not None or u.password is not None or "@" in u.netloc:
+        return "The ADS-B URL must not carry credentials (the read token has its own field)"
+    if u.query or u.fragment or any(c.isspace() for c in url):
+        return "The ADS-B URL must not have a query, a fragment or spaces"
+    return None
+
+
+def adsb_token_error(token: str) -> str | None:
+    """Why a pasted read token is refused (never echoes it), else None. Empty clears it."""
+    if token == "":
+        return None
+    if len(token) > ADSB_TOKEN_MAX_LEN:
+        return "The ADS-B token is too long"
+    if any(c.isspace() or not c.isprintable() for c in token):
+        return "The ADS-B token contains spaces or control characters"
+    return None
+
+
 class StationSettings(BaseModel):
     version: int = SCHEMA_VERSION
     location: Location = Field(default_factory=Location)
@@ -202,6 +254,7 @@ class StationSettings(BaseModel):
     providers: Providers = Field(default_factory=Providers)
     display: Display = Field(default_factory=Display)
     cctv: Cctv = Field(default_factory=Cctv)
+    adsb: Adsb = Field(default_factory=Adsb)
 
 
 class SettingsUpdate(StationSettings):
@@ -209,10 +262,12 @@ class SettingsUpdate(StationSettings):
 
     api_key: a string sets it, an empty string clears it, absent/null keeps it.
     cctv_password: the same, for the camera password (its own Credential Manager entry).
+    adsb_token: the same, for the ADS-B read token (Credential Manager entry `adsb_read_token`).
     """
 
     api_key: str | None = None
     cctv_password: str | None = Field(None, max_length=512)
+    adsb_token: str | None = None  # length / charset checked by the route (a 422 must not echo it)
 
     @field_validator("location")
     @classmethod
@@ -270,11 +325,15 @@ class SettingsStore:
         path: Path | None = None,
         secrets: SecretStore | None = None,
         cctv_secrets: SecretStore | None = None,
+        adsb_secrets: SecretStore | None = None,
     ) -> None:
         self.path = Path(path) if path else default_settings_path()
         self.secrets: SecretStore = secrets if secrets is not None else default_secret_store()
         self.cctv_secrets: SecretStore = (
             cctv_secrets if cctv_secrets is not None else default_cctv_secret_store()
+        )
+        self.adsb_secrets: SecretStore = (
+            adsb_secrets if adsb_secrets is not None else default_adsb_secret_store()
         )
         self._lock = threading.Lock()
         self.load_error: str | None = None
@@ -327,8 +386,10 @@ class SettingsStore:
         new: StationSettings,
         api_key: str | None = None,
         cctv_password: str | None = None,
+        adsb_token: str | None = None,
     ) -> StationSettings:
-        """Persist settings; api_key / cctv_password: str = set, empty = clear, None = keep."""
+        """Persist settings; api_key / cctv_password / adsb_token: str = set, empty = clear,
+        None = keep."""
         with self._lock:
             clean = StationSettings.model_validate(new.model_dump())
             # The Settings screen does not carry the home pose: a PUT that omits it must keep the
@@ -353,6 +414,11 @@ class SettingsStore:
                     self.cctv_secrets.clear()
                 else:
                     self.cctv_secrets.set(cctv_password)
+            if adsb_token is not None:
+                if adsb_token == "":
+                    self.adsb_secrets.clear()
+                else:
+                    self.adsb_secrets.set(adsb_token)
             self._write(clean)
             self.current = clean
             self.first_run = False
@@ -370,6 +436,12 @@ class SettingsStore:
         except Exception:
             return False
 
+    def adsb_token_set(self) -> bool:
+        try:
+            return bool(self.adsb_secrets.get())
+        except Exception:
+            return False
+
     def public(self) -> dict:
         d = self.current.model_dump()
         d["api_key_set"] = self.api_key_set()
@@ -382,5 +454,13 @@ class SettingsStore:
             "username_set": bool(c.username),
             "password_set": self.cctv_password_set(),
             "configured": c.configured,
+        }
+        a = self.current.adsb
+        # the URL is not secret; the token is write-only
+        d["adsb"] = {
+            "enabled": a.enabled,
+            "url": a.url,
+            "range_limit_km": a.range_limit_km,
+            "token_set": self.adsb_token_set(),
         }
         return d

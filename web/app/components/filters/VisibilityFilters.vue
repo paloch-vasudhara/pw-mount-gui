@@ -1,9 +1,14 @@
 <script setup lang="ts">
 // Visibility filter tree (A2a). State + persistence live in stores/filters.ts, semantics in
 // utils/filters.ts: a parent off hides its children but keeps their own checks (rendered greyed).
+import { computed } from 'vue'
+import { useAircraftStore } from '~/stores/aircraft'
 import { useFiltersStore } from '~/stores/filters'
+import { aircraftFilterState } from '~/utils/aircraft'
 
 const f = useFiltersStore().filters
+// Aircrafts: usable only on a green ADS-B connection; otherwise disabled with the reason as its tooltip.
+const air = computed(() => aircraftFilterState(useAircraftStore().adsb))
 </script>
 
 <template>
@@ -29,10 +34,16 @@ const f = useFiltersStore().filters
       </label>
     </div>
 
-    <label class="row top disabled" title="No ADS-B source configured">
-      <input v-model="f.aircrafts" type="checkbox" disabled data-testid="flt-aircrafts">
+    <label class="row top" :class="{ disabled: !air.enabled }" :title="air.reason ?? undefined" data-testid="flt-aircrafts-row">
+      <input v-model="f.aircrafts" type="checkbox" :disabled="!air.enabled" data-testid="flt-aircrafts">
       <span>Aircrafts</span>
     </label>
+    <div class="kids" :class="{ off: !f.aircrafts || !air.enabled }">
+      <label class="row kid" :class="{ disabled: !air.enabled }" :title="air.reason ?? undefined">
+        <input v-model="f.airborne" type="checkbox" :disabled="!air.enabled" data-testid="flt-airborne">
+        <span>Airborne</span>
+      </label>
+    </div>
 
     <label class="row top">
       <input v-model="f.celestial" type="checkbox" data-testid="flt-celestial">

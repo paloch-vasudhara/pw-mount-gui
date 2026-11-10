@@ -20,18 +20,29 @@
 // (utils/sky-pick.ts), labels are never hit targets. A `labels` canvas (own canvas, LEO cadence)
 // draws decluttered names (priority selected > hovered > GEO > MEO > LEO) and the hover highlight.
 // The selected object (stores/selection.ts, keyed by NORAD) gets a white ring, the others dim to 0.22.
+// Aircraft (T5.5): one more canvas (`air`, between the satellites and the labels) fed by the aircraft
+// store (1 Hz rows); positions are dead-reckoned between frames at 10 Hz (utils/aircraft.ts, never
+// more than 2 s ahead). The icon (public/icons/aircraft.svg, nose up) is rotated to the ground track,
+// dimmed below Lim EL like satellites and faded when stale; hover (nearest of satellites and aircraft)
+// and click share the satellites' selection (one selected object). Test hooks: data-hover-icao,
+// data-selected-icao, data-air-drawn, `window.__skyPick.aircraft()`.
 // TEST HOOKS: data-hover-norad / data-selected-norad on the wrapper, data-ms-labels (last label
 // pass cost), data-labels-drawn, and `window.__skyPick(x, y)` -> the NORAD the picker would choose
 // for chart-relative CSS px (or null). It only reads the last drawn positions; it changes nothing.
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useMountStore } from '~/stores/mount'
 import { useSkyStore, type SkyState } from '~/stores/sky'
 import { useSelectionStore } from '~/stores/selection'
+import { useAircraftStore } from '~/stores/aircraft'
 import { BELOW_LIM_DIM, DAY_TONES, SAT_COLORS, SAT_FILL_ALPHA, SAT_FOCUS_DIM, SAT_SQUARE_PX, SKY } from '~/lib/sky/theme'
 import {
   BoxGrid, ensureScreenCapacity, indexOfNorad, makePickResult, makeScreenLayer, pickNearest, type ScreenLayer,
 } from '~/utils/sky-pick'
 import { formatAz, formatEl, formatRange, formatTleAge, illuminationOf, ILLUMINATION_LABEL } from '~/utils/track-format'
+import {
+  AIRCRAFT_ICON_PX, AIRCRAFT_OUTLINE_PX, AIRCRAFT_PATH, AIRCRAFT_PATH_SIZE, AIRCRAFT_PICK_RADIUS_PX, AIRCRAFT_STALE_ALPHA, aircraftIconColors, aircraftLabel, aircraftTitle, feedDownChip, formatAgeS, formatAltFt,
+  formatRangeKm, iconRotationRad, predictAzEl, showSimulatedBadge, type TrackedAircraft,
+} from '~/utils/aircraft'
 import {
   altAzFromVectors, jdFromMs, limitingMagnitude, mixHex, projPolar, projXY, quantiseSunAlt, skyBrightness,
   skyColor, smallCircle, starAlphaFactor, starDot, sunElevationApprox, unitVectors,
@@ -46,6 +57,7 @@ const props = withDefaults(defineProps<{
   showMeo?: boolean
   showGeo?: boolean
   showLabels?: boolean // false: only the hovered / selected label is drawn (T2.3b)
+  showAircraft?: boolean // Filters > Aircrafts > Airborne (T5.5)
 }>(), {
   showStars: true,
   showBodies: true,
@@ -53,11 +65,13 @@ const props = withDefaults(defineProps<{
   showMeo: true,
   showGeo: true,
   showLabels: true,
+  showAircraft: true,
 })
 
 const store = useMountStore()
 const sky = useSkyStore()
 const selection = useSelectionStore()
+const air = useAircraftStore()
 const num = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
 
 const box = ref<HTMLElement | null>(null)
@@ -66,6 +80,7 @@ const baseEl = ref<HTMLCanvasElement | null>(null)
 const starsEl = ref<HTMLCanvasElement | null>(null)
 const overlayEl = ref<HTMLCanvasElement | null>(null)
 const labelsEl = ref<HTMLCanvasElement | null>(null)
+const airEl = ref<HTMLCanvasElement | null>(null)
 const tipEl = ref<HTMLElement | null>(null)
 const satEls = { leo: ref<HTMLCanvasElement | null>(null), meo: ref<HTMLCanvasElement | null>(null), geo: ref<HTMLCanvasElement | null>(null) }
 const SAT_LAYERS: readonly SkyLayer[] = ['leo', 'meo', 'geo']
@@ -119,8 +134,8 @@ const geomJson = computed(() => {
 const scale = (R: number) => Math.min(1.4, Math.max(0.8, R / 340))
 
 // ---- frame counters (non-reactive; written straight to the DOM) ----------------------------
-type Layer = 'base' | 'stars' | 'overlay' | 'labels' | SkyLayer
-const frames: Record<Layer, number> = { base: 0, stars: 0, overlay: 0, labels: 0, leo: 0, meo: 0, geo: 0 }
+type Layer = 'base' | 'stars' | 'overlay' | 'labels' | 'air' | SkyLayer
+const frames: Record<Layer, number> = { base: 0, stars: 0, overlay: 0, labels: 0, air: 0, leo: 0, meo: 0, geo: 0 }
 function bump(layer: Layer) {
   frames[layer] += 1
   wrap.value?.setAttribute(`data-frames-${layer}`, String(frames[layer]))
@@ -136,7 +151,7 @@ function prep(canvas: HTMLCanvasElement | null) {
 }
 
 function resizeCanvases() {
-  for (const c of [baseEl.value, starsEl.value, overlayEl.value, labelsEl.value, satEls.leo.value, satEls.meo.value, satEls.geo.value]) {
+  for (const c of [baseEl.value, starsEl.value, overlayEl.value, labelsEl.value, airEl.value, satEls.leo.value, satEls.meo.value, satEls.geo.value]) {
     if (!c) continue
     c.width = Math.max(1, Math.round(size.value * dpr.value))
     c.height = Math.max(1, Math.round(size.value * dpr.value))
@@ -309,7 +324,7 @@ function drawSats(layer: SkyLayer) {
   sc.n = 0
   let drawn = 0
   const selN = selection.selectedNorad
-  const focus = selN !== null
+  const focus = selN !== null || selection.selectedIcao !== null
   if (SAT_SHOW[layer]() && site.value) {
     const t = skyNowMs() / 1000
     const chunk = findChunk(sky.chunks(layer), t)
@@ -397,9 +412,110 @@ function drawSats(layer: SkyLayer) {
   bump(layer)
 }
 
+// ---- aircraft (T5.5) ----------------------------------------------------------------------------
+// Screen positions of the icons drawn last (picking, labels): `norad[i]` holds the index into airTr.
+const airScreen = makeScreenLayer()
+let airTr: Array<{ icao: string, tr: TrackedAircraft }> = []
+let airPath: Path2D | null = null // the icon outline, built on first use
+
+function aircraftPath(): Path2D | null {
+  if (!airPath && typeof Path2D !== 'undefined') airPath = new Path2D(AIRCRAFT_PATH)
+  return airPath
+}
+
+function drawAircraft() {
+  const t0 = performance.now()
+  const ctx = prep(airEl.value)
+  if (!ctx) return
+  airScreen.n = 0
+  airTr = []
+  if (props.showAircraft && site.value && air.green && air.tracked.size > 0) {
+    const nowMs = Date.now()
+    ensureScreenCapacity(airScreen, air.tracked.size)
+    const { cx, cy, R } = geom()
+    const k = scale(R)
+    const side = AIRCRAFT_ICON_PX * k
+    const lim = limEl.value !== null && limEl.value > 0 ? limEl.value : 0
+    const selI = selection.selectedIcao
+    const focus = selection.selectedNorad !== null || selI !== null
+    const colors = aircraftIconColors(skyBrightness(sunAlt.value))
+    const path = aircraftPath()
+    const u = side / AIRCRAFT_PATH_SIZE // css px per icon unit
+    let m = 0
+    for (const [icao, tr] of air.tracked) {
+      const p = predictAzEl(tr, nowMs)
+      if (p.el < 0) continue
+      const rr = R * (1 - p.el / 90)
+      const ang = (p.az * Math.PI) / 180
+      airScreen.x[m] = cx - rr * Math.sin(ang)
+      airScreen.y[m] = cy - rr * Math.cos(ang)
+      airScreen.az[m] = p.az
+      airScreen.alt[m] = p.el
+      airScreen.norad[m] = m
+      airTr[m] = { icao, tr }
+      m++
+    }
+    airScreen.n = m
+    const dpr0 = dpr.value
+    // fill + outline in colours chosen against the sky; the outline is stroked first at twice the
+    // width, so the fill covers its inner half and AIRCRAFT_OUTLINE_PX shows outside the edge
+    ctx.fillStyle = colors.fill
+    ctx.strokeStyle = colors.outline
+    ctx.lineJoin = 'round'
+    ctx.lineWidth = (2 * AIRCRAFT_OUTLINE_PX) / u
+    // selected last, so it lands on top
+    for (let pass = 0; pass < 2; pass++) {
+      for (let i = 0; i < m; i++) {
+        const { icao, tr } = airTr[i]!
+        if ((icao === selI) !== (pass === 1)) continue
+        let a = focus && icao !== selI ? SAT_FOCUS_DIM : 1
+        if (airScreen.alt[i]! < lim) a *= BELOW_LIM_DIM
+        if (tr.row.stale) a *= AIRCRAFT_STALE_ALPHA
+        ctx.globalAlpha = a
+        const rot = iconRotationRad(tr.row.track_deg)
+        const c = Math.cos(rot) * dpr0 * u
+        const sn = Math.sin(rot) * dpr0 * u
+        ctx.setTransform(c, sn, -sn, c, airScreen.x[i]! * dpr0, airScreen.y[i]! * dpr0)
+        if (path) {
+          ctx.translate(-AIRCRAFT_PATH_SIZE / 2, -AIRCRAFT_PATH_SIZE / 2)
+          ctx.stroke(path)
+          ctx.fill(path)
+        }
+        else { // no Path2D (tests): a plain arrow head, in icon units
+          const h = AIRCRAFT_PATH_SIZE / 2
+          ctx.beginPath()
+          ctx.moveTo(0, -h)
+          ctx.lineTo(h * 0.7, h)
+          ctx.lineTo(-h * 0.7, h)
+          ctx.closePath()
+          ctx.fill()
+        }
+      }
+    }
+    ctx.setTransform(dpr0, 0, 0, dpr0, 0, 0)
+    ctx.globalAlpha = 1
+    const sk = selI === null ? -1 : airTr.findIndex(e => e.icao === selI)
+    if (sk >= 0) {
+      ctx.strokeStyle = SKY.selectRing
+      ctx.lineWidth = 1.6
+      ctx.beginPath()
+      ctx.arc(airScreen.x[sk]!, airScreen.y[sk]!, Math.max(8, side * 0.8), 0, 2 * Math.PI)
+      ctx.stroke()
+    }
+  }
+  wrap.value?.setAttribute('data-air-drawn', String(airScreen.n))
+  wrap.value?.setAttribute('data-ms-air', (performance.now() - t0).toFixed(2))
+  bump('air')
+}
+
+function findAir(icao: string | null): number {
+  if (icao === null) return -1
+  return airTr.findIndex(e => e.icao === icao)
+}
+
 // ---- labels (decluttered names + hover highlight) --------------------------------------------
 const grid = new BoxGrid(32)
-const labelWidths = new Map<number, number>() // NORAD -> text width at `labelFont` (measured once)
+const labelWidths = new Map<string, number>() // label text -> width at `labelFont` (measured once)
 let labelFont = ''
 const PICK_ORDER: readonly SkyLayer[] = ['geo', 'meo', 'leo'] // label priority after selected/hovered
 const LABEL_PRIORITY: readonly SkyLayer[] = PICK_ORDER
@@ -445,19 +561,18 @@ function drawLabels() {
     }
     const halfH = fs / 2 + 1
     const rim2 = (R + 6) * (R + 6)
-    const place = (norad: number, x: number, y: number, force: boolean): void => {
-      const name = sky.meta.get(norad)?.name
+    const placeText = (name: string, x: number, y: number, force: boolean, mh: number): void => {
       if (!name) return
-      let w = labelWidths.get(norad)
+      let w = labelWidths.get(name)
       if (w === undefined) {
-        // Width is measured once per object; cap the measurements per pass so the first pass after
+        // Width is measured once per label text; cap the measurements per pass so the first pass after
         // the names arrive stays cheap (the rest fill in over the next 100 ms frames).
         if (!force && measured >= MAX_MEASURE_PER_PASS) return
         measured++
         w = ctx.measureText(name).width
-        labelWidths.set(norad, w)
+        labelWidths.set(name, w)
       }
-      const x0 = x + h + 2
+      const x0 = x + mh + 2
       const x1 = x0 + w
       const y0 = y - halfH
       const y1 = y + halfH
@@ -472,14 +587,37 @@ function drawLabels() {
       ctx.fillText(name, x0, y)
       placed++
     }
+    const place = (norad: number, x: number, y: number, force: boolean): void => {
+      const name = sky.meta.get(norad)?.name
+      if (name) placeText(name, x, y, force, h)
+    }
+    // aircraft: the icon boxes occupy the grid, labels (callsign, else ICAO) go right of the icon
+    const ah = (AIRCRAFT_ICON_PX * k) / 2 + 1
+    for (let i = 0; i < airScreen.n; i++) grid.add(airScreen.x[i]! - ah, airScreen.y[i]! - ah, airScreen.x[i]! + ah, airScreen.y[i]! + ah)
+    const placeAir = (i: number, force: boolean): void => {
+      const e = airTr[i]
+      if (e) placeText(aircraftLabel(e.tr.row), airScreen.x[i]!, airScreen.y[i]!, force, ah - 1)
+    }
     const selN = selection.selectedNorad
     const hovN = hoverNorad.value
+    const selI = selection.selectedIcao
+    const hovI = hoverIcao.value
+    const focus = selN !== null || selI !== null
     const sel = findOnScreen(selN)
     const hov = hovN !== selN ? findOnScreen(hovN) : null
-    // selected first, then hovered (both always drawn), then GEO > MEO > LEO at the focus alpha
+    const selA = findAir(selI)
+    const hovA = hovI !== selI ? findAir(hovI) : -1
+    // selected first, then hovered (both always drawn), then aircraft, then GEO > MEO > LEO at the focus alpha
     if (sel) place(selN!, screen[sel.layer].x[sel.i]!, screen[sel.layer].y[sel.i]!, true)
+    if (selA >= 0) placeAir(selA, true)
     if (hov) place(hovN!, screen[hov.layer].x[hov.i]!, screen[hov.layer].y[hov.i]!, true)
-    ctx.globalAlpha = selN !== null ? SAT_FOCUS_DIM : 1
+    if (hovA >= 0) placeAir(hovA, true)
+    ctx.globalAlpha = focus ? SAT_FOCUS_DIM : 1
+    if (props.showLabels) {
+      for (let i = 0; i < airScreen.n; i++) {
+        if (i !== selA && i !== hovA) placeAir(i, false)
+      }
+    }
     for (const l of props.showLabels ? LABEL_PRIORITY : []) {
       const sc = screen[l]
       for (let i = 0; i < sc.n; i++) {
@@ -498,6 +636,14 @@ function drawLabels() {
       ctx.strokeRect(sc.x[hh.i]! - h, sc.y[hh.i]! - h, 2 * h, 2 * h)
       refreshTip(sc.az[hh.i]!, sc.alt[hh.i]!)
     }
+    const ha = findAir(hovI)
+    if (ha >= 0) {
+      ctx.strokeStyle = '#ffffff'
+      ctx.lineWidth = 1.5
+      ctx.beginPath()
+      ctx.arc(airScreen.x[ha]!, airScreen.y[ha]!, Math.max(8, ah * 1.1), 0, 2 * Math.PI)
+      ctx.stroke()
+    }
   }
   wrap.value?.setAttribute('data-labels-drawn', String(placed))
   wrap.value?.setAttribute('data-ms-labels', (performance.now() - t0).toFixed(2))
@@ -506,17 +652,31 @@ function drawLabels() {
 
 // ---- hover / pick / select ---------------------------------------------------------------------
 const hoverNorad = ref<number | null>(null)
+const hoverIcao = ref<string | null>(null)
 const pickRes = makePickResult()
+const airPickRes = makePickResult()
 const PICK_LAYERS: ScreenLayer[] = [screen.geo, screen.meo, screen.leo]
+const AIR_PICK_LAYERS: ScreenLayer[] = [airScreen]
 const PICK_RADIUS_PX = 10
 const tip = reactive({ visible: false, x: 0, y: 0, norad: 0, az: NaN, alt: NaN, state: null as SkyState | null })
 let hoverTimer: ReturnType<typeof setTimeout> | null = null
 let hoverPoll: ReturnType<typeof setInterval> | null = null
 
-/** Nearest drawn marker to chart-relative CSS px (x, y), or null. Labels are not targets. */
+/** The NEAREST drawn marker (satellite or aircraft) to chart-relative CSS px (x, y), or null. Labels are not targets. */
+function pickObject(x: number, y: number): { norad: number | null, icao: string | null } | null {
+  const k = scale(geom().R)
+  const hitSat = pickNearest(PICK_LAYERS, x, y, PICK_RADIUS_PX * k, pickRes)
+  const hitAir = pickNearest(AIR_PICK_LAYERS, x, y, AIRCRAFT_PICK_RADIUS_PX * k, airPickRes)
+  if (hitAir && (!hitSat || airPickRes.dist2 < pickRes.dist2)) {
+    const e = airTr[airPickRes.norad]
+    return e ? { norad: null, icao: e.icao } : null
+  }
+  return hitSat ? { norad: pickRes.norad, icao: null } : null
+}
+
+/** Satellite-only pick (the NORAD), kept for the `__skyPick` test hook. */
 function pickAt(x: number, y: number): number | null {
-  const r = PICK_RADIUS_PX * scale(geom().R)
-  return pickNearest(PICK_LAYERS, x, y, r, pickRes) ? pickRes.norad : null
+  return pickObject(x, y)?.norad ?? null
 }
 
 function toLocal(e: PointerEvent | MouseEvent) {
@@ -540,14 +700,15 @@ function pollHoverState() {
   })
 }
 
-function setHover(n: number | null) {
-  if (hoverNorad.value === n) return
+function setHover(n: number | null, icao: string | null = null) {
+  if (hoverNorad.value === n && hoverIcao.value === icao) return
   hoverNorad.value = n
+  hoverIcao.value = icao
   tip.state = null
   tip.az = NaN
   tip.alt = NaN
   tip.norad = n ?? 0
-  tip.visible = n !== null
+  tip.visible = n !== null || icao !== null
   if (hoverTimer) clearTimeout(hoverTimer)
   hoverTimer = null
   if (n !== null) hoverTimer = setTimeout(pollHoverState, 100) // skip the fetch while sweeping across markers
@@ -557,19 +718,32 @@ function setHover(n: number | null) {
 function onPointerMove(e: PointerEvent) {
   if (!wrap.value) return
   const p = toLocal(e)
-  setHover(pickAt(p.x, p.y))
-  if (tip.visible) {
-    const tw = tipEl.value?.offsetWidth ?? 0
-    const th = tipEl.value?.offsetHeight ?? 0
-    let x = p.x + 14
-    let y = p.y + 14
-    if (x + tw > p.w) x = p.x - 14 - tw
-    if (x < 0) x = 0
-    if (y + th > p.h) y = p.y - 14 - th
-    if (y < 0) y = 0
-    tip.x = x
-    tip.y = y
-  }
+  const hit = pickObject(p.x, p.y)
+  setHover(hit?.norad ?? null, hit?.icao ?? null)
+  tipAt = p
+  placeTip()
+  // the tooltip's size is only known once its (new) text has rendered: place it again then
+  void nextTick(placeTip)
+}
+
+/** Last pointer position (chart-local) the tooltip follows. */
+let tipAt: { x: number, y: number, w: number, h: number } | null = null
+
+/** Right / below the pointer, flipped left / above where it would leave the chart box, so it never
+ *  spills into the next panel (user 11-10). Uses the rendered size: called again after a re-render. */
+function placeTip() {
+  const p = tipAt
+  if (!tip.visible || !p) return
+  const tw = tipEl.value?.offsetWidth ?? 0
+  const th = tipEl.value?.offsetHeight ?? 0
+  let x = p.x + 14
+  let y = p.y + 14
+  if (x + tw > p.w) x = p.x - 14 - tw
+  if (x < 0) x = 0
+  if (y + th > p.h) y = p.y - 14 - th
+  if (y < 0) y = 0
+  tip.x = x
+  tip.y = y
 }
 
 function onPointerLeave() {
@@ -579,10 +753,26 @@ function onPointerLeave() {
 function onClick(e: MouseEvent) {
   if (!wrap.value) return
   const p = toLocal(e)
-  const n = pickAt(p.x, p.y)
-  if (n === null) selection.deselect()
-  else selection.select(n)
+  const hit = pickObject(p.x, p.y)
+  if (hit?.icao) selection.selectAircraft(hit.icao)
+  else if (hit?.norad != null) selection.select(hit.norad)
+  else selection.deselect()
 }
+
+const simBadge = computed(() => showSimulatedBadge(air.adsb))
+const feedDown = computed(() => feedDownChip(air.adsb))
+
+const airTip = computed(() => {
+  const icao = hoverIcao.value
+  if (icao === null) return null
+  const row = air.tracked.get(icao)?.row ?? null
+  return {
+    title: row ? aircraftTitle(row) : icao,
+    alt: formatAltFt(row?.alt_ft),
+    range: formatRangeKm(row?.range_m),
+    age: formatAgeS(row?.pos_age_s),
+  }
+})
 
 const tipLines = computed(() => {
   const st = tip.state
@@ -601,6 +791,8 @@ const tipLines = computed(() => {
     age: st ? formatTleAge(st.tle_age_days) : '…',
   }
 })
+// the text changes width at 1 Hz (values) or between a satellite and an aircraft: keep it inside
+watch([airTip, tipLines], () => { void nextTick(placeTip) })
 
 // ---- overlay --------------------------------------------------------------------------------
 interface Body { alt: number, az: number }
@@ -713,7 +905,7 @@ function drawOverlay() {
 }
 
 // ---- scheduling (coalesced through rAF) -----------------------------------------------------
-const dirty: Record<Layer, boolean> = { base: false, stars: false, overlay: false, labels: false, leo: false, meo: false, geo: false }
+const dirty: Record<Layer, boolean> = { base: false, stars: false, overlay: false, labels: false, air: false, leo: false, meo: false, geo: false }
 let raf = 0
 function flush() {
   raf = 0
@@ -722,6 +914,7 @@ function flush() {
   for (const l of SAT_LAYERS) {
     if (dirty[l]) { dirty[l] = false; drawSats(l) }
   }
+  if (dirty.air) { dirty.air = false; drawAircraft() }
   if (dirty.labels) { dirty.labels = false; drawLabels() }
   if (dirty.overlay) { dirty.overlay = false; drawOverlay() }
 }
@@ -730,10 +923,14 @@ function schedule(...layers: Layer[]) {
   if (!raf) raf = requestAnimationFrame(flush)
 }
 
-watch(limEl, () => schedule('base', 'labels', ...SAT_LAYERS))
+watch(limEl, () => schedule('base', 'labels', 'air', ...SAT_LAYERS))
 watch(() => props.showLabels, () => schedule('labels'))
+// aircraft: a new frame / clear, the filter and the selection redraw at once; between frames a 10 Hz tick (below)
+watch(() => air.version, () => schedule('air', 'labels'))
+watch(() => air.green, () => schedule('air', 'labels'))
+watch(() => props.showAircraft, () => schedule('air', 'labels'))
 watch(skyRgb, () => schedule('base'))
-watch(site, () => { updateSun(); schedule('base', 'stars', 'overlay', 'labels', ...SAT_LAYERS) })
+watch(site, () => { updateSun(); schedule('base', 'stars', 'overlay', 'labels', 'air', ...SAT_LAYERS) })
 watch(overlayKey, () => schedule('overlay'))
 watch(() => props.showStars, () => schedule('stars'))
 watch(starsReady, () => schedule('stars'))
@@ -743,12 +940,14 @@ for (const l of SAT_LAYERS) {
   watch(() => SAT_SHOW[l](), () => schedule(l, 'labels'))
 }
 // selection changes re-dim every layer and move the ring / label; names arriving draw labels
-watch(() => selection.selectedNorad, () => schedule('labels', ...SAT_LAYERS))
+watch(() => selection.selectedNorad, () => schedule('labels', 'air', ...SAT_LAYERS))
+watch(() => selection.selectedIcao, () => schedule('labels', 'air', ...SAT_LAYERS))
 watch(() => sky.metaVersion, () => schedule('labels'))
 
 // ---- lifecycle ------------------------------------------------------------------------------
 let ro: ResizeObserver | null = null
 let timer: ReturnType<typeof setInterval> | null = null
+let airTimer: ReturnType<typeof setInterval> | null = null
 const satTimers: Array<ReturnType<typeof setTimeout>> = []
 // [cadence ms, start offset ms]: staggered so the layers do not land on the same frame.
 // LEO at 10 Hz: a fast mover near the zenith (~0.5 deg/s) then steps ~0.25 px per frame at 1920
@@ -766,7 +965,7 @@ function measure() {
   dpr.value = d
   resizeCanvases() // resetting width/height clears the canvases
   setHover(null) // the pointer position is stale after a resize
-  schedule('base', 'stars', 'overlay', 'labels', ...SAT_LAYERS)
+  schedule('base', 'stars', 'overlay', 'labels', 'air', ...SAT_LAYERS)
 }
 
 function onTestRefresh() {
@@ -788,6 +987,10 @@ onMounted(() => {
       satTimers.push(setInterval(tick, every) as unknown as ReturnType<typeof setTimeout>)
     }, offset))
   }
+  // aircraft: 10 Hz dead-reckoned redraw, only while there is something to draw or to clear
+  airTimer = setInterval(() => {
+    if (air.tracked.size > 0 || airScreen.n > 0) schedule('air', 'labels')
+  }, 100)
   sky.start()
   hoverPoll = setInterval(pollHoverState, 1000)
   // test hook: `__skyPick(x, y)` plus `__skyPick.positions(layer)` -> [[x, y, norad, az, alt], ...]
@@ -800,6 +1003,8 @@ onMounted(() => {
         for (let i = 0; i < sc.n; i++) out.push([sc.x[i]!, sc.y[i]!, sc.norad[i]!, sc.az[i]!, sc.alt[i]!])
         return out
       },
+      // aircraft drawn last: [[x, y, icao, az, el, rotationRad], ...]
+      aircraft: () => airTr.map((e, i) => [airScreen.x[i]!, airScreen.y[i]!, e.icao, airScreen.az[i]!, airScreen.alt[i]!, iconRotationRad(e.tr.row.track_deg)]),
     },
   )
   window.addEventListener('sky-test-refresh', onTestRefresh)
@@ -815,6 +1020,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('sky-test-refresh', onTestRefresh)
   if (timer) clearInterval(timer)
   timer = null
+  if (airTimer) clearInterval(airTimer)
+  airTimer = null
   for (const t of satTimers) {
     clearTimeout(t)
     clearInterval(t)
@@ -844,9 +1051,13 @@ onBeforeUnmount(() => {
       data-sats-meo="0"
       data-sats-geo="0"
       data-frames-labels="0"
+      data-frames-air="0"
+      data-air-drawn="0"
       :data-hover-norad="hoverNorad ?? ''"
       :data-selected-norad="selection.selectedNorad ?? ''"
-      :style="{ width: `${size}px`, height: `${size}px`, left: '50%', top: '50%', transform: 'translate(-50%, -50%)', cursor: hoverNorad !== null ? 'pointer' : 'default' }"
+      :data-hover-icao="hoverIcao ?? ''"
+      :data-selected-icao="selection.selectedIcao ?? ''"
+      :style="{ width: `${size}px`, height: `${size}px`, left: '50%', top: '50%', transform: 'translate(-50%, -50%)', cursor: hoverNorad !== null || hoverIcao !== null ? 'pointer' : 'default' }"
       @pointermove="onPointerMove"
       @pointerleave="onPointerLeave"
       @click="onClick"
@@ -872,6 +1083,12 @@ onBeforeUnmount(() => {
         :data-testid="`sky-canvas-${l}`"
       />
       <canvas
+        ref="airEl"
+        class="pointer-events-none absolute inset-0"
+        :style="{ width: `${size}px`, height: `${size}px` }"
+        data-testid="sky-canvas-air"
+      />
+      <canvas
         ref="labelsEl"
         class="pointer-events-none absolute inset-0"
         :style="{ width: `${size}px`, height: `${size}px` }"
@@ -890,11 +1107,26 @@ onBeforeUnmount(() => {
         data-testid="sky-tip"
         :style="{ left: `${tip.x}px`, top: `${tip.y}px` }"
       >
-        <b>{{ tipLines.name }}</b> ({{ tip.norad }})<br>
-        Az {{ tipLines.az }} El {{ tipLines.el }} | {{ tipLines.range }} | {{ tipLines.cls }}
-        | <i class="tip-dot" :class="tipLines.ill" />{{ tipLines.illLabel }}<br>
-        TLE age {{ tipLines.age }}
+        <template v-if="airTip">
+          <b>{{ airTip.title }}</b><br>
+          Alt {{ airTip.alt }} | Range {{ airTip.range }} | Age {{ airTip.age }}
+        </template>
+        <template v-else>
+          <b>{{ tipLines.name }}</b> ({{ tip.norad }})<br>
+          Az {{ tipLines.az }} El {{ tipLines.el }} | {{ tipLines.range }} | {{ tipLines.cls }}
+          | <i class="tip-dot" :class="tipLines.ill" />{{ tipLines.illLabel }}<br>
+          TLE age {{ tipLines.age }}
+        </template>
       </div>
+    </div>
+    <!-- ADS-B chips (T5.5): the top strip of the box, clear of the title chip (above the box), the clock and the
+         astrometry pill (below it); they wrap onto a second line when the box is narrow, so they never overlap. -->
+    <div v-if="simBadge || feedDown.show" class="sky-chips">
+      <span v-if="feedDown.show" class="sky-chip sky-chip-down" data-testid="adsb-feed-down" :title="feedDown.title">ADS-B feed down</span>
+      <span
+        v-if="simBadge" class="sky-chip sky-chip-sim" data-testid="adsb-simulated"
+        title="The aircraft are simulated (adsb_interpreter feed); not real traffic"
+      >SIMULATED DATA</span>
     </div>
   </div>
 </template>
@@ -905,6 +1137,10 @@ onBeforeUnmount(() => {
   background: rgba(11, 18, 28, 0.87); border: 1px solid var(--panel-border); border-radius: 4px;
   padding: 4px 7px; font-size: 11px; line-height: 1.35; color: #cfe0f0;
 }
+.sky-chips { position: absolute; z-index: 6; top: 2px; left: 2px; right: 2px; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 4px; pointer-events: none; }
+.sky-chip { pointer-events: auto; padding: 1px 8px; border: 1px solid var(--control-border); border-radius: 10px; background: rgba(11, 18, 28, 0.87); font-size: 11px; font-weight: 700; letter-spacing: 0.03em; line-height: 16px; white-space: nowrap; }
+.sky-chip-down { color: var(--danger); border-color: var(--danger); }
+.sky-chip-sim { margin-left: auto; color: #f0b030; border-color: #f0b030; }
 .tip-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; background: #6a7a88; }
 .tip-dot.illuminated { background: #ffd24a; }
 </style>

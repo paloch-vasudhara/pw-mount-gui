@@ -91,6 +91,8 @@ export interface MountSocketHandlers {
   onConnection: (c: MountConnection) => void
   onHello: (data: Record<string, unknown>) => void
   onStatus: (data: Record<string, unknown>) => void
+  /** The 1 Hz ADS-B `aircraft` message (T5.5): sent only while aircraft exist, plus one empty frame at the end. */
+  onAircraft?: (data: Record<string, unknown>) => void
   onError: (msg: string | null) => void
   /** Every ack that arrives (including ones whose promise already timed out). */
   onAck?: (ack: CommandAck) => void
@@ -156,6 +158,9 @@ export function createMountSocket(opts: MountSocketOptions, h: MountSocketHandle
         }
         else if (msg.type === 'status') {
           h.onStatus(msg.data as Record<string, unknown>)
+        }
+        else if (msg.type === 'aircraft') {
+          h.onAircraft?.(msg.data as Record<string, unknown>)
         }
         else if (msg.type === 'ack') {
           const ack = msg as unknown as CommandAck

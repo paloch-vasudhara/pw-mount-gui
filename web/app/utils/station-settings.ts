@@ -1,4 +1,6 @@
 // Station Settings (T1.2): types, form validation and payload building (pure, unit-tested).
+import type { AdsbInfo } from '@/utils/adsb'
+import { ADSB_DEFAULT_RANGE_KM, ADSB_DEFAULT_URL, adsbTokenError, adsbUrlError } from '@/utils/adsb'
 import type { AltUnit } from '@/utils/altitude'
 
 export type AngleFmt = 'dd' | 'dms'
@@ -11,6 +13,18 @@ export interface StationSettingsDto {
   display: { lat_format: AngleFmt, lon_format: AngleFmt, alt_unit: AltUnit }
   /** T5.7: the camera URL / username / password are write-only; only whether each is set comes back. */
   cctv?: CctvSettingsDto
+  /** T5.4b: the platform read token is write-only; only whether it is set comes back. */
+  adsb?: AdsbSettingsDto
+}
+
+export interface AdsbSettingsDto {
+  enabled: boolean
+  url: string
+  range_limit_km: number
+  token_set: boolean
+  /** The gateway runs on adsb_interpreter's simulated feed (--simulated-adsb): the live fields are inactive. */
+  simulated?: boolean
+  status?: AdsbInfo
 }
 
 export interface CctvSettingsDto {
@@ -67,9 +81,17 @@ export interface SettingsForm {
   clearCctvUrl: boolean
   clearCctvUser: boolean
   clearCctvPass: boolean
+  /** T5.4b ADS-B: enable, platform URL, default range limit and the write-only read token. */
+  adsbEnabled: boolean
+  adsbUrl: string
+  adsbRangeKm: number
+  /** What the user typed in the read-token box (empty = untouched). */
+  adsbToken: string
+  adsbTokenSet: boolean
+  clearAdsbToken: boolean
 }
 
-export type FieldErrors = Partial<Record<'lat' | 'lon' | 'alt' | 'timezone' | 'limEl' | 'cameraPixelUm' | 'cctvUrl', string>>
+export type FieldErrors = Partial<Record<'lat' | 'lon' | 'alt' | 'timezone' | 'limEl' | 'cameraPixelUm' | 'cctvUrl' | 'adsbUrl' | 'adsbToken', string>>
 
 export const LIM_EL_MIN = 0
 export const LIM_EL_MAX = 90
@@ -106,6 +128,12 @@ export function formFromDto(d: StationSettingsDto): SettingsForm {
     clearCctvUrl: false,
     clearCctvUser: false,
     clearCctvPass: false,
+    adsbEnabled: d.adsb?.enabled ?? false,
+    adsbUrl: d.adsb?.url ?? ADSB_DEFAULT_URL,
+    adsbRangeKm: d.adsb?.range_limit_km ?? ADSB_DEFAULT_RANGE_KM,
+    adsbToken: '',
+    adsbTokenSet: d.adsb?.token_set ?? false,
+    clearAdsbToken: false,
   }
 }
 
@@ -141,6 +169,11 @@ export function validateForm(f: SettingsForm, zones: readonly string[]): FieldEr
   const urlErr = cctvUrlError(f.cctvUrl)
   if (urlErr) e.cctvUrl = urlErr
   else if (f.cctvEnabled && f.cctvUrl.trim() === '' && (!f.cctvUrlSet || f.clearCctvUrl)) e.cctvUrl = 'Enter the camera stream URL'
+  const adsbUrlErr = adsbUrlError(f.adsbUrl)
+  if (adsbUrlErr) e.adsbUrl = adsbUrlErr
+  else if (f.adsbEnabled && f.adsbUrl.trim() === '') e.adsbUrl = 'Enter the ADS-B platform URL'
+  const adsbTokenErr = adsbTokenError(f.adsbToken)
+  if (adsbTokenErr) e.adsbToken = adsbTokenErr
   return e
 }
 
@@ -162,6 +195,10 @@ export function buildPayload(f: SettingsForm): Record<string, unknown> {
   if (f.clearCctvUser) cctv.username = ''
   else if (f.cctvUser !== '') cctv.username = f.cctvUser
   body.cctv = cctv
+  // ADS-B: the read token is sent only when typed ("" = clear), else omitted = keep.
+  body.adsb = { enabled: f.adsbEnabled, url: f.adsbUrl.trim(), range_limit_km: f.adsbRangeKm }
+  if (f.clearAdsbToken) body.adsb_token = ''
+  else if (f.adsbToken !== '') body.adsb_token = f.adsbToken
   if (f.clearCctvPass) body.cctv_password = ''
   else if (f.cctvPass !== '') body.cctv_password = f.cctvPass
   return body
@@ -206,6 +243,7 @@ export function isDirty(f: SettingsForm, baseline: SettingsForm): boolean {
   if (f.apiKey !== '' || f.clearKey) return true
   if (f.cctvUrl !== '' || f.cctvUser !== '' || f.cctvPass !== '') return true
   if (f.clearCctvUrl || f.clearCctvUser || f.clearCctvPass) return true
+  if (f.adsbToken !== '' || f.clearAdsbToken) return true
   const num = (a: number | null, b: number | null) =>
     a === b || (a != null && b != null && Math.abs(a - b) <= EPS)
   return !(
@@ -217,6 +255,8 @@ export function isDirty(f: SettingsForm, baseline: SettingsForm): boolean {
     && f.mount === baseline.mount && f.ota === baseline.ota
     && f.astrometry === baseline.astrometry && f.satelliteDb === baseline.satelliteDb
     && f.cctvEnabled === baseline.cctvEnabled && f.cctvType === baseline.cctvType
+    && f.adsbEnabled === baseline.adsbEnabled && f.adsbUrl.trim() === baseline.adsbUrl.trim()
+    && f.adsbRangeKm === baseline.adsbRangeKm
   )
 }
 

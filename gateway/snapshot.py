@@ -185,6 +185,21 @@ class TrackInfo(BaseModel):
     ended: TrackEndedInfo | None = None
 
 
+class AdsbInfo(BaseModel):
+    """T5.4b: the ADS-B connection summary (no aircraft; those travel in the 1 Hz `aircraft`
+    message). `green` is the Q62 enable rule for the aircraft feature."""
+
+    state: str
+    green: bool
+    simulated: bool = False
+    detail: str = ""
+    delay_p50_s: float | None = None
+    delay_p95_s: float | None = None
+    counts: dict[str, int] = Field(default_factory=dict)
+    last_event_age_s: float | None = None
+    range_limit_km: int | None = None
+
+
 class MountSnapshot(BaseModel):
     seq: int
     ts_utc: str
@@ -209,6 +224,7 @@ class MountSnapshot(BaseModel):
     turn: TurnInfo | None = None  # T3.4e: null = no wrap turn running
     route: RouteInfo | None = None  # T3.5c: null = no D-SUN route running
     track: TrackInfo | None = None  # T4.2c: null = no object track (and none ended lately)
+    adsb: AdsbInfo | None = None  # T5.4b: null = no ADS-B runner attached
 
 
 def site_key(result: PollResult) -> tuple[float, float, float] | None:

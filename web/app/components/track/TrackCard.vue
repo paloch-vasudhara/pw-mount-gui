@@ -1,6 +1,9 @@
 <script setup lang="ts">
 // Track Info card (A1a/A1c, concept/Track Cards.png), read-only. Values refresh at 1 Hz from
 // /api/sky/state (polled by stores/selection.ts while an object is selected).
+// T5.5: a selected AIRCRAFT shows the A1b card instead (rows from the 1 Hz `aircraft` message, stores/aircraft.ts);
+// TRACK AIRCRAFT is present but disabled until T5.6b (utils/aircraft.ts keeps the verdict in one function).
+// The A1e strip (a tracked satellite under a selected object) is shared.
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import FlagBadge from '~/components/track/FlagBadge.vue'
 import StaleBadge from '~/components/track/StaleBadge.vue'
@@ -8,6 +11,8 @@ import { useMountStore } from '~/stores/mount'
 import { trackCardState, type ObjectTrackLike } from '~/utils/track-state'
 import { useGatewayApi } from '~/composables/useGatewayApi'
 import { useSelectionStore } from '~/stores/selection'
+import { useAircraftStore } from '~/stores/aircraft'
+import { aircraftCardValues, aircraftTrackVerdict } from '~/utils/aircraft'
 import { useSkyStore } from '~/stores/sky'
 import { SAT_CLASS_COLORS } from '~/lib/sky/theme'
 import { parseTrackVerdict, UNREACHABLE_VERDICT, type TrackVerdict } from '~/utils/track-verdict'
@@ -17,6 +22,13 @@ const base = useRuntimeConfig().app.baseURL || '/'
 const sel = useSelectionStore()
 const sky = useSkyStore()
 const mount = useMountStore()
+const air = useAircraftStore()
+
+// A1b aircraft card: the selected ICAO's latest row (null = not in view -> every value is a dash)
+const icao = computed(() => sel.selectedIcao)
+const airRow = computed(() => (icao.value === null ? null : air.get(icao.value)?.row ?? null))
+const airVals = computed(() => aircraftCardValues(airRow.value, icao.value ?? ''))
+const airVerdict = computed(() => aircraftTrackVerdict(airRow.value, air.adsb))
 
 // A1e: the main card (pinned tracked object, or the selection); the strip is the tracked A under a selected B
 const norad = computed(() => sel.cardNorad)
@@ -130,8 +142,71 @@ async function onTrack() {
 
 <template>
   <div class="wrap">
+  <div v-if="icao !== null" class="card air" data-testid="aircraft-card" :data-icao="icao">
+    <div class="head">
+      <img class="icon" :src="`${base}icons/aircraft.svg`" alt="" aria-hidden="true">
+      <div class="titles">
+        <div class="name" data-testid="aircraft-name">
+          <span :title="airVals.title">{{ airVals.title }}</span>
+        </div>
+      </div>
+      <button type="button" class="close" aria-label="Deselect" data-testid="track-close" @click="sel.deselect()">
+        &#x2715;
+      </button>
+    </div>
+    <div class="sep" />
+    <dl class="rows rows-air">
+      <dt>Latitude</dt>
+      <dd data-testid="air-lat">
+        {{ airVals.lat }}
+      </dd>
+      <dt>Longitude</dt>
+      <dd data-testid="air-lon">
+        {{ airVals.lon }}
+      </dd>
+      <dt>Altitude</dt>
+      <dd data-testid="air-alt">
+        {{ airVals.alt }}<span v-if="airVals.flag" class="chip height-flag" data-testid="air-flag" :title="airVals.flag.title">{{ airVals.flag.label }}</span>
+      </dd>
+      <dt>Range</dt>
+      <dd data-testid="air-range">
+        {{ airVals.range }}
+      </dd>
+      <dt>Azimuth</dt>
+      <dd data-testid="air-az">
+        {{ airVals.az }}
+      </dd>
+      <dt>Elevation</dt>
+      <dd data-testid="air-el">
+        {{ airVals.el }}
+      </dd>
+      <dt>Ground speed</dt>
+      <dd data-testid="air-gs">
+        {{ airVals.gs }}
+      </dd>
+      <dt>Track</dt>
+      <dd data-testid="air-track">
+        {{ airVals.track }}
+      </dd>
+      <dt>Vertical rate</dt>
+      <dd data-testid="air-vrate">
+        {{ airVals.vrate }}
+      </dd>
+      <dt>Data age</dt>
+      <dd data-testid="air-age">
+        {{ airVals.age }}
+      </dd>
+    </dl>
+    <span class="track-wrap" :title="airVerdict.reason ?? undefined" :class="{ on: airVerdict.enabled }">
+      <button
+        type="button" class="track-btn" :class="{ on: airVerdict.enabled }" :disabled="!airVerdict.enabled"
+        :data-enabled="airVerdict.enabled ? 'true' : 'false'" data-testid="track-aircraft"
+      >TRACK AIRCRAFT</button>
+    </span>
+    <div v-if="airVerdict.reason" class="track-reason" :title="airVerdict.reason" data-testid="aircraft-reason">{{ airVerdict.reason }}</div>
+  </div>
   <div
-    v-if="info" class="card" :class="{ refocus: refocusable }" data-testid="track-card"
+    v-else-if="info" class="card" :class="{ refocus: refocusable }" data-testid="track-card"
     :data-refocus="refocusable ? 'true' : 'false'" :title="refocusable ? 'Show the tracked object in the Sky Viewer' : undefined"
     @click="onCardClick"
   >
@@ -233,6 +308,13 @@ async function onTrack() {
 }
 .rows dt { color: var(--foreground); }
 .rows dd { margin: 0; font-weight: 700; color: var(--foreground); font-variant-numeric: tabular-nums; }
+/* A1b aircraft card: ten label/value pairs in two columns so it fits the short Track Info panel; no icon indent (the width is tight). */
+.card.air { flex: 0 1 auto; min-height: 0; overflow: hidden auto; }
+.rows-air { grid-template-columns: max-content minmax(0, 1fr) max-content minmax(0, 1fr); column-gap: 0.6em; padding-left: 0; font-size: 0.92em; }
+.rows-air dt:nth-of-type(odd) { margin-right: 0; }
+.rows-air dt:nth-of-type(even) { margin-left: 0.8em; }
+.rows-air dd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.height-flag { margin-left: 0.5em; background: #f5a623; font-size: 0.75em; }
 .dot { display: inline-block; width: 0.75em; height: 0.75em; border-radius: 50%; margin-right: 0.45em; background: #888; }
 .dot.illuminated { background: #ffc233; }
 .dot.umbra, .dot.below { background: #8a8a8a; }

@@ -7,12 +7,16 @@
 // mode="pick" (T5.1c, Pass Analysis SEARCH): the same search + table as a satellite picker. Title
 // SELECT SATELLITE, button SELECT TARGET, no gateway check and no status line; picking (button,
 // double-click, Enter) emits `picked(row)` and closes. Track mode is unchanged.
+// T5.5: the AIRCRAFT tab (track mode only) is enabled while the ADS-B connection is green; its pane is
+// AircraftTargetPane.vue. Otherwise the tab is disabled with the reason as its tooltip.
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { SelectContent, SelectItem, SelectItemText, SelectPortal, SelectRoot, SelectTrigger, SelectViewport } from 'reka-ui'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
+import AircraftTargetPane from '~/components/track/AircraftTargetPane.vue'
 import FlagBadge from '~/components/track/FlagBadge.vue'
 import StaleBadge from '~/components/track/StaleBadge.vue'
 import { useGatewayApi } from '~/composables/useGatewayApi'
+import { useAircraftStore } from '~/stores/aircraft'
 import { useMountStore } from '~/stores/mount'
 import { useSelectionStore } from '~/stores/selection'
 import type { ClockMode } from '~/utils/sky-clock'
@@ -22,6 +26,7 @@ import {
   exactFirst, moveSelection, nextSort, sortRows, targetStatus, type SatRow, type SortKey, type SortState,
 } from '~/utils/track-target'
 import { ownerName } from '~/utils/owner-names'
+import { aircraftFilterState } from '~/utils/aircraft'
 import { parseTrackVerdict, UNREACHABLE_VERDICT, type TrackVerdict } from '~/utils/track-verdict'
 
 const props = withDefaults(defineProps<{ mode?: 'track' | 'pick' }>(), { mode: 'track' })
@@ -31,11 +36,20 @@ const isPick = computed(() => props.mode === 'pick')
 
 const mount = useMountStore()
 const sel = useSelectionStore()
+const air = useAircraftStore()
 const api = useGatewayApi()
 const base = useRuntimeConfig().app.baseURL || '/'
 
 const FETCH_TIMEOUT_MS = 8_000
 const CLOCK_KEY = 'pw-mount.sky.clockMode' // same key as SkyClock.vue
+
+// AIRCRAFT tab: enabled on a green ADS-B connection (never in pick mode, which is a satellite picker)
+const tab = ref<'satellite' | 'aircraft'>('satellite')
+const airTab = computed(() => {
+  const st = aircraftFilterState(air.adsb)
+  return isPick.value ? { enabled: false, reason: 'Satellites only' } : st
+})
+watch(() => airTab.value.enabled, (on) => { if (!on) tab.value = 'satellite' })
 
 const q = ref('')
 const orbit = ref(ANY)
@@ -193,6 +207,7 @@ function scrollToSelected(): void {
 }
 
 function onKeydown(e: KeyboardEvent): void {
+  if (tab.value === 'aircraft') return // the aircraft pane has its own list; no Enter / arrow actions
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
     e.preventDefault()
     const n = moveSelection(sorted.value.map(r => r.norad), selected.value, e.key === 'ArrowDown' ? 1 : -1)
@@ -217,6 +232,7 @@ function onDoubleClick(n: number): void {
 watch(open, (o) => {
   stopVerdict()
   searchSeq++
+  tab.value = 'satellite'
   if (!o) return
   try {
     const v = localStorage.getItem(CLOCK_KEY)
@@ -315,14 +331,23 @@ const orbitLabel = computed(() => ORBITS.find(o => o.value === orbit.value)?.lab
 
       <div class="tt-body">
         <div class="tt-tabs" role="tablist">
-          <button type="button" role="tab" aria-selected="true" class="tt-tab tt-tab-on" data-testid="tt-tab-satellite">
+          <button
+            type="button" role="tab" :aria-selected="tab === 'satellite'" class="tt-tab" :class="{ 'tt-tab-on': tab === 'satellite' }"
+            data-testid="tt-tab-satellite" @click="tab = 'satellite'"
+          >
             SATELLITE
           </button>
-          <button type="button" role="tab" aria-selected="false" class="tt-tab" disabled title="No ADS-B source configured" data-testid="tt-tab-aircraft">
+          <button
+            type="button" role="tab" :aria-selected="tab === 'aircraft'" class="tt-tab" :class="{ 'tt-tab-on': tab === 'aircraft' }"
+            :disabled="!airTab.enabled" :title="airTab.reason ?? undefined" data-testid="tt-tab-aircraft" @click="tab = 'aircraft'"
+          >
             AIRCRAFT
           </button>
         </div>
 
+        <AircraftTargetPane v-if="tab === 'aircraft'" />
+
+        <template v-else>
         <div class="tt-filters">
           <input
             v-model="q" class="ov-dms-box tt-search" type="text" placeholder="Search name or NORAD ID" data-testid="tt-search"
@@ -441,6 +466,7 @@ const orbitLabel = computed(() => ORBITS.find(o => o.value === orbit.value)?.lab
         <p v-if="!isPick" class="tt-status" :class="status.tone === 'danger' ? 'tt-status-err' : ''" data-testid="tt-status" role="status">
           {{ status.text }}
         </p>
+        </template>
       </div>
     </DialogContent>
   </Dialog>

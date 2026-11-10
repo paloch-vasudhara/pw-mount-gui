@@ -1,4 +1,5 @@
 // Mount Status display rules (T1.3 / logic sheet A4-i). Pure functions, unit-tested.
+import type { AdsbInfo } from './adsb'
 
 export const EM_DASH = '—'
 const MINUS = '−'
@@ -23,6 +24,8 @@ export interface MountSnapshotLike {
   sun_distance_deg?: number | null
   hour_angle_h?: number | null
   limits?: { sun_keepout_deg?: number | null } | null
+  /** T5.4b: the ADS-B connection summary (green = the aircraft features are usable). */
+  adsb?: AdsbInfo | null
 }
 
 export interface DisplayField {

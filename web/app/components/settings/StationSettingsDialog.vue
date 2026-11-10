@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // Station Settings modal (A2b-iii, concept/Settings.png). Cancel / X discards; Save (enabled only when something changed) checks the proposed site
 // against PWI4 first, then PUTs. The API key is write-only: the box is always empty on open, "set" is only a placeholder.
-// T5.7: the CCTV url / username / password are write-only the same way. The body scrolls inside the dialog (the title and
+// T5.7: the CCTV url / username / password are write-only the same way. T5.4b: so is the ADS-B read token. The body scrolls inside the dialog (the title and
 // the CANCEL / SAVE bar stay put).
 import { computed, ref, watch } from 'vue'
 import AltitudeField from '@/components/widgets/AltitudeField.vue'
@@ -14,6 +14,7 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { GatewayError, useGatewayApi } from '@/composables/useGatewayApi'
 import { useCctvStore } from '@/stores/cctv'
+import { ADSB_RANGE_LIMITS_KM, adsbStatusLine, SIMULATED_SOURCE, type AdsbInfo } from '@/utils/adsb'
 import {
   buildPayload, buildSiteCheckBody, formFromDto, isDirty, LIM_EL_MAX, LIM_EL_MIN, PIXEL_UM_MAX, PIXEL_UM_MIN, pcTimeZone, siteWarning, timeZoneList, validateForm,
   type SettingsForm, type SettingsResponse, type SiteCheckDto,
@@ -29,6 +30,8 @@ const form = ref<SettingsForm | null>(null)
 const baseline = ref<SettingsForm | null>(null)
 const apiKeySet = ref(false)
 const cctvStatus = ref('Not configured')
+const adsbStatus = ref<AdsbInfo | null>(null)
+const adsbSimulated = ref(false)
 const loading = ref(false)
 const saving = ref(false)
 const loadError = ref<string | null>(null)
@@ -55,6 +58,31 @@ const cctvKind = computed({
   get: () => form.value?.cctvType ?? 'mjpeg',
   set: (v: string) => { if (form.value) form.value.cctvType = v === 'hls' ? 'hls' : 'mjpeg' },
 })
+
+const adsbOn = computed({
+  get: () => (form.value?.adsbEnabled ? 'on' : 'off'),
+  set: (v: string) => { if (form.value) form.value.adsbEnabled = v === 'on' },
+})
+const RANGE_OPTIONS = ADSB_RANGE_LIMITS_KM.map(v => ({ value: String(v), label: `${v} km` }))
+const adsbRange = computed({
+  get: () => String(form.value?.adsbRangeKm ?? ''),
+  set: (v: string) => { if (form.value) form.value.adsbRangeKm = Number(v) },
+})
+const adsbStatusText = computed(() => adsbStatusLine(adsbStatus.value))
+const adsbTokenPlaceholder = computed(() => {
+  if (form.value?.clearAdsbToken) return 'token will be cleared'
+  return form.value?.adsbTokenSet ? '•••• set' : 'not set'
+})
+function adsbTokenInput(v: string): void {
+  if (!form.value) return
+  form.value.adsbToken = v
+  if (v !== '') form.value.clearAdsbToken = false
+}
+function adsbTokenClear(): void {
+  if (!form.value) return
+  form.value.adsbToken = ''
+  form.value.clearAdsbToken = true
+}
 
 type CctvSecret = 'Url' | 'User' | 'Pass'
 function cctvPlaceholder(which: CctvSecret): string {
@@ -95,6 +123,8 @@ async function load(): Promise<void> {
     form.value = f
     apiKeySet.value = d.api_key_set
     cctvStatus.value = d.cctv?.status ?? 'Not configured'
+    adsbStatus.value = d.adsb?.status ?? null
+    adsbSimulated.value = d.adsb?.simulated ?? false
   }
   catch (e) {
     loadError.value = e instanceof GatewayError
@@ -310,9 +340,64 @@ const SATDB = [{ value: 'DELV Aerospace', label: 'DELV Aerospace' }]
             </p>
           </fieldset>
 
-          <fieldset class="ss-group ss-ads" disabled>
+          <fieldset class="ss-group ss-ads" data-testid="ss-adsb">
             <legend>ADS-B</legend>
-            <p>Section awaiting protocol template</p>
+            <div v-if="adsbSimulated" class="form-row" data-testid="ss-adsb-sim-row">
+              <label class="ss-label">Source</label>
+              <span class="ss-sim-wrap">
+                <span class="ss-sim" data-testid="ss-adsb-simulated">SIMULATED</span>
+                <span class="ss-sim-src" data-testid="ss-adsb-source">{{ SIMULATED_SOURCE }}</span>
+              </span>
+            </div>
+            <div class="form-row">
+              <label class="ss-label">Enable</label>
+              <SegToggle
+                v-model="adsbOn" :options="ON_OFF" seg-class="ss-seg" :disabled="adsbSimulated"
+                data-testid="ss-adsb-enable"
+              />
+            </div>
+            <div class="form-row">
+              <label class="ss-label">URL</label>
+              <span class="ss-key-wrap">
+                <input
+                  v-model="form.adsbUrl" class="ov-dms-box ss-key ss-adsb-url" type="text" autocomplete="off"
+                  spellcheck="false" :disabled="adsbSimulated" data-testid="ss-adsb-url"
+                >
+              </span>
+            </div>
+            <p v-if="errors.adsbUrl" class="ss-err" data-testid="ss-adsb-url-err">
+              {{ errors.adsbUrl }}
+            </p>
+            <div class="form-row">
+              <label class="ss-label">Read token</label>
+              <span class="ss-key-wrap">
+                <input
+                  class="ov-dms-box ss-key" type="password" autocomplete="new-password" spellcheck="false"
+                  :value="form.adsbToken" :placeholder="adsbTokenPlaceholder" :disabled="adsbSimulated"
+                  data-testid="ss-adsb-token" @input="adsbTokenInput(($event.target as HTMLInputElement).value)"
+                >
+                <button
+                  v-if="form.adsbTokenSet && !form.clearAdsbToken && !form.adsbToken && !adsbSimulated" type="button"
+                  class="ss-link ss-clearkey" data-testid="ss-adsb-clear-token" @click="adsbTokenClear"
+                >
+                  clear
+                </button>
+              </span>
+            </div>
+            <p v-if="errors.adsbToken" class="ss-err" data-testid="ss-adsb-token-err">
+              {{ errors.adsbToken }}
+            </p>
+            <div class="form-row">
+              <label class="ss-label" title="Default range limit for aircraft">Range limit</label>
+              <FormatSelect
+                v-model="adsbRange" :options="RANGE_OPTIONS" :width="SS_SPAN" title="Default aircraft range limit"
+                data-testid="ss-adsb-range"
+              />
+            </div>
+            <div class="form-row">
+              <label class="ss-label">Status</label>
+              <span class="ss-cctv-status" data-testid="ss-adsb-status" :title="adsbStatusText">{{ adsbStatusText }}</span>
+            </div>
           </fieldset>
 
           <fieldset class="ss-group ss-cctv" data-testid="ss-cctv">
@@ -449,8 +534,11 @@ const SATDB = [{ value: 'DELV Aerospace', label: 'DELV Aerospace' }]
 @media (max-width: 820px) { .station-dialog .ss-grid { grid-template-columns: minmax(0, 1fr); } }
 .station-dialog .ss-link { background: none; border: 0; padding: 0; color: var(--label-slate); font-size: 12px; text-decoration: underline; cursor: pointer; }
 .station-dialog .ss-link:hover { color: var(--foreground); }
-.station-dialog .ss-ads { display: flex; align-items: center; justify-content: center; min-height: 100px; }
-.station-dialog .ss-ads p { color: var(--muted-foreground); font-size: 14px; }
+.station-dialog .ss-ads .ss-adsb-url { text-align: left; }
+.station-dialog .ss-ads input:disabled { opacity: 0.5; }
+.station-dialog .ss-sim-wrap { display: flex; align-items: baseline; gap: 8px; flex: 1 1 auto; min-width: 0; }
+.station-dialog .ss-sim { font-size: 12px; font-weight: 700; letter-spacing: 0.04em; color: #e6b84f; border: 1px solid #c9962b; padding: 1px 6px; }
+.station-dialog .ss-sim-src { font-size: 12px; color: var(--muted-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .station-dialog .ss-err { margin: -4px 0 6px; color: var(--danger); font-size: 12px; }
 .station-dialog .ss-warn { margin: 12px 0 0; padding: 8px 10px; border: 1px solid #c9962b; background: rgba(201, 150, 43, 0.12); color: #e6b84f; font-size: 13px; }
 .station-dialog .ss-save-err { margin-top: 10px; }

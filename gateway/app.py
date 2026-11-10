@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 from . import cctv as cctv_mod
+from .adsb import AdsbRunner
 from .audit import AuditLog
 from .commands import CommandError, validate_command
 from .config import Settings
@@ -34,6 +35,8 @@ from .settings import (
     SecretStore,
     SettingsStore,
     SettingsUpdate,
+    adsb_token_error,
+    adsb_url_error,
     cctv_url_error,
     compute_site_check,
 )
@@ -94,13 +97,31 @@ def create_app(
     analysis_transport: httpx.AsyncBaseTransport | None = None,
     cctv_transport: httpx.AsyncBaseTransport | None = None,
     cctv_secrets: SecretStore | None = None,
+    adsb_secrets: SecretStore | None = None,
+    adsb_simulated: bool | None = None,
+    adsb_feed_url: str | None = None,
+    adsb_client_factory: Any = None,
+    adsb_loader: Any = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     token = settings.token or new_token()
     hub = Hub()
     ephem = Ephem(settings.ephemeris)
-    store = SettingsStore(settings.settings_path, secrets, cctv_secrets)
+    store = SettingsStore(settings.settings_path, secrets, cctv_secrets, adsb_secrets)
     poller = Poller(settings, hub, ephem, transport, store)
+    # T5.4b: its own tasks; a failing source never touches the poller / hub / satellite tracks.
+    adsb_kw: dict[str, Any] = {}
+    if adsb_loader is not None:
+        adsb_kw["loader"] = adsb_loader
+    adsb = AdsbRunner(
+        store,
+        hub,
+        simulated=adsb_simulated,
+        feed_url=adsb_feed_url,
+        client_factory=adsb_client_factory,
+        **adsb_kw,
+    )
+    poller.adsb_provider = adsb.block
     audit = AuditLog(settings.audit_dir)
     control = ControlService(Pwi4Writer(settings.pwi4_url, transport), poller, hub, audit)
     safety = SafetyEngine.from_env(poller, store, ephem, audit)
@@ -170,9 +191,11 @@ def create_app(
         control.start()
         await control.startup()
         monitor.start()
+        await adsb.start()
         try:
             yield
         finally:
+            await adsb.stop()
             await monitor.stop()
             tle_source.close()
             await app.state.cctv.aclose()
@@ -194,6 +217,7 @@ def create_app(
     app.state.monitor = monitor
     app.state.audit = audit
     app.state.track = track
+    app.state.adsb = adsb
 
     def require_auth(request: Request) -> None:
         """REST guard: per-launch token header + Origin / Sec-Fetch-Site (Host: middleware)."""
@@ -213,6 +237,8 @@ def create_app(
         """The settings for the web: the CCTV url / username / password never included."""
         d = store.public()
         d["cctv"]["status"] = cctv.status_line()
+        d["adsb"]["simulated"] = adsb.simulated
+        d["adsb"]["status"] = adsb.block()
         return d
 
     @app.get("/api/mount/health")
@@ -247,12 +273,19 @@ def create_app(
             why = cctv_url_error(update.cctv.url)  # never echoes the URL (pydantic would)
             if why:
                 raise HTTPException(status_code=422, detail=why)
+        why = adsb_url_error(update.adsb.url)
+        if why:
+            raise HTTPException(status_code=422, detail=why)
+        why = adsb_token_error(update.adsb_token or "")
+        if why:
+            raise HTTPException(status_code=422, detail=why)
         try:
-            store.save(update, update.api_key, update.cctv_password)
+            store.save(update, update.api_key, update.cctv_password, update.adsb_token)
         except Exception as exc:  # keyring / disk failure: never echo details (may touch a key)
             raise HTTPException(
                 status_code=503, detail=f"could not save ({type(exc).__name__})"
             ) from None
+        await adsb.apply()  # a save restarts the ADS-B runner (new URL / token / site / range)
         await cctv.config_changed()  # new camera settings: drop the old client / streams / result
         await poller.refresh_ephem(force=True)  # apply live: Sun/Moon for the new site now
         return JSONResponse(with_check(public_settings()), headers={"Cache-Control": "no-store"})
@@ -453,8 +486,14 @@ def create_app(
         async def sender() -> None:
             await send(json.dumps(hello))
             while True:
-                msg = await client.queue.get()
-                await send(with_control(msg, control.control_for(client.id)))
+                await client.wake.wait()
+                client.wake.clear()
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    msg = client.queue.get_nowait()
+                    await send(with_control(msg, control.control_for(client.id)))
+                aux = client.take_aux()  # the 1 Hz aircraft message (T5.4b), after the status
+                if aux is not None:
+                    await send(aux)
 
         async def run_command(raw: str) -> None:
             try:

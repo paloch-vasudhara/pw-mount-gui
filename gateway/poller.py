@@ -21,6 +21,7 @@ from .hub import Hub
 from .pwi4_io import PollResult, fetch_status, new_client
 from .settings import SettingsStore, compute_site_check
 from .snapshot import (
+    AdsbInfo,
     HomedInfo,
     Limits,
     MountSnapshot,
@@ -84,6 +85,7 @@ class Poller:
         self.turn_provider: Callable[[], Any] = lambda: None
         self.route_provider: Callable[[], Any] = lambda: None  # T3.5c: the D-SUN route
         self.track_provider: Callable[[], Any] = lambda: None  # T4.2c: the object track
+        self.adsb_provider: Callable[[], Any] = lambda: None  # T5.4b: the ADS-B block (cached)
 
     async def fetch_once(self, now_mono: float | None = None) -> PollResult:
         if self._client is None:
@@ -179,6 +181,11 @@ class Poller:
         )
         if snap.homed is not None and snap.homed.reason == "stalled" and snap.state == "STOPPED":
             snap.state_reason = self.stall_message_provider()
+        try:
+            block = self.adsb_provider()
+            snap.adsb = None if block is None else AdsbInfo(**block)
+        except Exception:  # the ADS-B side never costs a status frame
+            snap.adsb = None
         self.latest = snap
         self.hub.publish(envelope(snap))
         return snap

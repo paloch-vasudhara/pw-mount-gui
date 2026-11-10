@@ -1,4 +1,4 @@
-// Selected satellite (A3a): shared by the Sky Viewer (white ring, focus dim) and the Track Info
+// Selected object (A3a; a satellite by NORAD or, T5.5, an aircraft by ICAO, never both): shared by the Sky Viewer (white ring, focus dim) and the Track Info
 // card. The selection is keyed by NORAD, so it survives chunk refreshes; it stays when the object's
 // layer is hidden or the object sets (the chart just draws no ring; the card stays).
 // While something is selected the live state (az/el/range/illumination) is polled at 1 Hz from
@@ -15,6 +15,8 @@ const POLL_MS = 1000
 export const useSelectionStore = defineStore('selection', () => {
   const sky = useSkyStore()
   const selectedNorad = ref<number | null>(null)
+  // T5.5: ONE selected object at a time, shared by satellites and aircraft; the aircraft one is keyed by ICAO.
+  const selectedIcao = ref<string | null>(null)
   /** Latest state for the selected object (null until the first answer). */
   const state = shallowRef<SkyState | null>(null)
   let timer: ReturnType<typeof setInterval> | null = null
@@ -30,7 +32,7 @@ export const useSelectionStore = defineStore('selection', () => {
   // selection). The state poll follows it.
   const mount = useMountStore()
   const panel = computed(() => trackPanel(
-    selectedNorad.value, (mount.snapshot?.track ?? null) as ObjectTrackLike | null, mount.now / 1000,
+    selectedNorad.value, (mount.snapshot?.track ?? null) as ObjectTrackLike | null, mount.now / 1000, selectedIcao.value !== null,
   ))
   const cardNorad = computed(() => panel.value.main?.norad ?? null)
 
@@ -46,11 +48,18 @@ export const useSelectionStore = defineStore('selection', () => {
   }, { immediate: true })
 
   function select(norad: number) {
+    selectedIcao.value = null
     selectedNorad.value = norad
+  }
+
+  function selectAircraft(icao: string) {
+    selectedNorad.value = null
+    selectedIcao.value = icao
   }
 
   function deselect() {
     selectedNorad.value = null
+    selectedIcao.value = null
   }
 
   /** Every successful track_object (card, modal, Pass Analysis) brings up the tracked object's card. */
@@ -58,5 +67,5 @@ export const useSelectionStore = defineStore('selection', () => {
     select(norad)
   }
 
-  return { selectedNorad, cardNorad, panel, state, select, deselect, afterTrackStarted }
+  return { selectedNorad, selectedIcao, cardNorad, panel, state, select, selectAircraft, deselect, afterTrackStarted }
 })

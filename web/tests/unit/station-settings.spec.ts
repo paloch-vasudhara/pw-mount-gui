@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import StationSettingsDialog from '../../app/components/settings/StationSettingsDialog.vue'
+import { adsbStatusLine } from '../../app/utils/adsb'
 import {
   buildPayload, buildSiteCheckBody, formFromDto, isDirty, siteWarning, validateForm,
   type SettingsResponse, type StationSettingsDto,
@@ -18,6 +19,10 @@ const DTO: StationSettingsDto = {
   providers: { astrometry: 'astrometry.net', satellite_db: 'DELV Aerospace' },
   display: { lat_format: 'dd', lon_format: 'dd', alt_unit: 'm' },
   cctv: { enabled: false, type: 'mjpeg', url_set: false, username_set: false, password_set: false, configured: false, status: 'Not configured' },
+  adsb: {
+    enabled: false, url: 'wss://10.22.123.68/api/v1/ws', range_limit_km: 100, token_set: false, simulated: false,
+    status: { state: 'disabled', green: false, simulated: false, detail: 'ADS-B is switched off in Settings' },
+  },
 }
 
 describe('station-settings utils', () => {
@@ -64,8 +69,12 @@ describe('station-settings utils', () => {
   it('payload shape matches the gateway schema', () => {
     const p = buildPayload(formFromDto(DTO))
     // the CCTV block on the wire is the writable part only (url / username / password are write-only)
-    const { cctv: _status, ...rest } = DTO
-    expect(p).toEqual({ ...rest, cctv: { enabled: false, type: 'mjpeg' } })
+    const { cctv: _status, adsb: _adsb, ...rest } = DTO
+    expect(p).toEqual({
+      ...rest,
+      cctv: { enabled: false, type: 'mjpeg' },
+      adsb: { enabled: false, url: 'wss://10.22.123.68/api/v1/ws', range_limit_km: 100 },
+    })
   })
 
   it('CCTV url / username / password are sent only when typed or cleared', () => {
@@ -132,6 +141,76 @@ describe('station-settings utils', () => {
     expect(w).toContain('-0.5618')
     expect(w).toContain('+0.8983')
     expect(w).toContain('+28.8 m')
+  })
+})
+
+describe('ADS-B settings (T5.4b)', () => {
+  const adsbDto = (over: Record<string, unknown> = {}): StationSettingsDto => ({
+    ...DTO, adsb: { ...DTO.adsb!, ...over },
+  })
+
+  it('form defaults, from the DTO and from an old gateway without the block', () => {
+    const f = formFromDto(DTO)
+    expect(f).toMatchObject({ adsbEnabled: false, adsbUrl: 'wss://10.22.123.68/api/v1/ws', adsbRangeKm: 100, adsbToken: '', adsbTokenSet: false })
+    const { adsb: _a, ...old } = DTO
+    expect(formFromDto(old)).toMatchObject({ adsbEnabled: false, adsbRangeKm: 100, adsbUrl: 'wss://10.22.123.68/api/v1/ws' })
+    expect(formFromDto(adsbDto({ enabled: true, range_limit_km: 50, token_set: true }))).toMatchObject({ adsbEnabled: true, adsbRangeKm: 50, adsbTokenSet: true })
+  })
+
+  it('the URL must be wss://, without a login, query or fragment; enabled needs one', () => {
+    const f = formFromDto(DTO)
+    for (const bad of ['https://h/ws', 'ws://h/ws', 'h/ws', 'wss://u:p@h/ws', 'wss://h/ws?token=x', 'wss://h/ws#a', 'wss://h/a b']) {
+      f.adsbUrl = bad
+      expect(validateForm(f, ZONES).adsbUrl, bad).toBeTruthy()
+    }
+    f.adsbUrl = 'wss://10.22.123.99/api/v1/ws'
+    expect(validateForm(f, ZONES)).toEqual({})
+    f.adsbUrl = ''
+    expect(validateForm(f, ZONES).adsbUrl).toBeUndefined() // disabled + empty is allowed
+    f.adsbEnabled = true
+    expect(validateForm(f, ZONES).adsbUrl).toBeTruthy()
+  })
+
+  it('a pasted token with spaces is refused', () => {
+    const f = formFromDto(DTO)
+    f.adsbToken = 'ab cd'
+    expect(validateForm(f, ZONES).adsbToken).toBeTruthy()
+    f.adsbToken = 'abcd'
+    expect(validateForm(f, ZONES).adsbToken).toBeUndefined()
+  })
+
+  it('the token is on the wire only when typed or cleared; the block never carries it', () => {
+    const f = formFromDto(adsbDto({ enabled: true, token_set: true }))
+    expect('adsb_token' in buildPayload(f)).toBe(false)
+    expect(buildPayload(f).adsb).toEqual({ enabled: true, url: 'wss://10.22.123.68/api/v1/ws', range_limit_km: 100 })
+    f.adsbToken = 'TOK-1'
+    expect(buildPayload(f).adsb_token).toBe('TOK-1')
+    expect(JSON.stringify(buildPayload(f).adsb)).not.toContain('TOK-1')
+    f.adsbToken = ''
+    f.clearAdsbToken = true
+    expect(buildPayload(f).adsb_token).toBe('')
+  })
+
+  it('enable, URL, range, a typed token and a cleared token each make the form dirty', () => {
+    const base = formFromDto(DTO)
+    const edit = (fn: (f: ReturnType<typeof formFromDto>) => void) => {
+      const f = formFromDto(DTO)
+      fn(f)
+      return isDirty(f, base)
+    }
+    expect(edit((f) => { f.adsbEnabled = true })).toBe(true)
+    expect(edit((f) => { f.adsbUrl = 'wss://other/ws' })).toBe(true)
+    expect(edit((f) => { f.adsbRangeKm = 200 })).toBe(true)
+    expect(edit((f) => { f.adsbToken = 'x' })).toBe(true)
+    expect(edit((f) => { f.clearAdsbToken = true })).toBe(true)
+    expect(edit((f) => { f.adsbUrl = ` ${f.adsbUrl} ` })).toBe(false)
+  })
+
+  it('status line: reason when not green; age and delay when green', () => {
+    expect(adsbStatusLine(null)).toBe('Not available')
+    expect(adsbStatusLine({ state: 'auth_failed', green: false, simulated: false, detail: 'ADS-B token rejected', last_event_age_s: 3, delay_p50_s: 0.3 })).toBe('ADS-B token rejected')
+    expect(adsbStatusLine({ state: 'connected', green: true, simulated: false, detail: 'Connected', last_event_age_s: 2.14, delay_p50_s: 0.26 })).toBe('Connected · last message 2.1 s ago · delay p50 0.26 s')
+    expect(adsbStatusLine({ state: 'simulated', green: true, simulated: true, detail: '' })).toBe('simulated')
   })
 })
 
@@ -236,7 +315,8 @@ describe('StationSettingsDialog', () => {
     expect(q('ss-location')).not.toBeNull()
     expect(q('ss-providers')).not.toBeNull()
     expect(q('ss-hardware')).not.toBeNull()
-    expect(document.body.textContent).toContain('Section awaiting protocol template')
+    expect(q('ss-adsb')).not.toBeNull()
+    expect(document.body.textContent).not.toContain('Section awaiting protocol template')
     const get = calls.find(c => c.url === '/api/mount/settings')!
     expect(get.headers!['X-Mount-Token']).toBe('tok')
     w.unmount()
@@ -413,6 +493,54 @@ describe('StationSettingsDialog', () => {
     expect(q('ss-cctv-url-err')).not.toBeNull()
     expect((q('ss-save') as HTMLButtonElement).disabled).toBe(true)
     w.unmount()
+  })
+
+  it('ADS-B: the group shows the status line; the token is typed once, sent once, never rendered back', async () => {
+    const w = await openDialog()
+    expect((q('ss-adsb-status') as HTMLElement).textContent).toContain('switched off')
+    expect(q('ss-adsb-simulated')).toBeNull()
+    const url = q('ss-adsb-url') as HTMLInputElement
+    expect(url.value).toBe('wss://10.22.123.68/api/v1/ws')
+    expect(url.disabled).toBe(false)
+    const tok = q('ss-adsb-token') as HTMLInputElement
+    tok.value = 'PLATFORM-TOK'
+    tok.dispatchEvent(new Event('input'))
+    await flushPromises()
+    ;(q('ss-save') as HTMLButtonElement).click()
+    await flushPromises()
+    const body = JSON.parse(calls.find(c => c.method === 'PUT')!.body!)
+    expect(body.adsb_token).toBe('PLATFORM-TOK')
+    expect(body.adsb).toEqual({ enabled: false, url: 'wss://10.22.123.68/api/v1/ws', range_limit_km: 100 })
+    expect(document.body.innerHTML).not.toContain('PLATFORM-TOK')
+    w.unmount()
+  })
+
+  it('ADS-B: a bad URL blocks Save and shows the reason', async () => {
+    const w = await openDialog()
+    const url = q('ss-adsb-url') as HTMLInputElement
+    url.value = 'https://10.22.123.68/api/v1/ws'
+    url.dispatchEvent(new Event('input'))
+    await flushPromises()
+    expect(q('ss-adsb-url-err')).not.toBeNull()
+    expect((q('ss-save') as HTMLButtonElement).disabled).toBe(true)
+    w.unmount()
+  })
+
+  it('ADS-B: simulated mode shows SIMULATED with the source and makes the live fields inactive', async () => {
+    const orig = DTO.adsb
+    DTO.adsb = {
+      ...DTO.adsb!, simulated: true, token_set: true,
+      status: { state: 'simulated', green: true, simulated: true, detail: 'Simulated aircraft (adsb_interpreter feed 8500)', last_event_age_s: 0.4 },
+    }
+    const w = await openDialog()
+    expect((q('ss-adsb-simulated') as HTMLElement).textContent).toBe('SIMULATED')
+    expect((q('ss-adsb-source') as HTMLElement).textContent).toContain('adsb_interpreter feed 8500')
+    expect((q('ss-adsb-url') as HTMLInputElement).disabled).toBe(true)
+    expect((q('ss-adsb-token') as HTMLInputElement).disabled).toBe(true)
+    expect(q('ss-adsb-clear-token')).toBeNull()
+    expect((q('ss-adsb-status') as HTMLElement).textContent).toContain('Simulated aircraft')
+    w.unmount()
+    DTO.adsb = orig
   })
 
   it('Cancel closes without a PUT', async () => {

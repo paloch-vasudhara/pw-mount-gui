@@ -15,7 +15,15 @@ def main() -> None:
         type=int,
         default=int(os.environ.get("PW_GATEWAY_PORT", DEFAULT_PORT)),
     )
+    parser.add_argument(
+        "--simulated-adsb",
+        action="store_true",
+        help="read aircraft from adsb_interpreter's simulated feed (PW_ADSB_FEED_URL, default "
+        "http://127.0.0.1:8500) instead of the SIP AERO platform (validation only)",
+    )
     args = parser.parse_args()
+    if args.simulated_adsb:
+        os.environ["PW_ADSB_SIMULATE"] = "1"
     # Host/Origin allow-lists derive from the port: set it before the app module loads.
     os.environ["PW_GATEWAY_PORT"] = str(args.port)
     # Always bind loopback only.

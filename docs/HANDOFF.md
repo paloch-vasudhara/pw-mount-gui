@@ -1,19 +1,37 @@
-# Session handoff — updated 2026-11-09 end (T5.2f + T5.7 built; T5.7 browser check owed)
+# Session handoff — updated 2026-11-10 (T5.4b + T5.5 done; next T5.6b aircraft cueing)
 
 Read this first, then `docs/BUILD_PLAN.md` (§7 tracker + **resume point**, §6 task specs, §8 logs/findings), then `docs/logic_sheet.txt` as needed.
 
 ## START HERE (after compaction / next session)
 
 1. **First: `git log` / `git status`, and the file mtimes vs this handoff** (a worker's lingering task once rewrote files after a handoff).
-2. **Done 11-09** (the user commits; see BUILD_PLAN section 8):
-   - **T5.2f** astrometry: the Image source toggle (Station / Other, auto from FITS optics), no scale failure, a Use / Discard review in the pill + the IOD row. Browser-checked. **The user tests it with real other-setup images.**
-   - **T5.7** CCTV view prep (gateway proxy, Settings CCTV group + scrolling, panel 3D | CCTV, expanded Side by side, fake camera, RTSP relay template). **The real-browser check is owed** (ask the user to stop 3200 / 8400 / 8410); then show the user the measured toggle sizes.
-   - Test fixes: the stall offset 170° (Phase 5 end), the Sun-refraction test's single instant.
-3. **ADS-B (Phase 5b):** pw-mount-control imports `adsb_core` from `C:/Users/soar/Desktop/DELV/adsb_interpreter` (Q55, read only for us); optional import, the satellite side works without it. Waiting on the recorded history (T5.4a) and adsb_core's P1b (messages / state / predict). **This PC's clock is 0.41 s fast (Windows Time service off): NTP before any cueing.**
-4. **Open user choices:** CCTV URL / username write-only (now) or visible for editing; format the 34 lint-clean Phase 5 files or leave them.
-5. **Flaky list (T6.3):** `test_compute_pass_budget_30ms` (CPU load), `test_near_zenith_pass[88.0]` (start pose).
-6. **Environment:** `PWI4.cfg` baseline `54bd3e19…` (site 13.8451 / 100.5696). Throwaway ports only (Nuxt 13270–13272, analysis 18710/18711, gateway 18733/18734, fake camera 18740–18749). Sim / browser checks need the user's servers stopped. No `.py` in the repo `scratchpad/`. Workers leave no background process.
-7. **Read only:** ssa-toolkit (the user's own edits there), sip-aero-python, adsb_interpreter.
+2. **Committed:** `373fc39` (T5.2f astrometry other-setup images, T5.7 CCTV prep). **Uncommitted, verified (11-10):**
+   - **T5.4b** gateway ADS-B (`gateway/adsb.py`; Settings › ADS-B; `--simulated-adsb`), plus the supervisor fix: aircraft frames only while aircraft exist.
+   - **T5.5** web: Sky Viewer aircraft (20 px icon, sky-contrast outline), A1b card, Track Target › AIRCRAFT tab, filters, SIMULATED / feed-down chips, the tooltip flip (the user confirms the flip live).
+   - BUILD_PLAN: Phase 5b revised plan (11-10), Q59–Q62, T5.4b / T5.5 logs.
+3. **Next: T5.6b aircraft cueing** (BUILD_PLAN "Phase 5b — implementation plan (revised 2026-11-10)", T5.6b):
+   - `track_aircraft {icao}` + the check;
+   - every 1 s, `adsb_core.predict.path(ac, now − 0.5, now + 10, 0.5)` → az / el (site HAE = alt − 30 m) → new + add + apply(update_wrap=0) (P23);
+   - the wrap set once before the rendezvous goto;
+   - Lim EL / Sun 16° cut;
+   - Q60 stop (fix > 10 s, Kalman > 5 s), green-only (Q62), simulated aircraft allowed (Q61);
+   - the verdict function `aircraftTrackVerdict` in `web/app/utils/aircraft.ts` (its last branch).
+   - Test candidates: the 8500 scenario has aircraft high over the site (e.g. N688CP ≈ +47°, AIQ3141 ≈ +31° at 13.8451 / 100.5696); plus synthetic overflights (`gateway/tests/fake_adsb.py`, adsb_core's CPR encoder).
+   - Sim tests need PWI4 running in Simulator mode + the user's 8400 stopped.
+4. **ADS-B setup facts:**
+   - `adsb_core` 0.3.0 is linked into our `.venv` by `adsb_core_dev.pth` → `C:\Users\soar\Desktop\DELV\adsb_interpreter\adsb_core\src` (nothing is written there; run Python with `PYTHONDONTWRITEBYTECODE=1`).
+   - Simulated data = adsb_interpreter's `python -m feed --simulate` on 8500 (the user's; read only) + our gateway with `--simulated-adsb`.
+   - Live: the user stores the second read token in Settings › ADS-B (Credential Manager `adsb_read_token`) when the platform is up — **nudge the user at T5.6c**.
+   - adsb_interpreter reads our settings' `location` block (keep its format).
+5. **Owed checks:** the T5.7 CCTV browser check (+ measured toggle sizes for the user); the T5.2f real other-setup images (the user).
+6. **Open user choices:** CCTV URL / username write-only (now) or visible; format the 34 lint-clean Phase 5 files.
+7. **Flaky list (T6.3):** `test_compute_pass_budget_30ms` (CPU load), `test_near_zenith_pass[88.0]` (start pose).
+8. **Environment:**
+   - `PWI4.cfg` baseline `54bd3e19…` (site 13.8451 / 100.5696).
+   - Throwaway ports only: Nuxt 13270–13272, analysis 18710/18711, gateway 18733/18734, fake camera 18740–18749, fake ADS-B 18750–18759.
+   - The user's servers: 3200 / 8400 / 8410 (+ adsb_interpreter 3300 / 8500 / 8510) — never touched; browser / sim checks need 3200 / 8400 / 8410 stopped.
+   - No `.py` files in the repo `scratchpad/`. Workers must run every gate to completion and leave no background process.
+9. **Read only:** ssa-toolkit, sip-aero-python, adsb_interpreter.
 
 ## Where we are
 

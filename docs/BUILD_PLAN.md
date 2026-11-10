@@ -1971,6 +1971,101 @@ The solved target RA/Dec at mid-exposure fills the IOD row. The job runs in the 
 
 ---
 
+### Phase 5b — implementation plan (revised 2026-11-10, after adsb_interpreter P1b–P3; for user review)
+
+Supersedes the build parts of the 11-07 spec where they differ (the 11-07 decisions Q35–Q50 stay, with Q45 changed by Q60).
+
+**What adsb_interpreter delivered (read only for us; its BUILD_PLAN 11-10):**
+- **`adsb_core` 0.3.0** (pure library, its J3 contract):
+  - `platform.PlatformClient(url, token, on_event, kinds=("decoded",), ssl_context=…, on_status=…)` (pinned SIP AERO CA, states connecting / connected / stale / unreachable / auth_failed / tls_error / error);
+  - `messages` (reads the real `cpr_*` fields);
+  - `timebase` (Q40, `DelayStats`);
+  - `height` (Q39);
+  - `state.AircraftTable(site, range_limit_km)` (`ingest(envelope, now)`, `expire`, `snapshot(now)` → views with az / el / range);
+  - `predict` (`position_at`, `path(ac, t0, t1, step)`; velocity + turn-rate projection, Kalman fallback, residual stats).
+- **The capture questions are settled on 24 h of real data (our T5.4a is done there):**
+  - U1: CPR fields `cpr_format` / `cpr_latitude_code` / `cpr_longitude_code`; `raw` is always null.
+  - U2: decoded publishing is on.
+  - U3: frame → decoded event p50 0.26 s / p95 0.80 s → stay on `decoded`.
+  - U5: 78 % of messages carry `timestamp_status` 0 (source 6) → `received_at` time base.
+  - No GNSS height (baro + the TC19 difference).
+  - About 0.73 messages/s.
+  - **Per-aircraft position every 1.0 s at p50, 8 s at p95.**
+  - **Predictor residual p50 4.8 m / p95 21.5 m** (≤ 10 s ahead).
+  - Receiver range p50 26 km, max 61 km (only the Bangkok area is heard).
+- **The feed service (8500)** has a **simulated mode** (`python -m feed --simulate`): an 18-flight, 30-minute looping Bangkok scenario (arrivals / departures VTBS / VTBD, a holding turn, no-callsign, no-velocity, silent, beyond-range and a spoofed jump), served on its WS hub `/api/feed/ws` as 1 Hz `aircraft` snapshots (session token from `/api/feed/session`, first-message auth).
+- The PC clock was resynced 11-10. A **second read token for pw-mount-control** is ready with the user (its D8).
+- **Contract note:** adsb_interpreter reads the `location` block of our settings file (IMPORT FROM MOUNT CONTROL, read only). The `location` format must stay as it is.
+
+**Decisions (user 11-10):**
+- **Q59 simulated data:** validation only. In simulated mode our gateway reads adsb_interpreter's feed on 8500, started with `--simulate`. Live mode uses our own `PlatformClient` connection (Q55).
+- **Q60 coast (replaces Q45's 5 s):** while tracking, the predicted path is re-sent every 1 s from the last fix. STOP when the last position is > 10 s old, or the predictor has been on the Kalman fallback for > 5 s.
+- **Q61:** TRACK AIRCRAFT is allowed on simulated aircraft too (all safety rules apply).
+- **Q62 mode + enable rule:**
+  - simulated mode = the gateway launched with `--simulated-adsb` (or `PW_ADSB_SIMULATE=1`), used for the build and validation;
+  - **the aircraft feature is enabled only on a green ADS-B connection**: `connected` or `stale` (connected, no data) are green; `connecting` / `unreachable` / `auth_failed` / `tls_error` / `error` / not configured / module missing = not green → aircraft display and TRACK AIRCRAFT disabled with the reason;
+  - in simulated mode, green = the 8500 feed's WS is open and the feed reports `simulated`.
+
+**Not prepared yet (found in the review):**
+1. `adsb_core` is not installed in our `.venv` → an editable install of `../adsb_interpreter/adsb_core` (dev; a pinned git tag for releases, its D7), plus a version guard (accept 0.3.x).
+2. Nothing on our side is built: the Settings ADS-B group is a disabled placeholder; Filters › Aircrafts, the Track Target AIRCRAFT tab and the A1b card are disabled.
+3. The simulated scenario is served as processed views, not raw events → an adapter to `adsb_core.state.Aircraft`, so the same `predict.path` cues simulated and live aircraft.
+4. Site height: adsb_core works in ellipsoidal height (HAE); our Settings altitude is MSL. Use adsb_interpreter's convention (HAE = MSL − 30 m geoid near Bangkok) for the aircraft geometry only.
+5. **Few aircraft rise above Lim EL from our site** (approaches at 1 km at 20 km are ≈ 3° elevation; FL350 at 30 km ≈ 19°). The simulated Bangkok scenario may have few or no trackable aircraft → cueing is validated with our own synthetic overflights (adsb_core's DO-260B CPR encoder → envelopes → `AircraftTable`) in tests and on PWI4-sim; the 8500 scenario validates the live path, display and rules.
+6. The platform was down for updates on 11-10 → the live connection is unit-tested (fake client); its first real check is the user's.
+
+**T5.4b — gateway integration (`gateway/adsb.py`)**
+- Optional import: `adsb_core` missing / failing / not 0.3.x → the gateway starts normally, every satellite / mount function works, and the ADS-B state is `module_missing` ("ADS-B module not installed").
+- **Two sources behind one interface:**
+  - **Live:** `PlatformClient` (URL + token from Settings) → `AircraftTable.ingest` → expire every 1 s.
+  - **Simulated** (`--simulated-adsb`): a client of `http://127.0.0.1:8500` (session token via `/api/feed/session` with `Sec-Fetch-Site: none`; WS `/api/feed/ws`, auth first; reconnect with backoff) → per-ICAO views → the `Aircraft` adapter.
+  - The feed's URL / port are configurable for tests (a throwaway feed).
+- **Isolation:** the runner is its own task with bounded queues; a source error / slow source never blocks the poller, the 10 Hz hub or a satellite track (a test measures the 10 Hz rate with a misbehaving source).
+- **Snapshot to the web:** a separate 1 Hz `aircraft` WS message containing:
+  - the visible aircraft within the range limit and above 0°: ICAO, callsign, az, el, range, track, alt ft, gs, vertical rate, position age, stale, height source, predictor;
+  - `lat` / `lon` for the selected or tracked aircraft;
+  - `adsb: {state, green, simulated, detail, delay p50 / p95, counts}` (also in the 10 Hz status, for the chip).
+- **Settings › ADS-B group** (enabled):
+  - Enable; WSS URL (default `wss://10.22.123.68/api/v1/ws`); read token (write-only, Credential Manager `adsb_read_token`, never echoed);
+  - default range limit (20 / 50 / 100 / 200 / 350 km, default 100);
+  - the status line (state, last message age, delay p50).
+  - In simulated mode the group shows SIMULATED (source: adsb_interpreter feed 8500) and the live fields are inactive.
+  - The CA is adsb_core's bundled, pinned CA (no setting).
+- **Tests:** the optional import (missing / wrong version), both sources (a fake `PlatformClient`; a fake 8500 feed server), the adapter vs `predict.path`, the green rule per state, token never in responses / logs / audit, isolation (hub rate).
+
+**T5.5 — web**
+- **Filters › Aircrafts:** enabled when green (child: Airborne).
+- **Sky Viewer:**
+  - aircraft icon rotated to the track, callsign label (Labels toggle), dimmed below Lim EL, faded when stale;
+  - nearest-pointer hover tooltip; click selects;
+  - interpolated between the 1 Hz updates;
+  - a SIMULATED DATA badge in simulated mode;
+  - an "ADS-B feed down" chip when enabled but not green.
+- **A1b Aircraft card (Q43):** callsign / ICAO, Lat, Lon, Altitude ft, Range km, Az / El, GS, track, V/S, data age, height-source flag, [TRACK AIRCRAFT] + the reason line; the A1e pinning / stacking shared with satellite cards.
+- **Track Target › AIRCRAFT tab:** the aircraft within the preset, search by callsign / ICAO, sort by range; TRACK SELECTED TARGET.
+- **Browser check** on the simulated feed at 1920 + 1280×600 @1.5.
+
+**T5.6b — aircraft cueing (`gateway/airtrack.py`, P23)**
+- `track_aircraft {icao}` + the `/api/mount/check` dry run.
+- **Q44 rules:** green connection, a fresh fix (≤ 3 s), above Lim EL (or crossing within the rendezvous), > 15° from the Sun, within the range limit, the near-zenith note / refusal (Q46).
+- **Rendezvous** as T4.2, with `predict.path` instead of sgp4.
+- **Every 1 s:**
+  - the path from now − 0.5 s to now + 10 s at 0.5 s → az / el at the site (HAE);
+  - new + add + apply(update_wrap = 0);
+  - the wrap window set once before the rendezvous goto, centred on the start azimuth;
+  - each path checked against Lim EL and the Sun's 16° circle, and cut before a violation.
+- **End:** STOP, Q60 (fix > 10 s, Kalman > 5 s), connection not green, below Lim EL, out of range, Sun, the wrap window, or another command (G5). End = STOPPED with the reason on the card; audit `track_aircraft` / `track_done` (ICAO + callsign only).
+- **Tests:**
+  - unit tests on synthetic overflights (straight, turning, gaps up to 12 s → the Q60 stop, Kalman fallback);
+  - sim tests on PWI4-sim driven by synthetic overflights (Sun pinned);
+  - one run against the 8500 simulated feed if any scenario aircraft is above Lim EL from our site.
+
+**T5.6c — the user's live check:** the live feed with the second read token (once the platform is back), then a real overflight cued on the L-350.
+
+**Order:** T5.4b → T5.5 → T5.6b; one worker per task; the supervisor verifies each (browser checks need the user's 3200 / 8400 / 8410 stopped; the 8500 simulated feed is started by the supervisor on a throwaway port when possible, else by the user).
+
+---
+
 ### Phase 5b — Aircraft display + cueing from ADS-B (spec, 2026-11-07; approved by the user 11-07)
 
 > **Update 11-09 (user, Q55): the ADS-B pipeline comes from `adsb_core`**, the library of the sibling repo `C:\Users\soar\Desktop\DELV\adsb_interpreter` (read only for us; its D1). That repo is the reference for how ADS-B data is read and interpreted. Consequences for this spec:
@@ -2106,16 +2201,16 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | T5.2 | ✅ | ✅ 10-30 | ✅ 11-02 | ✅ 11-02 | ✅ 11-02 (+ T5.2e resilience; 3 real astrometry.net solves by the user) | Q29–Q31; a port (OW0021 identical to ssa), b nova + jobs + relay (key-echo hardening), c modal, d run + pill + IOD wiring + 2 layout fixes |
 | T5.3 | ✅ | ✅ 10-30 | ✅ 11-02 | ✅ 11-02 | ✅ 11-02 (+ T5.3d fixes; Vallado Ex. 7-2 verified by the user and as a test) | O6; Q28 built before T5.2; Q32–Q34; a engine (orekit reference: ours closer to truth), b modal (browser 1920 + 1280×600 @1.5) |
 | T5.2f | ✅ | ✅ 11-09 | ✅ 11-09 | ✅ 11-09 | pending (user's real cases) | Q51–Q54; other-setup images + scale review; browser 1920 + 1280×600 @1.5 |
-| T5.4 | ✅ spec approved 11-07 | | | | | Q35–Q50; waiting on the recorded history (T5.4a) |
-| T5.5 | ✅ spec approved 11-07 | | | | | |
+| T5.4 | ✅ spec approved 11-07, plan revised 11-10 | ✅ 11-10 (T5.4b) | ✅ 11-10 | ✅ 11-10 (simulated feed) | pending (live: the user's token, platform back) | a: done by adsb_interpreter (U1–U5, 11-10); b: gateway integration |
+| T5.5 | ✅ spec approved 11-07, plan revised 11-10 | ✅ 11-10 | ✅ 11-10 | ✅ 11-10 (browser, simulated feed) | ✅ 11-10 user-checked (icon 20 px + sky-contrast outline; tooltip flip: user confirms live) | aircraft layer, card, AIRCRAFT tab, filters, badges |
 | T5.6 | ✅ spec approved 11-07 | | | | | a: P23 sim probe done 11-07 (path replacement works) |
 | T5.7 | ✅ spec approved 11-09 (+ Settings scrolling) | ✅ 11-09 | ✅ 11-09 (unit / API) | **browser check owed** | pending | | | | | CCTV view prep (Q56–Q58); independent of the ADS-B work |
 | T6.1 | ⬜ | | | | | |
 | T6.2 | ⬜ | | | | | |
 | T6.3 | ⬜ | | | | | |
 
-**Resume point (2026-11-07, Phase 5 end Tier 3 done):** Phase 5 complete (`e29ed97`, `2e7d5cc`, Tier 3 11-07). Phase 5b (aircraft, ADS-B) spec approved by the user 11-07; P23 sim probe done. Next:
-1. **T5.4a when the user supplies the recorded ADS-B history** (the user nudges); then T5.4b–T5.6; then Phase 6.
+**Resume point (2026-11-10, T5.4b + T5.5 done):** Phase 5 complete; T5.2f + T5.7 committed (`373fc39`); Phase 5b plan revised 11-10 (Q59–Q62); T5.4b gateway ADS-B + T5.5 web aircraft display done, uncommitted. Next:
+1. **T5.6b aircraft cueing** (`gateway/airtrack.py`, P23 rules, Q60 coast), then T5.6c (the user's live check: token + platform). Owed: the T5.7 CCTV browser check; the tooltip-flip browser look.
 2. **The real-mount session** (user) whenever available: the checklist below plus D-SUN custom-path following (10°/s arcs, 15°/s straights) and HOME routing vs the real homing path.
 - **Real-mount session checklist** (the user's first session on the real L-350; homing + jog will be tested together):
   - PWI4's real jog behaviour (does a release keep tracking? speeds? P20; option A provisional);
@@ -2156,6 +2251,7 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | 2026-10-20 | T1.1 | WebSocket can't pass Nitro devProxy (HTTP only) → in dev the page connects straight to the gateway (`runtimeConfig.public.gatewayWs`); token fetch stays proxied; prod = same-origin (gateway serves the app) |
 | 2026-10-20 | A4-i | **Red warnings** (user): Status red on FAULT; Sun Distance red when ≤ 15° (green > 15°). Implemented in T1.4 |
 | 2026-10-27 | T3.4e | Azimuth jog across PWI4's wrap edge swung 360° silently. Option B: the gateway slides PWI4's wrap window along with an azimuth jog (no turn while the axis has mechanical room, sim ±300°); near the real mechanical limit the jog stops with a margin and prompts "turn 360° / stay"; Turn = a goto-like validated reposition (pad dimmed, STOP available; D-SUN routing in T3.5 like gotos); Stay = stop at the limit, prompt again on the next jog that way | user |
+| 2026-11-10 | Q59–Q62 | Simulated ADS-B (validation only) = adsb_interpreter's feed on 8500 started with --simulate; coast 10 s (Q45 → Q60: stop when the last fix > 10 s or Kalman > 5 s); TRACK AIRCRAFT allowed on simulated aircraft; simulated mode = gateway launched with --simulated-adsb; the aircraft feature is enabled only on a green ADS-B connection (connected / stale) | user |
 | 2026-11-09 | Q55–Q58 | ADS-B: pw-mount-control imports adsb_interpreter's `adsb_core` (optional import; the satellite side works without it; own platform connection). CCTV (T5.7): one camera, streamed through the gateway (credentials server-side), prepared for MJPEG / HLS now and RTSP via a relay sidecar (likely an IP camera); panel 3D | CCTV, expanded adds Side by side; nothing shown when not configured | user |
 | 2026-11-09 | T5.2f Q51–Q54 | Astrometry: an Image source toggle (Station / Other setup, auto-suggested from the file's FITS optics); Other = no station hints; a solve is never failed for its scale: a scale that differs from the station is reviewed (Use / Discard) in the pill and the waiting IOD row; other-setup images are from the station's location (the Settings location is moved for another site) | user |
 | 2026-11-07 | Phase 5b Q35–Q50 | ADS-B from the SIP AERO platform: WSS + read token in the gateway, `decoded` kind, own CPR decoder, height GNSS → baro + TC19 difference → baro, payload time when GNSS/NTP-qualified, prediction from the reported velocity + heading with a Kalman fallback when the data is incomplete, display / card / rules / stop rules as recommended, CA bundled + pinned, fake-platform tests only, Phase 5b before T6. The receiver is on the mount's building (Settings location = receiver position) | user |
@@ -3436,6 +3532,46 @@ The user stopped 3200 (8400 / 8410 already down; PWI4 kept running in Simulator 
   - Gates: CCTV + settings + security + relay 125; non-sim 917 + the fixed test (worker run); ruff clean; typecheck 0; lint 0 errors; vitest 631.
 - **Owed:** the real-browser check, which needs the user's 3200 / 8400 / 8410 stopped (the fake camera, MJPEG and HLS, 1920 + 1280×600 @1.5: the toggle, side by side, not-configured = unchanged, feed loss → retry → snapshot, the toggle sizes measured for the user's tuning; CSS values now ≈ 84 × 23 px at 1920, ≈ 70 × 19 px at 1280).
 
+### T5.4b log (2026-11-10)
+
+- **Setup (supervisor):** `adsb_core` 0.3.0 linked into our `.venv` by a `.pth` file (`adsb_core_dev.pth` → `adsb_interpreter/adsb_core/src`), so nothing is written into adsb_interpreter (its `git status` checked before / after; run Python with `PYTHONDONTWRITEBYTECODE=1`). For releases: a pinned git tag (its D7).
+- **Worker (Sonnet):**
+  - `gateway/adsb.py`: optional `load_core()` (missing / broken / not 0.3.x → `module_missing`); `LiveSource` (PlatformClient → bounded queue → `AircraftTable`); `SimulatedSource` (8500 feed: session token, auth-first WS, backoff); `adapt_feed_aircraft` (feed view → `adsb_core.state.Aircraft`, Kalman for no-velocity rows); `AdsbRunner` (own tasks, 1 Hz tick, restart on a Settings save, `aircraft_for`); the green rule; site HAE = alt − 30 m.
+  - `hub.py` aux slot (`publish_aux`), so the aircraft frame never displaces a status frame.
+  - The settings `adsb` block (token write-only under `adsb_read_token`); the `adsb` block in the 10 Hz status; `--simulated-adsb`.
+  - Web: the Settings › ADS-B group (enable, URL, write-only token, range limit, status line, SIMULATED); `utils/adsb.ts` types.
+  - Tests: `fake_adsb.py` + `test_adsb.py`.
+  - The worker left the full gates unrun (reported honestly); the supervisor ran them.
+- **Supervisor:**
+  - The non-sim suite found `test_ws_good_hello_then_status` failing: the gateway sent an empty `aircraft` frame every second to every client even with ADS-B off. **Fix:** frames go out only while there are aircraft, plus one empty frame when the last goes (the 10 Hz status carries the `adsb` block anyway). Two worker tests updated to the rule; a new test of the rule.
+  - Gates: non-sim 969 + the fixed test; `test_adsb` + `test_security` 63; ruff clean; typecheck 0; lint 0 errors; vitest 640.
+  - **Real check against adsb_interpreter's running simulated feed (8500, read only):** a throwaway gateway (18733, memory secrets, temp settings) → `adsb` state `simulated`, green; 26 aircraft frames in 25 s; 13 aircraft, 7 visible; rows with az / el / range / speed / track / predictor (one `kalman`, one stale) / height source `baro+diff`. With the throwaway's default site the highest elevation was 10.5° (below Lim EL, as the plan expected: cueing is validated with synthetic overflights in T5.6b).
+- **Owed:** the live connection (the user stores the second read token in Settings › ADS-B when the platform is up); the browser look of the ADS-B group (with T5.5's browser check).
+
+### T5.5 log (2026-11-10, worker; browser check owed to the supervisor)
+
+- **Web:** `stores/aircraft.ts` (the 1 Hz `aircraft` message, cleared on the empty frame / disconnect / not green); `utils/aircraft.ts` + `utils/aircraft-target.ts` (pure: frames + dead-reckoning capped at 2 s, icon rotation -track, labels, A1b formats, one TRACK AIRCRAFT verdict function for T5.6b, filter / chip rules, tab list); Sky Viewer `air` canvas + labels + hover/click on the shared selection; Filters › Aircrafts › Airborne; A1b card in TrackCard (two-column rows to fit the short panel; shared A1e strip); Track Target › AIRCRAFT tab (`AircraftTargetPane.vue`); chips "SIMULATED DATA" (top right) / "ADS-B feed down" (top left) in the top strip of the chart box.
+- **Deviation:** the gateway aircraft rows now carry `lat` / `lon` (5 dp) for every row (instead of a selection command); `test_adsb` updated.
+- **Other changes:** `DEFAULT_FILTERS.aircrafts` is now true and persisted (gating is by the ADS-B state, not the stored value); the Filters panel `--u` denominator 450 → 480 for the added Airborne row.
+- **Provisional sizes (user tunes):** aircraft icon 14 px × chart scale k (k = clamp(R/340, 0.8, 1.4)); pick radius 12 px × k; stale alpha 0.4; chips 11 px bold, 16 px line, 1 px / 8 px padding, 2 px from the box edges; card rows 0.92 em.
+- **Owed:** the browser look at 1920 + 1280×600 @1.5 on the 8500 simulated feed (chart / chips / card fit).
+
+### T5.5 supervisor check (2026-11-10)
+
+- Gates re-run: `test_adsb` + `test_security` 63, ruff clean, typecheck 0, lint 0 errors, vitest 678 (the worker's non-sim run: 971).
+- **Browser check** (the user's 3200 / 8400 / 8410 down; throwaway Nuxt 13272 / gateway 18734 with `PW_ADSB_SIMULATE=1` / analysis 18711; the user's running 8500 simulated feed read only; site 13.8451 / 100.5696), 1920 + 1280×600 @1.5:
+  - 10 aircraft in the store and drawn, state `simulated` green, the SIMULATED DATA badge top-right of the chart box, no feed-down chip, the Airborne filter enabled;
+  - hover → the tooltip "QTR841 (06A0E7) · Alt 36 000 ft | Range … | Age 1.7 s"; click → selected (ring) and the A1b card with every value, no clipped value, no card overflow at either size;
+  - Track Target › AIRCRAFT enabled, 10 rows sorted by range, sortable headers, TRACK SELECTED TARGET disabled with "Aircraft tracking: coming in T5.6b";
+  - no page overflow.
+  - **Seen:** scenario aircraft above Lim EL from our site exist (AIQ3141 at 0.8 km +31°, N688CP +47°): candidates for T5.6b.
+  - **For the user (sizes):** the aircraft icons are small and low-contrast on the daytime (orange) sky disc, especially at 1280 (≈ 11 px); at 1280 the hover tooltip near the west edge runs past the Sky Viewer frame into the MOUNT CONTROL panel.
+- **User 11-10 (sizes):** the icon larger + an outline that stands out from the sky; everything else as is (the tooltip spill accepted).
+  - `AIRCRAFT_ICON_PX` 14 → **20** (≈ 25 px at 1920, ≈ 16 px at 1280 @1.5); pick radius 12 → 14.
+  - The icon is drawn as a vector (the `aircraft.svg` path as `Path2D`) with a fill and a 1.5 px outline chosen from the sky brightness (`aircraftIconColors`): a light sky (`skyBrightness` ≥ 0.5) → light fill `#f4f6f8` + dark outline `#161c24`; a dark sky → dark fill `#262c35` + light outline `#eef1f4`. The old `brightness(0.45)` filter and the SVG image load are gone.
+  - Checks: typecheck 0, lint 0 errors, vitest 678 (+1 colour test in `aircraft.spec.ts`). Browser at 1920 + 1280 @1.5: the outlined icons stand out on the dusk sky (the dark-sky variant); the light-sky variant is covered by the unit test (the sky was past daylight at the check).
+
+- **User 11-10: the tooltip flip.** The flip existed but measured the tooltip before its new text rendered (width 0 / stale on first show and on a satellite ↔ aircraft switch), so it spilled into the next panel. Now `placeTip()` runs on the pointer move, again after the render (`nextTick`), and whenever the text changes (`watch([airTip, tipLines])`): right / below the pointer, flipped left / above to stay inside the chart box. Checks: typecheck 0, lint 0 errors, vitest 679. **Browser check owed** (the user's servers were back up): the user confirms on their 3200 (hover an aircraft near the right edge).
 ## 9. Known limitations & risks
 
 - **Gateway crash (G4 note):** nothing can send a stop if the gateway process dies; mitigated by a UI warning that hands the user off to PWI4.

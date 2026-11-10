@@ -8,6 +8,8 @@ import {
   type ControlHolder,
   type MountConnection,
 } from '../utils/mount-socket'
+import { useAircraftStore } from './aircraft'
+import type { AircraftMessageData } from '../utils/adsb'
 import { buildMountDisplay, isLinkStale, type MountSnapshotLike } from '../utils/mount-format'
 
 const CLOCK_TICK_MS = 250
@@ -92,6 +94,7 @@ export const useMountStore = defineStore('mount', () => {
       onConnection: setConnection,
       onHello: (d) => { hello.value = d },
       onStatus: ingestStatus,
+      onAircraft: d => useAircraftStore().ingest(d as unknown as AircraftMessageData),
       onError: (m) => { lastError.value = m },
       onAck: recordAck,
     })

@@ -1,6 +1,6 @@
 // Visibility filter semantics (A2a), pure.
 //
-// Tree: Satellites > (LEO, MEO, GEO) · Aircrafts (disabled, no ADS-B yet) · Celestial Objects >
+// Tree: Satellites > (LEO, MEO, GEO) · Aircrafts > (Airborne; usable only on a green ADS-B connection) · Celestial Objects >
 // (Planetary Bodies, Stars) · Labels (top level, no children). Unchecking a parent hides everything under it but KEEPS the children's
 // own checks; a child is visible only when its parent AND itself are on.
 
@@ -10,6 +10,7 @@ export interface FilterState {
   meo: boolean
   geo: boolean
   aircrafts: boolean
+  airborne: boolean
   celestial: boolean
   planets: boolean
   stars: boolean
@@ -21,7 +22,8 @@ export const DEFAULT_FILTERS: Readonly<FilterState> = {
   leo: true,
   meo: true,
   geo: true,
-  aircrafts: false, // present but disabled until an ADS-B source exists
+  aircrafts: true, // usable only while the ADS-B connection is green (the tree is disabled otherwise)
+  airborne: true,
   celestial: true,
   planets: true,
   stars: true,
@@ -34,6 +36,7 @@ export interface Visibility {
   showLeo: boolean
   showMeo: boolean
   showGeo: boolean
+  showAircraft: boolean
   showStars: boolean
   showBodies: boolean
   showLabels: boolean
@@ -44,6 +47,7 @@ export function effectiveVisibility(f: FilterState): Visibility {
     showLeo: f.satellites && f.leo,
     showMeo: f.satellites && f.meo,
     showGeo: f.satellites && f.geo,
+    showAircraft: f.aircrafts && f.airborne,
     showStars: f.celestial && f.stars,
     showBodies: f.celestial && f.planets,
     showLabels: f.labels,
@@ -57,7 +61,7 @@ export function parseFilters(raw: string | null | undefined): FilterState {
   try {
     const o = JSON.parse(raw) as Record<string, unknown>
     for (const k of Object.keys(DEFAULT_FILTERS) as Array<keyof FilterState>) {
-      if (k !== 'aircrafts' && typeof o[k] === 'boolean') out[k] = o[k] as boolean
+      if (typeof o[k] === 'boolean') out[k] = o[k] as boolean
     }
   }
   catch {

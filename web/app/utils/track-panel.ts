@@ -7,14 +7,23 @@ export interface TrackPanelView {
   /** One-line strip for the tracked object while another one is selected. */
   strip: { norad: number, name: string, line: string } | null
   empty: boolean
+  /** An aircraft is selected (T5.5): its card is the main card; a tracked satellite shows as the strip. */
+  aircraft?: boolean
 }
 
 export function trackPanel(
   selectedNorad: number | null,
   track: ObjectTrackLike | null | undefined,
   now: number,
+  aircraftSelected = false,
 ): TrackPanelView {
   const a = track && isObjectTrackActive(track) && typeof track.norad === 'number' ? track : null
+  if (aircraftSelected) {
+    const strip = a
+      ? { norad: a.norad as number, name: a.name || `NORAD ${a.norad}`, line: phaseLine(a, now) ?? '' }
+      : null
+    return { main: null, strip, empty: false, aircraft: true }
+  }
   if (a) {
     const an = a.norad as number
     if (selectedNorad === null || selectedNorad === an) {

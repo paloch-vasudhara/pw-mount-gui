@@ -12,11 +12,12 @@ import {
 import { resolveFlag } from '../../app/utils/country-flag'
 
 describe('filters', () => {
-  it('defaults: everything on except the disabled Aircrafts', () => {
+  it('defaults: everything on (Aircrafts / Airborne are gated by the ADS-B connection, not the stored value)', () => {
     expect(effectiveVisibility({ ...DEFAULT_FILTERS })).toEqual({
-      showLeo: true, showMeo: true, showGeo: true, showStars: true, showBodies: true, showLabels: true,
+      showLeo: true, showMeo: true, showGeo: true, showAircraft: true, showStars: true, showBodies: true, showLabels: true,
     })
-    expect(DEFAULT_FILTERS.aircrafts).toBe(false)
+    expect(DEFAULT_FILTERS.aircrafts).toBe(true)
+    expect(DEFAULT_FILTERS.airborne).toBe(true)
   })
 
   it('parent off hides all children but keeps the children checks', () => {
@@ -48,7 +49,7 @@ describe('filters', () => {
     expect(parseFilters(serializeFilters(f))).toEqual(f)
     expect(parseFilters('not json')).toEqual(DEFAULT_FILTERS)
     expect(parseFilters(null)).toEqual(DEFAULT_FILTERS)
-    expect(parseFilters('{"leo":"yes","aircrafts":true,"meo":false}')).toEqual({ ...DEFAULT_FILTERS, meo: false })
+    expect(parseFilters('{"leo":"yes","aircrafts":false,"meo":false}')).toEqual({ ...DEFAULT_FILTERS, aircrafts: false, meo: false })
   })
 })
 

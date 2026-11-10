@@ -167,3 +167,7 @@ def _isolated_settings(tmp_path, monkeypatch):
     monkeypatch.setenv("PW_TEST_SUN_ALTAZ", "-60,0")
     monkeypatch.setattr(settings_mod, "default_secret_store", settings_mod.MemorySecretStore)
     monkeypatch.setattr(settings_mod, "default_cctv_secret_store", settings_mod.MemorySecretStore)
+    monkeypatch.setattr(settings_mod, "default_adsb_secret_store", settings_mod.MemorySecretStore)
+    # No ADS-B source in tests unless a test builds one: never the user's simulated feed / env.
+    monkeypatch.delenv("PW_ADSB_SIMULATE", raising=False)
+    monkeypatch.delenv("PW_ADSB_FEED_URL", raising=False)
