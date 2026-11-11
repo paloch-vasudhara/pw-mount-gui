@@ -1,7 +1,8 @@
 // Visibility filter semantics (A2a), pure.
 //
-// Tree: Satellites > (LEO, MEO, GEO) · Aircrafts > (Airborne; usable only on a green ADS-B connection) · Celestial Objects >
-// (Planetary Bodies, Stars) · Labels (top level, no children). Unchecking a parent hides everything under it but KEEPS the children's
+// Trees: Satellites > (LEO, MEO, GEO) · Aircrafts (top level, no children; usable only on a green ADS-B connection) ·
+// Celestial Objects > (Planetary Bodies, Stars) · Labels (top level, no children). A stored `airborne` key (the Airborne child,
+// removed 11-11) is ignored. Unchecking a parent hides everything under it but KEEPS the children's
 // own checks; a child is visible only when its parent AND itself are on.
 
 export interface FilterState {
@@ -10,7 +11,6 @@ export interface FilterState {
   meo: boolean
   geo: boolean
   aircrafts: boolean
-  airborne: boolean
   celestial: boolean
   planets: boolean
   stars: boolean
@@ -23,7 +23,6 @@ export const DEFAULT_FILTERS: Readonly<FilterState> = {
   meo: true,
   geo: true,
   aircrafts: true, // usable only while the ADS-B connection is green (the tree is disabled otherwise)
-  airborne: true,
   celestial: true,
   planets: true,
   stars: true,
@@ -47,7 +46,7 @@ export function effectiveVisibility(f: FilterState): Visibility {
     showLeo: f.satellites && f.leo,
     showMeo: f.satellites && f.meo,
     showGeo: f.satellites && f.geo,
-    showAircraft: f.aircrafts && f.airborne,
+    showAircraft: f.aircrafts,
     showStars: f.celestial && f.stars,
     showBodies: f.celestial && f.planets,
     showLabels: f.labels,

@@ -2,13 +2,16 @@
 // TRACK TARGET modal, AIRCRAFT tab (T5.5, Q42/Q43): the aircraft currently in view within a range preset
 // (20 / 50 / 100 / 200 / 350 km, default 100), search by callsign / ICAO (exact match first, like the
 // satellite tab), sortable columns (default: range, nearest first). The list follows the 1 Hz data.
-// Clicking a row selects the aircraft in the Sky Viewer (shared selection). TRACK SELECTED TARGET is
-// present but disabled with the same reason as the card until T5.6b (utils/aircraft.ts verdict).
+// Clicking a row selects the aircraft in the Sky Viewer (shared selection). TRACK SELECTED TARGET (T5.6b)
+// has the same verdict as the A1b card (the gateway check of track_aircraft) and sends track_aircraft.
 import { computed, ref } from 'vue'
 import { SelectContent, SelectItem, SelectItemText, SelectPortal, SelectRoot, SelectTrigger, SelectViewport } from 'reka-ui'
 import { useAircraftStore } from '~/stores/aircraft'
 import { useSelectionStore } from '~/stores/selection'
+import { useAircraftVerdict } from '~/composables/useAircraftVerdict'
+import { useMountStore } from '~/stores/mount'
 import { aircraftTrackVerdict, formatAltFt, formatRangeKm } from '~/utils/aircraft'
+import { airTrackCardState, type AirTrackLike } from '~/utils/aircraft-track'
 import {
   aircraftTabRows, DEFAULT_AIRCRAFT_SORT, nextAircraftSort, TARGET_DEFAULT_RANGE_KM, TARGET_RANGE_PRESETS_KM,
   type AircraftSortKey, type AircraftSortState,
@@ -16,8 +19,10 @@ import {
 import { formatEl } from '~/utils/track-format'
 import { SELECT_TARGET } from '~/utils/track-target'
 
+const emit = defineEmits<{ tracked: [icao: string] }>()
 const air = useAircraftStore()
 const sel = useSelectionStore()
+const mount = useMountStore()
 const base = useRuntimeConfig().app.baseURL || '/'
 
 const q = ref('')
@@ -26,8 +31,41 @@ const sort = ref<AircraftSortState>({ ...DEFAULT_AIRCRAFT_SORT })
 
 const rows = computed(() => aircraftTabRows(air.rows, q.value, Number(rangeKm.value), sort.value))
 const selectedRow = computed(() => (sel.selectedIcao === null ? null : air.get(sel.selectedIcao)?.row ?? null))
-const verdict = computed(() => aircraftTrackVerdict(selectedRow.value, air.adsb))
-const statusText = computed(() => (sel.selectedIcao === null ? SELECT_TARGET : (verdict.value.reason ?? 'Ready')))
+const active = computed(() => !!air.adsb?.green && selectedRow.value !== null)
+const { verdict: polled } = useAircraftVerdict(computed(() => sel.selectedIcao), active)
+const verdict = computed(() => aircraftTrackVerdict(selectedRow.value, air.adsb, polled.value))
+const airTrack = computed(() => ((mount.snapshot as { airtrack?: AirTrackLike | null } | null)?.airtrack ?? null))
+const airState = computed(() => airTrackCardState(airTrack.value, sel.selectedIcao))
+const sending = ref(false)
+const refusal = ref<{ text: string, icao: string, at: number } | null>(null)
+const REFUSAL_SHOW_MS = 3000
+const canTrack = computed(() => sel.selectedIcao !== null && verdict.value.enabled && !airState.value.isTracked && !sending.value)
+const statusText = computed(() => {
+  if (sel.selectedIcao === null) return SELECT_TARGET
+  const r = refusal.value
+  if (r && r.icao === sel.selectedIcao && mount.now - r.at < REFUSAL_SHOW_MS && !airState.value.isTracked) return r.text
+  return airState.value.line ?? verdict.value.reason ?? (verdict.value.enabled ? 'Ready' : '')
+})
+
+async function onTrack(): Promise<void> {
+  const i = sel.selectedIcao
+  if (i === null || !canTrack.value) return
+  sending.value = true
+  refusal.value = null
+  try {
+    const ack = await mount.sendCommand('track_aircraft', { icao: i })
+    if (ack.ok) {
+      sel.afterAircraftTrackStarted(i)
+      emit('tracked', i)
+    }
+    else {
+      refusal.value = { text: ack.reason ?? 'Command refused', icao: i, at: Date.now() }
+    }
+  }
+  finally {
+    sending.value = false
+  }
+}
 
 const COLS: Array<{ key: AircraftSortKey, label: string }> = [
   { key: 'callsign', label: 'CALLSIGN' },
@@ -123,8 +161,8 @@ function onClear(): void {
     </p>
   </div>
 
-  <span class="tt-go-wrap" :title="verdict.reason ?? undefined">
-    <button type="button" class="tt-go" data-testid="tt-air-track" :disabled="!verdict.enabled || sel.selectedIcao === null">
+  <span class="tt-go-wrap" :title="statusText || undefined">
+    <button type="button" class="tt-go" data-testid="tt-air-track" :disabled="!canTrack" @click="onTrack">
       TRACK SELECTED TARGET
     </button>
   </span>

@@ -2203,13 +2203,13 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | T5.2f | ✅ | ✅ 11-09 | ✅ 11-09 | ✅ 11-09 | pending (user's real cases) | Q51–Q54; other-setup images + scale review; browser 1920 + 1280×600 @1.5 |
 | T5.4 | ✅ spec approved 11-07, plan revised 11-10 | ✅ 11-10 (T5.4b) | ✅ 11-10 | ✅ 11-10 (simulated feed) | pending (live: the user's token, platform back) | a: done by adsb_interpreter (U1–U5, 11-10); b: gateway integration |
 | T5.5 | ✅ spec approved 11-07, plan revised 11-10 | ✅ 11-10 | ✅ 11-10 | ✅ 11-10 (browser, simulated feed) | ✅ 11-10 user-checked (icon 20 px + sky-contrast outline; tooltip flip: user confirms live) | aircraft layer, card, AIRCRAFT tab, filters, badges |
-| T5.6 | ✅ spec approved 11-07 | | | | | a: P23 sim probe done 11-07 (path replacement works) |
+| T5.6 | ✅ spec approved 11-07; T5.6b spec 11-10 | ✅ 11-11 (T5.6b) | ✅ 11-11 (unit / API, fakes) | ✅ 11-11 (PWI4-sim 5 / 5; browser on the 8500 simulated feed) | pending (T5.6c: live feed + real overflight) | a: P23 sim probe done 11-07; b: `airtrack.py` (D1–D4) |
 | T5.7 | ✅ spec approved 11-09 (+ Settings scrolling) | ✅ 11-09 | ✅ 11-09 (unit / API) | **browser check owed** | pending | | | | | CCTV view prep (Q56–Q58); independent of the ADS-B work |
 | T6.1 | ⬜ | | | | | |
 | T6.2 | ⬜ | | | | | |
 | T6.3 | ⬜ | | | | | |
 
-**Resume point (2026-11-10, T5.4b + T5.5 done):** Phase 5 complete; T5.2f + T5.7 committed (`373fc39`); Phase 5b plan revised 11-10 (Q59–Q62); T5.4b gateway ADS-B + T5.5 web aircraft display done, uncommitted. Next:
+**Resume point (2026-11-11, T5.6b done):** T5.6b built, PWI4-sim 5 / 5 and the browser check passed (see the T5.6b log), uncommitted. Next: T5.6c (the user: the read token in Settings › ADS-B once the platform is up, the live feed, then a real overflight); owed: the T5.7 CCTV browser check. Earlier (2026-11-10, T5.4b + T5.5 done): Phase 5 complete; T5.2f + T5.7 committed (`373fc39`); Phase 5b plan revised 11-10 (Q59–Q62); T5.4b gateway ADS-B + T5.5 web aircraft display done, uncommitted. Next:
 1. **T5.6b aircraft cueing** (`gateway/airtrack.py`, P23 rules, Q60 coast), then T5.6c (the user's live check: token + platform). Owed: the T5.7 CCTV browser check; the tooltip-flip browser look.
 2. **The real-mount session** (user) whenever available: the checklist below plus D-SUN custom-path following (10°/s arcs, 15°/s straights) and HOME routing vs the real homing path.
 - **Real-mount session checklist** (the user's first session on the real L-350; homing + jog will be tested together):
@@ -2228,6 +2228,86 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 ---
 
 ## 8. Logs
+
+### T5.6b — aircraft cueing (spec, 2026-11-10)
+
+Builds on: the 11-07 Phase 5b spec §3 (aircraft track), P23, the revised plan (11-10), Q44 / Q46 / Q60–Q62.
+Where they differ, this spec wins.
+
+**Supervisor decisions made here (flagged to the user):**
+- **D1 pointing site = PWI4's site** (`poller.pwi4_site()`, the mount's own location, as for satellites), height HAE = MSL + `SITE_HAE_OFFSET_M`. The aircraft display (T5.4b rows) keeps the Settings location. When the two differ by > 30 m horizontally the check adds a note "Settings location differs from PWI4's site by N m" (an aircraft at 3 km: 100 m ≈ 2°).
+- **D2 refraction: the path is sent refracted** (`transforms.refract_alt` on the geometric elevation), for P18 parity (PWI4 and the monitor work in observed alt/az). This supersedes Q39's "no refraction for aircraft" for the pointing frame only. One constant `AIRCRAFT_REFRACT = True` (a stellar refraction slightly overestimates a target inside the atmosphere: ≤ 0.015° at 20° el).
+- **D3 zenith rule = rates, not a fixed elevation (Q46):** the check predicts the overflight on a straight line (velocity projection, 180 s ahead, 1 s steps) and refuses when the required axis-0 rate on any point while above Lim EL exceeds `RATE_FRACTION` × the mount's axis-0 vmax (from `TrackMount`), reason "Overflight too close to the zenith". A predicted peak ≥ 87° (and allowed) gives the note "Near-zenith overflight: tracking lags near the peak". During the track, a path segment needing more than that rate is cut there (end reason "Overflight too close to the zenith"). The real L-350's vmax comes from the same mount parameters the satellite planner uses.
+- **D4 snapshot:** a separate `airtrack` field (not the satellite `track`), so the satellite code is untouched. Satellite track and aircraft track are mutually exclusive: either one starting ends the other (G5, "Replaced by a new track").
+
+**1. Command + check**
+- `track_aircraft {icao}`: `icao` = 6 hex chars, upper-cased. In `commands.py` (ARG_MODELS, MOTION_COMMANDS, CmdName), `control.py` / `app.py` motion sets, CHECKABLE, the web `mount-socket.ts` command union.
+- **One verdict function** shared by `/api/mount/check` (dry, `conn_id` None) and the real command (like `ControlService.track_verdict`): row 0 = `_motion_verdict` (lock, ready, mount, homed, sequence, D-SUN route, slewing...), then the aircraft rules in this order (first failing reason wins):
+  1. ADS-B not green → the runner's `detail()` (e.g. "ADS-B feed down"); no runner / module missing → "ADS-B not available".
+  2. ICAO unknown / no position → "Aircraft not in view".
+  3. position older than 3 s → "ADS-B position too old" (Q44).
+  4. beyond the range limit → "Out of range".
+  5. below Lim EL now and not crossing it within 60 s (straight-line prediction) → "Below Lim EL".
+  6. within 15° of the Sun now (`SUN_KEEPOUT_DEG`) → "Within 15° of the Sun".
+  7. D3 zenith rate → "Overflight too close to the zenith".
+  8. the rendezvous plan (§2) fails → its reason ("Cannot reach the aircraft in time", "Track does not fit the wrap window").
+- Check body: `ok, reason, code, target {alt, az}` (now, observed), `notes` [], `aircraft {icao, callsign, peak_el, t_peak}` or null. Codes: `adsb_down`, `not_in_view`, `stale_fix`, `out_of_range`, `below_limit`, `sun`, `zenith`, `no_rendezvous`.
+- Audit: `track_aircraft` (ICAO + callsign only, never positions / tokens), `airtrack_done` / `airtrack_stopped` with the reason and elapsed.
+
+**2. Rendezvous**
+- Like T4.2 (`slew_estimate_s` from `trackplan`): t_r = now + slew estimate + 3 s, iterated 3×, aiming at the PREDICTED position at t_r (`predict.position_at`). If the aircraft is below Lim EL now but crosses within 60 s, t_r = max(that, crossing + 0.5 s at Lim EL + 0.5°).
+- t_r − now > 60 s → refused "Cannot reach the aircraft in time".
+- The rendezvous goto = an ordinary validated `goto_altaz` job with `target0` (as `_track_command`), D-SUN routed if needed.
+- **Wrap window set ONCE before the goto (P9 / P23):** centred on the rendezvous axis-0 (wrap_min = target0 − 180), clamped so the window [wrap_min, wrap_min + 360] stays inside the mechanical axis-0 range when that range is ≥ 360° wide (`TrackMount.axis0_range`). Today `_goto_wrap` sets `target0 − 180` unclamped: add an internal, gateway-only way for the rendezvous job to carry its clamped wrap_min (NOT a new public command argument; the public `goto_altaz` schema is unchanged). The executor never moves the window afterwards; a path point outside it is a cut (§3).
+
+**3. Executor (`gateway/airtrack.py`, `AirTrackExecutor`, one per gateway, `ControlService.airx`)**
+- Phases: `slewing` (rendezvous goto) → `waiting` (path uploaded, mount holds until t_r) → `tracking`.
+- Arrival like `TrackExecutor._arrive` (within 0.3°, still). Late arrival → one re-plan; late again → stop "Missed the aircraft".
+- **Update loop every 1.0 s** (`air_clock` / `air_sleep` test seams like `track_clock` / `track_sleep`):
+  - a = the runner's `aircraft_for(icao)`; `predict.path(a, t0, now + 10, 0.5)` with t0 = now − 0.5 (tracking) or t_r (waiting: the mount must hold, P21);
+  - each point → look angles from the D1 site → D2 refraction → observed (alt, az) + axis0 unwrapped inside the wrap window;
+  - **cut** the path before the first point that is below Lim EL (+0 pad), within 16° of the Sun (`R_DETOUR_DEG`), outside the wrap window (`ROUTE_WRAP_MARGIN_DEG`), beyond the range limit, or over the D3 rate; the cut path's end reason is remembered (the track ends when the clock reaches the cut point + 1 s);
+  - fewer than 2 points left → end now with that reason;
+  - `custom_path_new("altaz")` + `custom_path_add_points` (JD from the absolute point times: this IS the latency compensation, the fix time drives the prediction) + `custom_path_apply(0)`;
+  - the safety monitor's sky-corridor plan is replaced with the new path each update (`route_begin(..., sky=True)` or a new `route_replace` in safety.py if `route_begin` resets state that must survive); a normal 1 s replacement must never trip the corridor (test).
+- **End conditions (STOP + tracking_off → state STOPPED with the reason, `airtrack.ended` for 30 s):**
+  - Q60: last fix > 10 s old → "ADS-B data lost"; predictor `kalman` for > 5 s continuously → "ADS-B prediction unreliable";
+  - ADS-B not green → its detail;
+  - the cut reasons: "Aircraft below Lim EL", "Sun approaching", "Track left the wrap window", "Out of range", "Overflight too close to the zenith";
+  - the aircraft disappears from the table → "Aircraft lost";
+  - STOP / link loss / safety stop → the same `on_cancel` texts as the satellite track; another motion command, sequence or a satellite track → ended "Replaced by …" (G5), and a new aircraft track ends the old one.
+- Never relies on the path hold (P23): the loop stops the mount itself; a crashed loop stops the mount (`_abort` as TrackExecutor).
+- State override text: "Tracking CALLSIGN" (callsign, else ICAO), "Waiting for CALLSIGN".
+- Snapshot `airtrack`: `{icao, callsign, phase, t_r, notes, ended: {icao, reason, at} | null}`; null when idle and nothing ended in the last 30 s.
+- Simulated aircraft (Q61) are trackable: no special case.
+
+**4. Web**
+- `utils/aircraft.ts` `aircraftTrackVerdict`: the last branch uses the polled gateway check (`/api/mount/check {cmd:'track_aircraft', args:{icao}}`, 1 Hz, like TrackCard's satellite verdict: in-flight skip, generation counter, unreachable verdict). Keep the earlier local branches (no ADS-B / not green / not in view) so no request is sent then. Remove `AIRCRAFT_TRACK_PENDING`.
+- TRACK AIRCRAFT button on the A1b card and TRACK SELECTED TARGET on the Track Target AIRCRAFT tab send `track_aircraft`; refusal text shown 3 s like satellites.
+- The A1b card while this aircraft is tracked: the reason line shows the phase ("Slewing to rendezvous", "Waiting for the aircraft", "Tracking"), then the ended reason for 30 s; the button is disabled while it is the tracked aircraft (STOP is the existing global STOP).
+- The tracked aircraft stays selected after the ack (selection store, like `afterTrackStarted`). The Sky Viewer marks the tracked aircraft (the same tracked-target ring the satellites use, if one exists; else no new visual — list it).
+- Mount status shows the override text (already generic).
+
+**5. Tests**
+- Unit (`gateway/tests/test_airtrack.py`, fakes only: `FakePwi4`, `fake_adsb`, a fake runner exposing `aircraft_for` / `green` / `detail`; synthetic `adsb_core.state.Aircraft` built with `adapt_feed_aircraft` from `offset_row` rows):
+  - each check rule (reason + code), the check endpoint body, `track_aircraft` refused / accepted;
+  - straight overflight: rendezvous, wrap set once before the goto, updates every 1 s with first point = now − 0.5 (tracking) / t_r (waiting), JD times, point spacing 0.5 s, ≤ 10 s ahead;
+  - turning flight (turn_dps) follows `predict.path`;
+  - gaps: fix 9 s old → continues; 11 s → "ADS-B data lost"; kalman 6 s → "ADS-B prediction unreliable";
+  - cuts: Lim EL exit, Sun 16°, wrap window, range, zenith rate; ends at the cut + 1 s;
+  - feed goes not green mid-track → stop;
+  - G5: satellite track ↔ aircraft track ↔ Go To replace each other; STOP / link loss;
+  - D1 note, D2 refraction applied, D3 refusal + note;
+  - the corridor monitor not tripped by 30 s of 1 s replacements on a straight overflight;
+  - audit has ICAO + callsign only.
+- PWI4-sim (`gateway/tests/test_airtrack_pwi4sim.py`, `PWI4_SIM=1` only, `sim_guard` via the shared `pwi` fixture, Sun pinned with `PW_TEST_SUN_ALTAZ`, a throwaway gateway with `--simulated-adsb` against `fake_adsb.FakeFeed` on 18750–18759, the feed fed by a synthetic overflight generator at 1 Hz with 0.3 s latency, positioned relative to PWI4's site):
+  - GA fly-by (3 km, 130 m/s, 2 km aside); cruise (10.7 km, 250 m/s, peak ~60°); a 3°/s turn: mean error vs truth ≤ 0.05°, max ≤ 0.3° while tracking (after 3 s settle);
+  - feed stop mid-track → STOP within 10 s + 1.5 s, mount still afterwards;
+  - Lim EL exit → ended at the cut, mount stopped;
+  - the wrap window restored by the fixture.
+  The worker writes these but does NOT run them (the supervisor runs them when the user has PWI4 in Simulator mode and their servers stopped).
+- Web vitest: the verdict branches (incl. the polled check), the card's phase lines, the button send + refusal.
+- Gates: touched gateway tests + the non-sim gateway suite once; ruff on touched files; web typecheck / lint / vitest.
 
 ### Decision log
 | Date | Ref | Decision |
@@ -3572,6 +3652,16 @@ The user stopped 3200 (8400 / 8410 already down; PWI4 kept running in Simulator 
   - Checks: typecheck 0, lint 0 errors, vitest 678 (+1 colour test in `aircraft.spec.ts`). Browser at 1920 + 1280 @1.5: the outlined icons stand out on the dusk sky (the dark-sky variant); the light-sky variant is covered by the unit test (the sky was past daylight at the check).
 
 - **User 11-10: the tooltip flip.** The flip existed but measured the tooltip before its new text rendered (width 0 / stale on first show and on a satellite ↔ aircraft switch), so it spilled into the next panel. Now `placeTip()` runs on the pointer move, again after the render (`nextTick`), and whenever the text changes (`watch([airTip, tipLines])`): right / below the pointer, flipped left / above to stay inside the chart box. Checks: typecheck 0, lint 0 errors, vitest 679. **Browser check owed** (the user's servers were back up): the user confirms on their 3200 (hover an aircraft near the right edge).
+### T5.6b log (2026-11-10 / 11-11)
+
+- Spec: "T5.6b — aircraft cueing (spec, 2026-11-10)" above; supervisor decisions D1 (pointing from PWI4's site, a note when Settings differs > 30 m), D2 (the path sent refracted, P18 parity; supersedes Q39's "no refraction" for pointing only), D3 (zenith rule from the axis-0 rate vs 0.8 × vmax, note at peak ≥ 87°), D4 (a separate snapshot `airtrack`; satellite and aircraft tracks replace each other).
+- Worker (Sonnet; stopped once by a usage limit mid-task, resumed 11-11): `gateway/airtrack.py` (`AirChecker`, `AirTrackExecutor`, `build_path`), `track_aircraft` in commands / control / app / safety (`replace_route`) / jog / snapshot / poller, `adsb.py` (`core`, `range_limit_m`); web `aircraft-track.ts`, `useAircraftVerdict.ts`, card / AIRCRAFT tab buttons, selection, jog gating. Additions: the rendezvous axis-0 representation that keeps the straight-line track inside its window longest (else the nearest).
+- Supervisor check: code read (path cuts, Q60, rendezvous, check rules); gateway non-sim 754 passed / 72 skipped / 1 failed (`test_homed.py::test_connect_on_an_already_connected_mount_ends_homed`, a `wait_for` timing test in an untouched area, 3 / 3 files green alone → flaky list); typecheck 0, lint 0 errors, vitest 696; no pyc in adsb_interpreter.
+- Note: the slew estimate assumes the nearest axis-0 representation; when the rendezvous picks the other one the mount may arrive late and use its one re-plan.
+- **PWI4-sim (11-11, the user's servers stopped, PWI4 Simulator):** the first run failed 5 / 5 on test-harness faults, fixed by the supervisor: the ICAOs "ABG001" / "ABT001" / "ABL001" are not hex (the gateway rightly refused them → `CASE_ICAO`, "ABE001"); `Rig.close` awaited the fake feed on a closed event loop, which masked every result (now suppressed). Then **5 / 5**: cruise 0.008° mean / 0.047° max, GA 0.033 / 0.074, turn 0.054 / 0.118 (re-run 0.021 / 0.062; the turn case got its own 0.08° mean limit, the max limit 0.3° unchanged), feed freeze → "ADS-B data lost" 10.52 s after the last fix, Lim EL exit → ended 0.89 s after the exit, lowest 15.02°; PWI4.cfg unchanged.
+- **Browser (11-11)** on the user's 8500 simulated feed (read only; throwaway Nuxt 13272 / gateway 18734 / analysis 18711; the scenario's high aircraft come and go, and the feed went silent / was restarted by the user once): N688CP at +10° crossing Lim EL → TRACK AIRCRAFT accepted with the rendezvous at the crossing; card lines "Slewing to rendezvous" → "Waiting for the aircraft" → "Tracking", button TRACKING (disabled), state TRACKING "Tracking N688CP"; closing the browser → "Control link lost", mount stopped (disconnect = stop); 1920 + 1280×600 @1.5: no clipped value, no overflow. Audit: `track_aircraft` / `airtrack_stopped` with ICAO + callsign only. The card's az / el is the feed row (geometric, up to ~1.5 s old), so it differs from the mount readout by a few tenths while the aircraft climbs; expected.
+- Pre-existing: one 404 console error on page load (also in the T5.5 runs); not investigated.
+
 ## 9. Known limitations & risks
 
 - **Gateway crash (G4 note):** nothing can send a stop if the gateway process dies; mitigated by a UI warning that hands the user off to PWI4.

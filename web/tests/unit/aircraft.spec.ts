@@ -3,11 +3,11 @@
 // and the Track Target AIRCRAFT tab list logic.
 import { beforeEach, describe, expect, it } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { effectiveVisibility, DEFAULT_FILTERS } from '../../app/utils/filters'
+import { effectiveVisibility, DEFAULT_FILTERS, parseFilters } from '../../app/utils/filters'
 import type { AdsbInfo, AircraftRow } from '../../app/utils/adsb'
 import {
   aircraftCardValues, aircraftFilterState, aircraftLabel, aircraftTitle, aircraftTrackVerdict, AIRCRAFT_NOT_IN_VIEW,
-  AIRCRAFT_TRACK_PENDING, azDiff, feedDownChip, formatAgeS, formatAltFt, formatKt, formatLat, formatLon, formatRangeKm,
+  azDiff, feedDownChip, formatAgeS, formatAltFt, formatKt, formatLat, formatLon, formatRangeKm,
   formatTrack, formatVRate, heightSourceFlag, iconRotationRad, ingestFrame, MAX_AHEAD_S, normAz, predictAzEl,
   showSimulatedBadge,
 } from '../../app/utils/aircraft'
@@ -175,9 +175,9 @@ describe('labels and card formats', () => {
 })
 
 describe('TRACK AIRCRAFT verdict, filter enable rule, chips', () => {
-  it('tracking is disabled with the T5.6b reason on a green feed', () => {
-    expect(aircraftTrackVerdict(row(), GREEN)).toEqual({ enabled: false, reason: AIRCRAFT_TRACK_PENDING })
-    expect(AIRCRAFT_TRACK_PENDING).toBe('Aircraft tracking: coming in T5.6b')
+  it('the local branches decide without a request; on a green feed the polled gateway check decides', () => {
+    // (before the first answer: disabled, no reason; the polled branches are in aircraft-track.spec.ts)
+    expect(aircraftTrackVerdict(row(), GREEN)).toEqual({ enabled: false, reason: null })
     expect(aircraftTrackVerdict(null, GREEN).reason).toBe(AIRCRAFT_NOT_IN_VIEW)
     expect(aircraftTrackVerdict(row(), DOWN).reason).toBe('ADS-B platform unreachable')
     expect(aircraftTrackVerdict(row(), null).enabled).toBe(false)
@@ -191,10 +191,11 @@ describe('TRACK AIRCRAFT verdict, filter enable rule, chips', () => {
     expect(aircraftFilterState(null).enabled).toBe(false)
   })
 
-  it('the Airborne child needs its parent: visibility', () => {
+  it('Aircrafts alone (no Airborne child): visibility; a stored airborne=false is ignored', () => {
     expect(effectiveVisibility({ ...DEFAULT_FILTERS }).showAircraft).toBe(true)
     expect(effectiveVisibility({ ...DEFAULT_FILTERS, aircrafts: false }).showAircraft).toBe(false)
-    expect(effectiveVisibility({ ...DEFAULT_FILTERS, airborne: false }).showAircraft).toBe(false)
+    expect(effectiveVisibility(parseFilters(JSON.stringify({ ...DEFAULT_FILTERS, airborne: false }))).showAircraft).toBe(true)
+    expect('airborne' in parseFilters(JSON.stringify({ airborne: false }))).toBe(false)
   })
 
   it('feed-down chip: ADS-B in use but not green; the simulated badge only on a green simulated feed', () => {

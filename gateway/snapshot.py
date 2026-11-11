@@ -185,6 +185,24 @@ class TrackInfo(BaseModel):
     ended: TrackEndedInfo | None = None
 
 
+class AirTrackEndedInfo(BaseModel):
+    icao: str
+    reason: str
+    at: float  # Unix seconds
+
+
+class AirTrackInfo(BaseModel):
+    """T5.6b: the aircraft track (null = none), separate from the satellite `track` (D4). Only
+    `ended` is set for 30 s after a track ended (the other fields are null then)."""
+
+    icao: str | None = None
+    callsign: str | None = None
+    phase: str | None = None  # slewing | waiting | tracking
+    t_r: float | None = None  # the rendezvous time (Unix seconds)
+    notes: list[str] = Field(default_factory=list)
+    ended: AirTrackEndedInfo | None = None
+
+
 class AdsbInfo(BaseModel):
     """T5.4b: the ADS-B connection summary (no aircraft; those travel in the 1 Hz `aircraft`
     message). `green` is the Q62 enable rule for the aircraft feature."""
@@ -225,6 +243,7 @@ class MountSnapshot(BaseModel):
     route: RouteInfo | None = None  # T3.5c: null = no D-SUN route running
     track: TrackInfo | None = None  # T4.2c: null = no object track (and none ended lately)
     adsb: AdsbInfo | None = None  # T5.4b: null = no ADS-B runner attached
+    airtrack: AirTrackInfo | None = None  # T5.6b: null = no aircraft track (and none ended lately)
 
 
 def site_key(result: PollResult) -> tuple[float, float, float] | None:
@@ -292,6 +311,7 @@ def build_snapshot(
     turn: TurnInfo | None = None,
     route: RouteInfo | None = None,
     track: TrackInfo | None = None,
+    airtrack: AirTrackInfo | None = None,
 ) -> MountSnapshot:
     """result = last good fetch (or the failed one). down_reason forces DISCONNECTED.
 
@@ -432,4 +452,5 @@ def build_snapshot(
         turn=turn if connected else None,
         route=route if connected else None,
         track=track if connected else None,
+        airtrack=airtrack if connected else None,
     )

@@ -2,7 +2,7 @@
 // Track Info card (A1a/A1c, concept/Track Cards.png), read-only. Values refresh at 1 Hz from
 // /api/sky/state (polled by stores/selection.ts while an object is selected).
 // T5.5: a selected AIRCRAFT shows the A1b card instead (rows from the 1 Hz `aircraft` message, stores/aircraft.ts);
-// TRACK AIRCRAFT is present but disabled until T5.6b (utils/aircraft.ts keeps the verdict in one function).
+// TRACK AIRCRAFT (T5.6b) sends track_aircraft; its verdict is the gateway check (utils/aircraft.ts keeps it in one function).
 // The A1e strip (a tracked satellite under a selected object) is shared.
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import FlagBadge from '~/components/track/FlagBadge.vue'
@@ -13,6 +13,8 @@ import { useGatewayApi } from '~/composables/useGatewayApi'
 import { useSelectionStore } from '~/stores/selection'
 import { useAircraftStore } from '~/stores/aircraft'
 import { aircraftCardValues, aircraftTrackVerdict } from '~/utils/aircraft'
+import { airTrackCardState, type AirTrackLike } from '~/utils/aircraft-track'
+import { useAircraftVerdict } from '~/composables/useAircraftVerdict'
 import { useSkyStore } from '~/stores/sky'
 import { SAT_CLASS_COLORS } from '~/lib/sky/theme'
 import { parseTrackVerdict, UNREACHABLE_VERDICT, type TrackVerdict } from '~/utils/track-verdict'
@@ -28,7 +30,36 @@ const air = useAircraftStore()
 const icao = computed(() => sel.selectedIcao)
 const airRow = computed(() => (icao.value === null ? null : air.get(icao.value)?.row ?? null))
 const airVals = computed(() => aircraftCardValues(airRow.value, icao.value ?? ''))
-const airVerdict = computed(() => aircraftTrackVerdict(airRow.value, air.adsb))
+// T5.6b: the gateway's check of track_aircraft (polled at 1 Hz only while ADS-B is green and the aircraft is in view)
+const airActive = computed(() => !!air.adsb?.green && airRow.value !== null)
+const { verdict: airPolled } = useAircraftVerdict(icao, airActive)
+const airVerdict = computed(() => aircraftTrackVerdict(airRow.value, air.adsb, airPolled.value))
+const airTrack = computed(() => ((mount.snapshot as { airtrack?: AirTrackLike | null } | null)?.airtrack ?? null))
+const airState = computed(() => airTrackCardState(airTrack.value, icao.value))
+const airRefusal = ref<{ text: string, icao: string, at: number } | null>(null)
+const airSending = ref(false)
+const airEnabled = computed(() => airVerdict.value.enabled && !airState.value.isTracked && !airSending.value)
+// the reason line: a fresh refusal (3 s), else the phase / the ended reason (30 s, from the gateway), else the verdict
+const airReason = computed(() => {
+  const r = airRefusal.value
+  if (r && r.icao === icao.value && mount.now - r.at < REFUSAL_SHOW_MS && !airState.value.isTracked) return r.text
+  return airState.value.line ?? airVerdict.value.reason
+})
+
+async function onTrackAircraft() {
+  const i = icao.value
+  if (i === null || !airEnabled.value) return
+  airSending.value = true
+  airRefusal.value = null
+  try {
+    const ack = await mount.sendCommand('track_aircraft', { icao: i })
+    if (ack.ok) sel.afterAircraftTrackStarted(i)
+    else airRefusal.value = { text: ack.reason ?? 'Command refused', icao: i, at: Date.now() }
+  }
+  finally {
+    airSending.value = false
+  }
+}
 
 // A1e: the main card (pinned tracked object, or the selection); the strip is the tracked A under a selected B
 const norad = computed(() => sel.cardNorad)
@@ -197,13 +228,14 @@ async function onTrack() {
         {{ airVals.age }}
       </dd>
     </dl>
-    <span class="track-wrap" :title="airVerdict.reason ?? undefined" :class="{ on: airVerdict.enabled }">
+    <span class="track-wrap" :title="airReason ?? undefined" :class="{ on: airEnabled }">
       <button
-        type="button" class="track-btn" :class="{ on: airVerdict.enabled }" :disabled="!airVerdict.enabled"
-        :data-enabled="airVerdict.enabled ? 'true' : 'false'" data-testid="track-aircraft"
-      >TRACK AIRCRAFT</button>
+        type="button" class="track-btn" :class="{ on: airEnabled, active: airState.isTracked }" :disabled="!airEnabled"
+        :data-enabled="airEnabled ? 'true' : 'false'" :data-tracking="airState.isTracked ? 'true' : 'false'"
+        data-testid="track-aircraft" @click="onTrackAircraft"
+      >{{ airState.isTracked ? 'TRACKING' : 'TRACK AIRCRAFT' }}</button>
     </span>
-    <div v-if="airVerdict.reason" class="track-reason" :title="airVerdict.reason" data-testid="aircraft-reason">{{ airVerdict.reason }}</div>
+    <div v-if="airReason" class="track-reason" :title="airReason" data-testid="aircraft-reason">{{ airReason }}</div>
   </div>
   <div
     v-else-if="info" class="card" :class="{ refocus: refocusable }" data-testid="track-card"

@@ -3,6 +3,7 @@
 import type { AdsbInfo, AircraftRow } from './adsb'
 import { fmtThousands } from './format'
 import { formatAz, formatEl } from './track-format'
+import type { TrackVerdict } from './track-verdict'
 
 export const EM_DASH = '—'
 const MINUS = '−'
@@ -218,22 +219,28 @@ export function aircraftCardValues(row: AircraftRow | null | undefined, icao: st
 
 // ---------------------------------------------------------------- TRACK AIRCRAFT verdict
 
-export const AIRCRAFT_TRACK_PENDING = 'Aircraft tracking: coming in T5.6b'
 export const AIRCRAFT_NOT_IN_VIEW = 'Aircraft not in view'
 export const ADSB_STATUS_UNAVAILABLE = 'ADS-B status unavailable'
 
 export interface AircraftVerdict { enabled: boolean, reason: string | null }
 
 /**
- * The one place that decides TRACK AIRCRAFT (card and Track Target tab). T5.6b replaces the final
- * branch with the gateway check (`/api/mount/check` track_aircraft); until then the button is present
- * but disabled with a fixed reason.
+ * The one place that decides TRACK AIRCRAFT (card and Track Target tab). The local branches (no ADS-B
+ * status, not green, not in view) need no request; the last one is the gateway's polled check
+ * (`/api/mount/check` track_aircraft, composables/useAircraftVerdict.ts): its refusal reason, or, when it
+ * allows the track, its first note (e.g. the near-zenith one) as the line. Before the first answer the
+ * button is disabled without a reason.
  */
-export function aircraftTrackVerdict(row: AircraftRow | null | undefined, adsb: AdsbInfo | null | undefined): AircraftVerdict {
+export function aircraftTrackVerdict(
+  row: AircraftRow | null | undefined,
+  adsb: AdsbInfo | null | undefined,
+  polled: Pick<TrackVerdict, 'enabled' | 'reason' | 'notes'> | null = null,
+): AircraftVerdict {
   if (!adsb) return { enabled: false, reason: ADSB_STATUS_UNAVAILABLE }
   if (!adsb.green) return { enabled: false, reason: adsb.detail || 'ADS-B feed down' }
   if (!row) return { enabled: false, reason: AIRCRAFT_NOT_IN_VIEW }
-  return { enabled: false, reason: AIRCRAFT_TRACK_PENDING }
+  if (!polled) return { enabled: false, reason: null }
+  return { enabled: polled.enabled, reason: polled.reason ?? polled.notes?.[0] ?? null }
 }
 
 // ---------------------------------------------------------------- Filters / chips

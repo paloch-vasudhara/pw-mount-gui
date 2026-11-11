@@ -704,7 +704,8 @@ class SafetyEngine:
 
     def check(self, cmd: Command, ctx: CommandContext) -> str | None:
         name = cmd.name
-        if name == "track_object":  # T4.1: only the site gate here; the pass rules are trackcheck
+        if name in ("track_object", "track_aircraft"):
+            # T4.1: only the site gate here; the pass rules are trackcheck (aircraft: airtrack)
             sc = ctx.site_check
             if sc is not None and sc.ok is False:
                 ctx.code = reason_code(R_SITE)
@@ -954,6 +955,21 @@ class SafetyMonitor:
         p.paths[0].extend(corridor)
         p.target = target
         p.duration_s += extra_s
+
+    def replace_route(
+        self, corridor: list[tuple[float, float]], target: tuple[float, float], remaining_s: float
+    ) -> bool:
+        """An aircraft track replaced its path (T5.6b, every 1 s): the running route plan keeps its
+        start, begin time and the stall window; only the corridor, the target and the end move.
+        `remaining_s` = how long the new path (+ settle) still has to run from now. False when no
+        route plan is running (the caller then begins one)."""
+        p = self.plan
+        if p is None or not p.route:
+            return False
+        p.paths = [corridor]
+        p.target = target
+        p.duration_s = (time.monotonic() - p.t_begin) + remaining_s
+        return True
 
     def clear(self) -> None:
         """New command / STOP / link loss: back to the predictive rules."""

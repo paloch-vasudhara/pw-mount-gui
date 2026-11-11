@@ -345,7 +345,7 @@ const orbitLabel = computed(() => ORBITS.find(o => o.value === orbit.value)?.lab
           </button>
         </div>
 
-        <AircraftTargetPane v-if="tab === 'aircraft'" />
+        <AircraftTargetPane v-if="tab === 'aircraft'" @tracked="open = false" />
 
         <template v-else>
         <div class="tt-filters">

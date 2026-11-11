@@ -67,5 +67,13 @@ export const useSelectionStore = defineStore('selection', () => {
     select(norad)
   }
 
-  return { selectedNorad, selectedIcao, cardNorad, panel, state, select, selectAircraft, deselect, afterTrackStarted }
+  /** A successful track_aircraft keeps the aircraft selected (its A1b card shows the phase). */
+  function afterAircraftTrackStarted(icao: string) {
+    selectAircraft(icao)
+  }
+
+  return {
+    selectedNorad, selectedIcao, cardNorad, panel, state, select, selectAircraft, deselect, afterTrackStarted,
+    afterAircraftTrackStarted,
+  }
 })

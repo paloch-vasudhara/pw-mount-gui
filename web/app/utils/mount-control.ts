@@ -30,6 +30,8 @@ export interface ControlSnapshotLike {
   /** T3.5: a Sun-avoiding route (state SLEWING, state_reason "Avoiding the Sun"). */
   /** T4.2: object-track workflow (null when idle). */
   track?: { phase?: string | null, norad?: number | null } | null
+  /** T5.6b: aircraft-track workflow (null when idle). */
+  airtrack?: { phase?: string | null, icao?: string | null } | null
   route?: { active?: boolean, sides?: string[], t_end?: number } | null
 }
 

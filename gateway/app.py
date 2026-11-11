@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict
 
 from . import cctv as cctv_mod
 from .adsb import AdsbRunner
+from .airtrack import AirChecker
 from .audit import AuditLog
 from .commands import CommandError, validate_command
 from .config import Settings
@@ -52,7 +53,7 @@ WS_UNAUTHORIZED = 4401
 
 
 CHECKABLE = frozenset(
-    {"goto_altaz", "goto_radec_j2000", "jog", "step", "wrap_turn", "track_object"}
+    {"goto_altaz", "goto_radec_j2000", "jog", "step", "wrap_turn", "track_object", "track_aircraft"}
 )
 
 
@@ -176,6 +177,23 @@ def create_app(
     control.track_eval = track_eval
     control.route_extend = monitor.extend_route  # T4.2c: long tracks grow the monitor's plan
     poller.track_provider = control.trackx.info
+    # T5.6b aircraft cueing: optional (no runner / no adsb_core module = refused with a reason)
+    control.adsb_runner = adsb
+
+    def settings_site() -> tuple[float, float, float]:
+        loc = store.current.location  # the display location (D1: pointing uses PWI4's site)
+        return (loc.lat_deg, loc.lon_deg, loc.alt_m)
+
+    control.route_replace = monitor.replace_route
+    control.air_checker = AirChecker(
+        lambda: control.adsb_runner,
+        safety.lim_el,
+        safety.sun_altaz_at,
+        lambda: control.air_clock(),
+        settings_site,
+    )
+    control.air_eval = lambda icao, site, st: control.air_checker.evaluate(icao, site, st)
+    poller.airtrack_provider = control.airx.info
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -435,6 +453,9 @@ def create_app(
             # mount guards) wins; the TLE fetch and the pass rules only run when the mount could
             # take the command.
             v, extra, _ = control.track_verdict(cmd, None)
+        elif cmd.name == "track_aircraft":
+            # T5.6b: the same verdict as the real command (ControlService.air_verdict)
+            v, extra, _ = control.air_verdict(cmd, None)
         else:
             v = control.dry_check(cmd)
         target = None if v.target is None else {"alt": v.target[0], "az": v.target[1]}

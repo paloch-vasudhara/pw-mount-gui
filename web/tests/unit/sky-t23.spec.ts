@@ -12,12 +12,11 @@ import {
 import { resolveFlag } from '../../app/utils/country-flag'
 
 describe('filters', () => {
-  it('defaults: everything on (Aircrafts / Airborne are gated by the ADS-B connection, not the stored value)', () => {
+  it('defaults: everything on (Aircrafts is gated by the ADS-B connection, not the stored value)', () => {
     expect(effectiveVisibility({ ...DEFAULT_FILTERS })).toEqual({
       showLeo: true, showMeo: true, showGeo: true, showAircraft: true, showStars: true, showBodies: true, showLabels: true,
     })
     expect(DEFAULT_FILTERS.aircrafts).toBe(true)
-    expect(DEFAULT_FILTERS.airborne).toBe(true)
   })
 
   it('parent off hides all children but keeps the children checks', () => {

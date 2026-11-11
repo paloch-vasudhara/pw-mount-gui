@@ -85,6 +85,7 @@ class Poller:
         self.turn_provider: Callable[[], Any] = lambda: None
         self.route_provider: Callable[[], Any] = lambda: None  # T3.5c: the D-SUN route
         self.track_provider: Callable[[], Any] = lambda: None  # T4.2c: the object track
+        self.airtrack_provider: Callable[[], Any] = lambda: None  # T5.6b: the aircraft track
         self.adsb_provider: Callable[[], Any] = lambda: None  # T5.4b: the ADS-B block (cached)
 
     async def fetch_once(self, now_mono: float | None = None) -> PollResult:
@@ -178,6 +179,7 @@ class Poller:
             turn=self.turn_provider() if live else None,
             route=self.route_provider() if live else None,
             track=self.track_provider() if live else None,
+            airtrack=self.airtrack_provider() if live else None,
         )
         if snap.homed is not None and snap.homed.reason == "stalled" and snap.state == "STOPPED":
             snap.state_reason = self.stall_message_provider()

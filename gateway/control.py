@@ -81,7 +81,7 @@ R_ROUTING = "Avoiding the Sun; press STOP first"
 # the lock commands are never gated; a future jog joins this set.
 ROUTABLE = frozenset({"goto_altaz", "goto_radec_j2000", "wrap_turn"})  # T3.5c: D-SUN routed
 HOMED_GATED = frozenset(
-    {"goto_altaz", "goto_radec_j2000", "jog", "step", "wrap_turn", "track_object"}
+    {"goto_altaz", "goto_radec_j2000", "jog", "step", "wrap_turn", "track_object", "track_aircraft"}
 )
 R_OBJECT_TRACK = "Object tracking; press STOP first"  # T4.2c: jog / step / turn refused
 CODE_HOME_BLOCKED = "home_blocked_confirm"  # disconnect: home is blocked, ask the user once
@@ -116,6 +116,13 @@ def _track_eval_missing(norad: int, site: Any, status: Any, fresh: bool) -> Any:
     from .trackcheck import TrackCheck
 
     return TrackCheck("Object tracking not available", "not_available")
+
+
+def _air_eval_missing(icao: str, site: Any, status: Any) -> Any:
+    """Default `air_eval` (no AirChecker attached): aircraft cueing is not available."""
+    from .airtrack import AirCheck
+
+    return AirCheck("ADS-B not available", "adsb_down")
 
 
 class Pwi4Writer:
@@ -398,6 +405,15 @@ class ControlService:
         self.track_sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep
         self.track_eval: Callable[[int, Any, Any, bool], Any] = _track_eval_missing
         self.route_extend: Callable[..., None] = lambda *a, **k: None
+        # T5.6b aircraft track: clock / wait (test seams), the check (set by app.py:
+        # AirChecker.evaluate), the ADS-B runner (None = no aircraft feature) and the monitor's
+        # route-plan replacement (every 1 s update; False = no plan was running).
+        self.air_clock: Callable[[], float] = time.time
+        self.air_sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep
+        self.air_eval: Callable[[str, Any, Any], Any] = _air_eval_missing
+        self.adsb_runner: Any = None
+        self.air_checker: Any = None  # the AirChecker (the executor builds its path contexts)
+        self.route_replace: Callable[..., bool] = lambda *a, **k: False
         self._route_set_override = False
         self._route_prev: tuple[str, str | None] | None = None
         self.holder: str | None = None
@@ -421,6 +437,9 @@ class ControlService:
         from .trackexec import TrackExecutor  # local: trackexec imports this module
 
         self.trackx = TrackExecutor(self)
+        from .airtrack import AirTrackExecutor  # local: airtrack imports this module
+
+        self.airx = AirTrackExecutor(self)
         self.homed = HomedGuard(audit)
         self.homed.connecting = lambda: (
             self.seq.active and self.seq.info is not None and self.seq.info.name == "connect"
@@ -522,6 +541,7 @@ class ControlService:
         name = cmd.name
         if name not in ("stop", "take_control", "release_control"):
             self.trackx.clear_ended_override()  # "Track ended at Lim EL" lasts until a command
+            self.airx.clear_ended_override()
         if name == "stop":
             return await self._stop_command(conn_id, cmd)
         if name == "take_control":
@@ -548,6 +568,8 @@ class ControlService:
 
         if name == "track_object":  # T4.2c: the verdict is /api/mount/check's (track_verdict)
             return await self._track_command(conn_id, cmd)
+        if name == "track_aircraft":  # T5.6b: the verdict is /api/mount/check's (air_verdict)
+            return await self._air_command(conn_id, cmd)
 
         # ---- motion commands
         reason = self._motion_refusal(conn_id, cmd)
@@ -555,7 +577,7 @@ class ControlService:
             return self._refuse(conn_id, cmd, reason)
         if self.holder is None:
             self._set_holder(conn_id, "first_command")
-        if self.trackx.active:  # Go To / sidereal TRACK replace an object track; off ends it
+        if self.trackx.active or self.airx.active:  # Go To / sidereal TRACK replace a track
             if name == "tracking" and not cmd.args["on"]:
                 await self._end_track("track_stopped", "Tracking turned off")
             else:
@@ -614,7 +636,7 @@ class ControlService:
             return self._refuse(conn_id, cmd, reason, code)
         if self.holder is None:
             self._set_holder(conn_id, "first_command")
-        if self.trackx.active:  # A1e / G5: the new track replaces the running one
+        if self.trackx.active or self.airx.active:  # A1e / G5: the new track replaces the old
             await self._end_track("track_replaced", "Replaced by a new track")
         rdv = tc.plan.rendezvous
         goto = Command(
@@ -641,10 +663,79 @@ class ControlService:
         self._audit_cmd(conn_id, cmd, True, None)
         return self._ack(conn_id, cmd.id, cmd.name, True, None)
 
+    # ------------------------------------------------------------------ aircraft track (T5.6b)
+
+    def air_verdict(
+        self, cmd: Command, conn_id: str | None
+    ) -> tuple[MotionVerdict, dict[str, Any], Any]:
+        """THE verdict of `track_aircraft`, shared by POST /api/mount/check (`conn_id` None) and the
+        real command: row 0 (the mount guards, `_motion_verdict`), then the aircraft rules and the
+        rendezvous plan (`air_eval`, the AirChecker). Light maths: runs on the caller's thread.
+        Returns (verdict, check-body extras, the AirCheck or None when row 0 refused)."""
+        v = self._motion_verdict(cmd, conn_id)
+        extra: dict[str, Any] = {"notes": [], "aircraft": None}
+        ac = None
+        if v.reason is None:
+            site = self.poller.pwi4_site()
+            if site is None:
+                return MotionVerdict(R_NO_PWI4, "no_pwi4"), extra, None
+            ac = self.air_eval(cmd.args["icao"], site, self.fresh_status())
+            v = MotionVerdict(ac.reason, ac.code, ac.target)
+            extra = {"notes": ac.notes, "aircraft": ac.aircraft}
+        return v, extra, ac
+
+    async def _air_command(self, conn_id: str, cmd: Command) -> dict[str, Any]:
+        """TRACK AIRCRAFT: the verdict again, then the rendezvous goto through the normal job
+        queue (validated, D-SUN routed); acked when that goto has started. The executor
+        (airtrack.py) takes it from there."""
+        v, _, ac = self.air_verdict(cmd, conn_id)
+        reason, code = v.reason, v.code
+        if reason is None:
+            reason = self._gateway_refusal(cmd, conn_id)
+            code = self._code_of(reason) if reason else None
+        if reason is None and (ac is None or ac.plan is None):
+            reason, code = R_NO_PWI4, "no_pwi4"
+        if reason:
+            return self._refuse(conn_id, cmd, reason, code)
+        if self.holder is None:
+            self._set_holder(conn_id, "first_command")
+        if self.trackx.active or self.airx.active:  # G5: the new track replaces the running one
+            await self._end_track("track_replaced", "Replaced by a new track")
+        rdv = ac.plan.rendezvous
+        goto = Command(
+            f"{cmd.id}:rdv",
+            "goto_altaz",
+            {
+                "alt": rdv.alt,
+                "az": rdv.az % 360.0,
+                "target0": rdv.axis0,
+                "wrap_min": ac.plan.wrap_min,  # internal: the clamped window (P9 / P23)
+            },
+        )
+        gv = self._motion_verdict(goto, conn_id)
+        if gv.reason:
+            return self._refuse(conn_id, cmd, gv.reason, gv.code)
+        job = _Job(goto, conn_id)
+        try:
+            self._queue.put_nowait(job)
+        except asyncio.QueueFull:
+            return self._refuse(conn_id, cmd, R_BUSY)
+        self.airx.begin(conn_id, cmd, ac, job)
+        try:
+            ok, reason = await asyncio.wait_for(asyncio.shield(job.future), ACK_TIMEOUT_S)
+        except TimeoutError:
+            ok, reason = False, "Command timed out"
+        if not ok:
+            self.airx.end("track_stopped", reason, quiet=True)
+            return self._refuse(conn_id, cmd, reason or "Command failed")
+        self._audit_cmd(conn_id, cmd, True, None)
+        return self._ack(conn_id, cmd.id, cmd.name, True, None)
+
     async def _end_track(self, event: str, reason: str) -> None:
-        """End the running object track from a command that replaces it: the track's records
-        first (sync), then a STOP so the mount leaves its path before the new command."""
+        """End the running object / aircraft track from a command that replaces it: the track's
+        records first (sync), then a STOP so the mount leaves its path before the new command."""
         self.trackx.end(event, reason)
+        self.airx.end(event, reason)
         self.motion_cleared()
         with contextlib.suppress(Pwi4Error):
             await self._stop_requests()
@@ -691,6 +782,7 @@ class ControlService:
         if self.holder is None:
             self._set_holder(conn_id, "first_command")
         self.trackx.end("track_replaced", f"Replaced by {cmd.name}")  # the sequence stops the mount
+        self.airx.end("track_replaced", f"Replaced by {cmd.name}")
         self.seq.start(cmd, conn_id)
         self._audit_cmd(conn_id, cmd, True, None)
         return self._ack(conn_id, cmd.id, cmd.name, True, None)
@@ -707,7 +799,9 @@ class ControlService:
             return R_OTHER_HAS_CONTROL, None
         if self.seq.active:
             return self.seq.busy_reason(), None
-        if not self.trackx.active and (self._current is not None or not self._queue.empty()):
+        if not (self.trackx.active or self.airx.active) and (
+            self._current is not None or not self._queue.empty()
+        ):
             return R_WORKER_BUSY, None  # (a track's rendezvous job is ended by the sequence)
         if name == "connect":
             return None, None  # PWI4 may be down: the sequence starts it
@@ -819,11 +913,11 @@ class ControlService:
         ):
             return R_STALLED if self.homed.stalled else R_NOT_HOMED
         snap = self.poller.latest
-        starts_tracking = cmd.name == "track_object" or (
+        starts_tracking = cmd.name in ("track_object", "track_aircraft") or (
             cmd.name == "tracking" and cmd.args.get("on")
         )
         if starts_tracking and snap is not None:
-            if snap.state == "SLEWING" and not self.trackx.slewing:
+            if snap.state == "SLEWING" and not (self.trackx.slewing or self.airx.slewing):
                 return R_SLEWING
         return self.jogc.refusal(cmd, status)
 
@@ -1083,10 +1177,14 @@ class ControlService:
         if t0 is None:
             await self._prepare_wrap(cmd.args["az"])
             return
+        # internal, gateway-only `wrap_min` (the aircraft rendezvous: the window clamped inside the
+        # mechanical range, T5.6b); never part of the public goto_altaz schema
+        want = cmd.args.get("wrap_min")
+        want = t0 - 180.0 if want is None else want
         st = self.fresh_status()
         cur = st.mount.axis0_wrap_range_min_degs if st is not None else None
-        if cur is None or abs(cur - (t0 - 180.0)) >= WRAP_MIN_EPS_DEG:
-            await self.writer.set_axis0_wrap_range_min(t0 - 180.0)
+        if cur is None or abs(cur - want) >= WRAP_MIN_EPS_DEG:
+            await self.writer.set_axis0_wrap_range_min(want)
 
     async def _prepare_wrap(self, target_az: float) -> None:
         """P8/P9: set the axis-0 wrap minimum so the nearest representation is taken."""
@@ -1120,6 +1218,7 @@ class ControlService:
         self.motion_cleared()
         self.jogc.on_cancel(reason)
         self.trackx.on_cancel(reason)
+        self.airx.on_cancel(reason)
         if self.seq.active:  # connect / disconnect / home end with STOP, link loss, safety stop
             self.seq.cancel(reason)
             n += 1

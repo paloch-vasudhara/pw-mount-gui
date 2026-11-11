@@ -685,6 +685,15 @@ class AdsbRunner:
             "range_limit_km": self._range_limit_km,
         }
 
+    @property
+    def core(self) -> Core | None:
+        """The loaded adsb_core (None = the module is missing): aircraft cueing needs it."""
+        return self._core
+
+    @property
+    def range_limit_m(self) -> float:
+        return self._range_limit_m
+
     def aircraft_for(self, icao: str) -> Any | None:
         """The `adsb_core.state.Aircraft` for an ICAO (both sources), for `predict.path`."""
         src = self._source

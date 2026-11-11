@@ -12,8 +12,9 @@ import { useAircraftStore } from '../../app/stores/aircraft'
 import { useMountStore } from '../../app/stores/mount'
 import { useSelectionStore } from '../../app/stores/selection'
 
+const api = vi.hoisted(() => ({ post: vi.fn(async (_path: string, _body?: unknown): Promise<unknown> => ({ ok: false, reason: 'Aircraft not in view' })) }))
 vi.mock('~/composables/useGatewayApi', () => ({
-  useGatewayApi: () => ({ post: async () => ({ ok: false, reason: 'n/a' }) }),
+  useGatewayApi: () => api,
 }))
 
 const GREEN: AdsbInfo = { state: 'connected', green: true, simulated: false, detail: 'Connected to the ADS-B platform' }
@@ -48,18 +49,16 @@ afterEach(() => {
 })
 
 describe('Filters > Aircrafts', () => {
-  it('green: enabled with the Airborne child; not green: disabled with the reason as the title', async () => {
+  it('green: enabled, top level alone (no Airborne child); not green: disabled with the reason as the title', async () => {
     setAdsb(GREEN)
     w = mount(VisibilityFilters, { attachTo: document.body })
     const cb = () => q('[data-testid="flt-aircrafts"]') as HTMLInputElement
-    const kid = () => q('[data-testid="flt-airborne"]') as HTMLInputElement
     expect(cb().disabled).toBe(false)
-    expect(kid().disabled).toBe(false)
+    expect(q('[data-testid="flt-airborne"]')).toBeNull()
     expect(q('[data-testid="flt-aircrafts-row"]')!.getAttribute('title')).toBeNull()
     setAdsb(DOWN)
     await nextTick()
     expect(cb().disabled).toBe(true)
-    expect(kid().disabled).toBe(true)
     expect(q('[data-testid="flt-aircrafts-row"]')!.getAttribute('title')).toBe('ADS-B platform unreachable')
   })
 
@@ -70,12 +69,12 @@ describe('Filters > Aircrafts', () => {
 })
 
 describe('A1b Aircraft card', () => {
-  it('shows the aircraft values, the BARO flag and the disabled TRACK AIRCRAFT with the reason', async () => {
+  it('shows the aircraft values, the BARO flag and the TRACK AIRCRAFT button with the gateway reason', async () => {
     setAdsb(GREEN)
     useAircraftStore().ingest({ adsb: GREEN, aircraft: [row()] })
     useSelectionStore().selectAircraft('ABC123')
     w = mount(TrackCard, { attachTo: document.body })
-    await nextTick()
+    await flushPromises()
     expect(q('[data-testid="aircraft-card"]')).not.toBeNull()
     expect(q('[data-testid="track-card"]')).toBeNull()
     expect(q('[data-testid="aircraft-name"]')!.textContent).toContain('THA101 (ABC123)')
@@ -93,7 +92,7 @@ describe('A1b Aircraft card', () => {
     const btn = q('[data-testid="track-aircraft"]') as HTMLButtonElement
     expect(btn.disabled).toBe(true)
     expect(btn.textContent).toBe('TRACK AIRCRAFT')
-    expect(t('aircraft-reason')).toBe('Aircraft tracking: coming in T5.6b')
+    expect(t('aircraft-reason')).toBe('Aircraft not in view') // the gateway's refusal (the mocked check)
   })
 
   it('refreshes with the next 1 Hz frame; an aircraft that left shows dashes and "not in view"', async () => {
@@ -147,7 +146,7 @@ describe('Track Target > AIRCRAFT tab', () => {
     expect(tab().disabled).toBe(false)
   })
 
-  it('lists aircraft in range (nearest first), searches, selects into the Sky Viewer, TRACK is disabled with the reason', async () => {
+  it('lists aircraft in range (nearest first), searches, selects into the Sky Viewer, TRACK shows the gateway reason', async () => {
     setAdsb(GREEN)
     useAircraftStore().ingest({
       adsb: GREEN,
@@ -179,8 +178,9 @@ describe('Track Target > AIRCRAFT tab', () => {
     await nextTick()
     expect(useSelectionStore().selectedIcao).toBe('A00001')
     const go = q('[data-testid="tt-air-track"]') as HTMLButtonElement
-    expect(go.disabled).toBe(true)
-    expect(q('[data-testid="tt-air-status"]')!.textContent!.trim()).toBe('Aircraft tracking: coming in T5.6b')
+    await flushPromises()
+    expect(go.disabled).toBe(true) // the mocked gateway check refuses
+    expect(q('[data-testid="tt-air-status"]')!.textContent!.trim()).toBe('Aircraft not in view')
     // the satellite tab's controls are gone while the aircraft tab is up
     expect(q('[data-testid="tt-search"]')).toBeNull()
   })

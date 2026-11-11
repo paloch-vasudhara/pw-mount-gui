@@ -302,9 +302,19 @@ class JogController:
     def refusal(self, cmd: Command, status: Any) -> str | None:
         """Jog / step rules of the gateway verdict (after the axes / homed gates)."""
         name = cmd.name
-        if name in ("jog", "step", "wrap_turn") and self.svc.trackx.active:
+        air = getattr(self.svc, "airx", None)  # (T5.6b; absent on the bare test doubles of T3.4)
+        if name in ("jog", "step", "wrap_turn") and (
+            self.svc.trackx.active or (air is not None and air.active)
+        ):
             return R_OBJECT_TRACK  # T4.2c: only STOP (or Go To / HOME ...) ends an object track
-        other = name in ("goto_altaz", "goto_radec_j2000", "tracking", "wrap_turn", "track_object")
+        other = name in (
+            "goto_altaz",
+            "goto_radec_j2000",
+            "tracking",
+            "wrap_turn",
+            "track_object",
+            "track_aircraft",
+        )
         if self._releasing and (other or name in ("jog", "step")):
             return R_WORKER_BUSY
         if name not in ("jog", "step"):

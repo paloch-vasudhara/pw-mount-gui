@@ -49,13 +49,18 @@ export function jogDisabledReason(
 }
 
 /** T4.2: the pad is disabled while an object track runs (the gateway refuses jog / step anyway). */
-export function jogGateReason(gate: string | null, s: { track?: { phase?: string | null } | null } | null): string | null {
-  return gate ?? (isObjectTrackActive(s?.track) ? OBJECT_TRACKING_JOG_REASON : null)
+export function jogGateReason(
+  gate: string | null,
+  s: { track?: { phase?: string | null } | null, airtrack?: { phase?: string | null } | null } | null,
+): string | null {
+  return gate ?? (isObjectTrackActive(s?.track) || isObjectTrackActive(s?.airtrack) ? OBJECT_TRACKING_JOG_REASON : null)
 }
 
 export interface JogSnapshotLike {
   /** T4.2: object-track workflow (null when idle). */
   track?: { phase?: string | null } | null
+  /** T5.6b: aircraft-track workflow (null when idle). */
+  airtrack?: { phase?: string | null } | null
   jog?: { axis?: number, dir?: number, speed?: number } | null
   step?: { axis?: number, dir?: number, size_arcmin?: number } | null
   /** T3.4e: an azimuth jog stopped at the mechanical limit; a 360° turn is offered. */
