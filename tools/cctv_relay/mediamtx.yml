@@ -29,6 +29,6 @@ hlsSegmentDuration: 2s
 paths:
   mount:
     # The camera's RTSP URL, e.g. rtsp://user:password@192.168.1.64:554/Streaming/Channels/101
-    source: rtsp://USER:PASSWORD@CAMERA-IP:554/PATH
+    source: rtsp://KuPlanewaveL350:delvaero1234@192.168.80.72:554/PATH
     sourceOnDemand: no # always pulling: a viewer sees the picture at once
     rtspTransport: tcp # TCP is the reliable choice over a LAN / Wi-Fi bridge

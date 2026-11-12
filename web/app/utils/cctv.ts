@@ -28,10 +28,10 @@ export const HEALTH_INTERVAL_MS = 4_000
 
 export interface ViewOption { value: CctvView, label: string }
 
-/** Toggle options: 3D | CCTV on the panel, 3D | CCTV | Side by side in the expanded dialog. */
+/** Toggle options: 3D | CCTV on the panel, 3D | CCTV | Both (side by side) in the expanded dialog. */
 export function viewOptions(expanded: boolean): ViewOption[] {
   const base: ViewOption[] = [{ value: '3d', label: '3D' }, { value: 'cctv', label: 'CCTV' }]
-  return expanded ? [...base, { value: 'both', label: 'Side by side' }] : base
+  return expanded ? [...base, { value: 'both', label: 'Both' }] : base
 }
 
 /** The view to show: a remembered choice, but 3D when it is not offered here or CCTV is not configured. */

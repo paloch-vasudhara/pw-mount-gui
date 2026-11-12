@@ -678,7 +678,10 @@ def build_router(
     no_store = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
 
     @router.get("/status", dependencies=[Depends(require_auth)])
-    def status() -> JSONResponse:
+    async def status() -> JSONResponse:
+        # async: status() may start the probe task, which needs the event loop (a sync route runs
+        # on a worker thread: no running loop -> the route failed and the web never learned that a
+        # camera is configured; user 11-12, the first real camera)
         return JSONResponse(svc.status(), headers=no_store)
 
     @router.post("/ticket", dependencies=[Depends(require_auth)])

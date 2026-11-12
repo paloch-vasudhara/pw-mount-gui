@@ -8,7 +8,6 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 tools/pwi4_harness/out/
-data/ephemeris/
 
 # Local secrets (DB connection etc.) — never commit
 .env
