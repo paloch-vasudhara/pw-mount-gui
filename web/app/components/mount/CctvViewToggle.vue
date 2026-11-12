@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// The 3D | CCTV toggle of the mount view (T5.7); the expanded dialog adds "Side by side".
+// The 3D | CCTV toggle of the mount view (T5.7); the expanded dialog adds "Both" (side by side).
 // Rendered by the caller only when a camera is configured.
 import SegToggle from '@/components/widgets/SegToggle.vue'
 import { viewOptions, type CctvView } from '@/utils/cctv'

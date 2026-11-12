@@ -13,6 +13,7 @@ import importlib.util
 import json
 import logging
 import threading
+import time
 from pathlib import Path
 
 import httpx
@@ -250,6 +251,33 @@ def test_status_route(tmp_path):
         "error": None,
         "viewers": 0,
     }
+
+
+@pytest.mark.parametrize("kind", ["hls", "mjpeg"])
+def test_status_of_a_fresh_camera_probes_it(tmp_path, kind):
+    """A configured camera nobody has opened yet: the status route answers (configured, connecting)
+    and its probe brings the state to live. Regression 11-12: the sync route started the probe
+    task off the event loop and failed, so the web never showed the CCTV toggle."""
+    cam = FakeCamera()
+    if kind == "hls":
+        cam.default = httpx.Response(
+            200, headers={"content-type": "application/vnd.apple.mpegurl"}, text=MASTER
+        )
+    else:
+        cam.default = mjpeg_response([unit(1)])
+    c, _, _ = make(tmp_path, cam, kind=kind)
+    r = c.get("/api/mount/cctv/status", headers=AUTH)
+    assert r.status_code == 200, r.text
+    s = r.json()
+    assert s["configured"] is True and s["type"] == kind
+    assert s["state"] in ("connecting", "live")
+    for _ in range(50):
+        s = c.get("/api/mount/cctv/status", headers=AUTH).json()
+        if s["state"] == "live":
+            break
+        time.sleep(0.05)
+    assert s["state"] == "live", s
+    assert c.get("/api/mount/settings", headers=AUTH).json()["cctv"]["status"] == "Live"
 
 
 def test_ticket_requires_auth_and_config(tmp_path):

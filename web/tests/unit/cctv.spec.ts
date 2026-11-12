@@ -48,7 +48,7 @@ vi.mock('../../app/components/mount/MountControlPanel.vue', async () => {
 describe('cctv rules', () => {
   it('toggle options: 2 on the panel, 3 in the expanded view', () => {
     expect(viewOptions(false).map(o => o.label)).toEqual(['3D', 'CCTV'])
-    expect(viewOptions(true).map(o => o.label)).toEqual(['3D', 'CCTV', 'Side by side'])
+    expect(viewOptions(true).map(o => o.label)).toEqual(['3D', 'CCTV', 'Both'])
   })
 
   it('the remembered view falls back to 3D when CCTV is not configured or the option is not offered', () => {
@@ -415,13 +415,13 @@ describe('toggle on the mount panel and the expanded dialog', () => {
     w.unmount()
   })
 
-  it('expanded dialog: 3D | CCTV | Side by side; side by side shows both halves; closing ends the feed', async () => {
+  it('expanded dialog: 3D | CCTV | Both; side by side shows both halves; closing ends the feed', async () => {
     stubGateway()
     const w = mount(MountDetailsDialog, { props: { open: true }, attachTo: document.body })
     await flushPromises()
     const q = (id: string) => document.body.querySelector(`[data-testid="${id}"]`) as HTMLElement | null
     const buttons = () => Array.from(q('cctv-toggle')!.querySelectorAll('button'))
-    expect(buttons().map(b => b.textContent)).toEqual(['3D', 'CCTV', 'Side by side'])
+    expect(buttons().map(b => b.textContent)).toEqual(['3D', 'CCTV', 'Both'])
     expect(q('md-pane-cctv')).toBeNull()
     buttons()[2]!.click() // side by side
     await flushPromises()

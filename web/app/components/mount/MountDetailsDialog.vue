@@ -17,7 +17,7 @@ const open = defineModel<boolean>('open', { default: false })
 const store = useMountStore()
 const d = computed(() => buildDetailsDisplay(store.snapshot, store.linkStale))
 
-// T5.7: 3D | CCTV | Side by side when a camera is configured; the feed lives only while this is open.
+// T5.7: 3D | CCTV | Both (side by side) when a camera is configured; the feed lives only while this is open.
 const cctv = useCctvStore()
 const view = computed(() => (cctv.configured ? cctv.expandedView : '3d'))
 watch(open, (o) => { if (o) void cctv.refresh() }, { immediate: true })
