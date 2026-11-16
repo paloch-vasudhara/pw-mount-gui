@@ -30,7 +30,13 @@ from typing import Any
 
 from .audit import AuditLog
 from .commands import Command
-from .control import ROUTE_SETTLE_S, CommandContext, ControlService, HomeVerdict
+from .control import (
+    R_NO_EPHEM,
+    ROUTE_SETTLE_S,
+    CommandContext,
+    ControlService,
+    HomeVerdict,
+)
 from .ephem import Ephem, angular_sep_deg
 from .poller import Poller
 from .settings import (
@@ -80,7 +86,6 @@ STALL_CMD_SETPOINT_V = 0.05  # deg/s: a real mount's non-zero setpoint velocity 
 R_SITE = "Station location differs from PWI4's site"
 R_SUN = "Within 15° of the Sun"
 R_PATH_SUN = "Slew path passes within 15° of the Sun"
-R_NO_EPHEM = "Ephemeris unavailable (cannot verify target)"
 R_NO_AZ = "Target azimuth is outside the mount's mechanical range"
 R_CORRIDOR = "Mount left the validated slew path"
 R_NO_DETOUR = "Slew path passes within 15° of the Sun; no safe detour"
@@ -497,6 +502,12 @@ class SafetyEngine:
             return None
         return (s.latitude_degs, s.longitude_degs, s.height_meters or 0.0)
 
+    @property
+    def sun_known(self) -> bool:
+        """T6.1a: the Sun can be computed (ephemeris loaded) or is overridden for tests. When
+        False every motion command and HOME is refused (R_NO_EPHEM), the monitor has no Sun."""
+        return self.sun_override is not None or self.ephem.available
+
     def sun_altaz(self, site: tuple[float, float, float]) -> tuple[float, float] | None:
         """Sun (alt, az) at PWI4's site, cached for SUN_CACHE_S (the Sun moves 0.004 deg/s)."""
         if self.sun_override is not None:
@@ -536,6 +547,8 @@ class SafetyEngine:
         current pose to the home pose passes within 15 deg of the Sun. The Sun shortcut and the
         recovery rule are the same as for gotos. Home is blocked until D-SUN (T3.5) detours it.
         """
+        if not self.sun_known:  # T6.1a: its route needs the Sun; not sun_blocked (own wording)
+            return HomeVerdict(R_NO_EPHEM)
         site = self.pwi4_site(st)
         m = st.mount
         if site is None or m.altitude_degs is None or m.azimuth_degs is None:

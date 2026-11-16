@@ -203,3 +203,13 @@ def test_endpoint_catalogue_error_503():
     with TestClient(create_app(bad)) as c:
         r = c.post("/api/passes", json=body())
         assert r.status_code == 503 and "configured" in r.json()["detail"]
+
+
+def test_missing_ephemeris_is_a_clear_503_and_retries(client, monkeypatch, tmp_path):
+    """T6.1a: no de421.bsp = a 503 with a message (no 500 trace); the next call loads it again."""
+    monkeypatch.setattr(state, "_eph", None)  # restored by monkeypatch (the real one stays loaded)
+    monkeypatch.setenv("PW_EPHEMERIS", str(tmp_path / "missing.bsp"))
+    r = client.post("/api/passes", json=body())
+    assert r.status_code == 503 and "phemeris" in r.json()["detail"]
+    monkeypatch.delenv("PW_EPHEMERIS")  # the file "appears": _eph is still None, warm() reloads it
+    assert client.post("/api/passes", json=body()).status_code == 200

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -47,6 +48,7 @@ from .trackcheck import TrackChecker
 from .trackplan import mount_from_status
 from .transforms import TRANSFORM_FRAME, AltAzValues, TransformRequest
 
+log = logging.getLogger("gateway.ephem")
 VERSION = "0.1.0"
 AUTH_TIMEOUT_S = 2.0
 WS_UNAUTHORIZED = 4401
@@ -130,6 +132,8 @@ def create_app(
     # T4.1 TRACK OBJECT verdict; T4.2c: its clock is the control service's (a test seam)
     track = TrackChecker(tle_source, lambda: ephem.timescale, lambda: control.track_clock())
     control.check = safety.check  # T3.1b: command gate
+    control.sun_known = lambda: safety.sun_known  # T6.1a: no Sun position = motion refused
+    poller.sun_known_provider = lambda: safety.sun_known
     control.resolved_az = safety.pop_target_az
     monitor = SafetyMonitor(safety, poller, control)
     control.motion_cleared = monitor.clear
@@ -194,6 +198,18 @@ def create_app(
     )
     control.air_eval = lambda icao, site, st: control.air_checker.evaluate(icao, site, st)
     poller.airtrack_provider = control.airx.info
+
+    def ephem_loaded() -> None:
+        log.info("ephemeris loaded (%s): Sun / Moon and motion available", ephem.path)
+        audit.write("ephemeris_loaded", path=str(ephem.path))
+
+    poller.on_ephem_loaded = ephem_loaded
+    if not safety.sun_known:  # T6.1a: once at start; the poller retries the load every 30 s
+        log.error(
+            "ephemeris missing (%s): motion and HOME are disabled until the file is in place",
+            ephem.path,
+        )
+        audit.write("ephemeris_missing", path=str(ephem.path), error=ephem.error)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

@@ -24,6 +24,8 @@ export interface ControlSnapshotLike {
   sequence?: SequenceLike | null
   sun?: { alt?: number | null } | null
   sun_distance_deg?: number | null
+  /** T6.1a: false = the ephemeris is missing (no Sun position): the gateway refuses all motion + HOME. */
+  sun_known?: boolean | null
   limits?: { lim_el_deg?: number | null, sun_keepout_deg?: number | null } | null
   /** Not-homed guard (T3.3, Q3); null when the mount is not connected. */
   homed?: HomedInfo | null
@@ -41,6 +43,10 @@ export interface HomedInfo {
   /** 'stalled': the gateway stopped the mount on a stalled axis; only a completed home clears it. */
   reason?: 'stalled' | string | null
 }
+
+/** The gateway's refusal text while the ephemeris is missing (safety / control R_NO_EPHEM). */
+export const SUN_UNKNOWN_REASON = 'Sun position unavailable (ephemeris missing)'
+export const SUN_UNKNOWN_TITLE = 'Ephemeris file missing: motion is disabled until data/ephemeris/de421.bsp is in place'
 
 export const STALLED_REASON = 'Mount stalled; home it first'
 export const STALLED_TEXT = 'Mount stalled (axis not moving); it may be at a physical limit. Home the mount before further use.'
@@ -144,6 +150,16 @@ const KEEPOUT_DEG = 15
 
 const num = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
 
+/** T6.1a: the snapshot says the Sun position is unknown (an absent field means known). */
+export function sunUnknown(s: { sun_known?: boolean | null } | null | undefined): boolean {
+  return s?.sun_known === false
+}
+
+/** The red "Sun position unavailable" chip (Sky Viewer + Mount Status): shown while sun_known is false. */
+export function sunUnavailableChip(s: { sun_known?: boolean | null } | null | undefined): { show: boolean, text: string, title: string } {
+  return { show: sunUnknown(s), text: 'Sun position unavailable', title: SUN_UNKNOWN_TITLE }
+}
+
 export function isNotHomed(s: ControlSnapshotLike | null): boolean {
   return isConnected(s) && s?.homed?.state === 'not_homed'
 }
@@ -170,6 +186,7 @@ export function trackDisabledReason(
   if (opts.holder === 'other') return TIP_OTHER_WINDOW
   if (isBusy(s)) return 'Busy'
   if (!isConnected(s)) return 'Axes disabled'
+  if (sunUnknown(s)) return SUN_UNKNOWN_REASON
   if (s.state === 'SLEWING') return s.state_reason === 'Avoiding the Sun' ? 'Avoiding the Sun' : 'Slewing' // T3.5, Q12
   if (s.homed?.state === 'not_homed') return s.homed.reason === 'stalled' ? STALLED_REASON : 'Mount not homed'
   const lim = s.limits?.lim_el_deg
@@ -195,6 +212,7 @@ export function gotoDisabledReason(
   if (opts.holder === 'other') return TIP_OTHER_WINDOW
   if (isBusy(s)) return 'Busy'
   if (!isConnected(s)) return 'Axes disabled'
+  if (sunUnknown(s)) return SUN_UNKNOWN_REASON
   if (s.homed?.state === 'not_homed') return s.homed.reason === 'stalled' ? STALLED_REASON : 'Mount not homed'
   return null
 }
@@ -240,7 +258,7 @@ export function buildControlView(
     holder: opts.holder,
     connect: gate(connected ? 'Already connected' : null),
     disconnect: gate(connected ? null : 'Mount not connected'),
-    home: gate(connected ? null : 'Mount not connected'),
+    home: gate(!connected ? 'Mount not connected' : sunUnknown(s) ? SUN_UNKNOWN_REASON : null),
     track: (() => {
       const reason = trackDisabledReason(s, { linkUp, holder: opts.holder })
       return { enabled: reason === null, reason }

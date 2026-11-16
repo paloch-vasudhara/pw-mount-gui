@@ -22,6 +22,7 @@ export interface MountSnapshotLike {
   } | null
   axes?: Array<{ enabled?: boolean | null, rms_arcsec?: number | null } | null> | null
   sun_distance_deg?: number | null
+  sun_known?: boolean | null // T6.1a: false = ephemeris missing
   hour_angle_h?: number | null
   limits?: { sun_keepout_deg?: number | null } | null
   /** T5.4b: the ADS-B connection summary (green = the aircraft features are usable). */

@@ -231,6 +231,10 @@ class MountSnapshot(BaseModel):
     sun: AltAz = Field(default_factory=AltAz)
     moon: MoonInfo = Field(default_factory=MoonInfo)
     sun_distance_deg: float | None = None
+    # T6.1a: the Sun position is known (the ephemeris is loaded, or the PW_TEST_SUN_ALTAZ override
+    # is set). False = motion is refused ("Sun position unavailable (ephemeris missing)") and the
+    # web shows a red chip. Set by the poller from SafetyEngine.sun_known.
+    sun_known: bool = True
     hour_angle_h: float | None = None
     limits: Limits = Field(default_factory=Limits)
     site_check: SiteCheck | None = None  # only when the site comes from Settings

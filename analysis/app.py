@@ -8,7 +8,8 @@ from collections.abc import Callable
 from contextlib import asynccontextmanager
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from skyfield.api import EarthSatellite, wgs84
 
@@ -23,7 +24,7 @@ from .chunks import MAX_DURATION_S, STEP_S, Site
 from .db import CatalogUnavailable
 from .passes import MAX_WINDOW_S, compute_passes
 from .service import Service, Unavailable
-from .state import compute_state, warm
+from .state import EphemerisUnavailable, compute_state, warm
 
 VERSION = "0.1.0"
 PASSES_TIMEOUT_S = 20.0
@@ -108,6 +109,11 @@ def create_app(factory: Callable = default_source) -> FastAPI:
 
     app = FastAPI(title="pw-mount-control analysis", version=VERSION, lifespan=lifespan)
     app.state.service = service
+
+    @app.exception_handler(EphemerisUnavailable)
+    async def _no_ephemeris(request: Request, exc: EphemerisUnavailable) -> JSONResponse:
+        return JSONResponse({"detail": str(exc)}, status_code=503)  # T6.1a: not a 500 trace
+
     app.state.astrometry = ImageSessions()
     app.state.astro_jobs = JobRegistry()
     app.state.nova_factory = (astro_nova.fake_factory

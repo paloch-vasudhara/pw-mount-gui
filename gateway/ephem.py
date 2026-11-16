@@ -39,14 +39,24 @@ class Ephem:
         self._cache: SunMoon | None = None
         self._cache_key: tuple[float, float, float] | None = None
         self._cache_t = 0.0
+        self.reload()
+
+    def reload(self) -> bool:
+        """(Re)load the ephemeris file (blocking: run it in a thread). T6.1a: the gateway retries
+        this while the file is missing. Returns `available`; a loaded ephemeris is never dropped."""
+        if self.available:
+            return True
         try:
             from skyfield.api import load, load_file
 
-            self._ts = load.timescale()
-            self._eph = load_file(str(self.path))
-            self.available = True
+            ts = load.timescale()
+            eph = load_file(str(self.path))
         except Exception as exc:
             self.error = f"{type(exc).__name__}: {exc}"
+            return False
+        self._ts, self._eph, self.error = ts, eph, None
+        self.available = True  # last: readers test `available` before touching _eph / _ts
+        return True
 
     @property
     def timescale(self):

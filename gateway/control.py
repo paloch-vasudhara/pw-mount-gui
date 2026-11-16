@@ -77,6 +77,9 @@ R_AZ_LIMIT = "Azimuth at its mechanical limit: turn 360° or jog the other way"
 R_NO_ROOM = "No room for a 360° turn"
 R_TURN = "Turn in progress; press STOP first"
 R_ROUTING = "Avoiding the Sun; press STOP first"
+# T6.1a: without the ephemeris (and no test Sun override) there is no Sun keep-out: every motion
+# command and HOME is refused (gateway/safety.py re-exports it).
+R_NO_EPHEM = "Sun position unavailable (ephemeris missing)"
 # Commands refused while the mount is not homed (T3.3). HOME, STOP, DISCONNECT, tracking off and
 # the lock commands are never gated; a future jog joins this set.
 ROUTABLE = frozenset({"goto_altaz", "goto_radec_j2000", "wrap_turn"})  # T3.5c: D-SUN routed
@@ -104,6 +107,7 @@ _REASON_CODES: dict[str, str] = {
     R_TURN: "turn_in_progress",
     R_ROUTING: "slewing",
     R_OBJECT_TRACK: "object_tracking",
+    R_NO_EPHEM: "no_ephemeris",
 }
 
 
@@ -389,6 +393,8 @@ class ControlService:
         self.motion_cleared: Callable[[], None] = lambda: None
         # T3.2: HOME safety check (SafetyEngine.check_home) and the homing watch of the monitor.
         self.home_check: HomeCheck = home_check_allow
+        # T6.1a: the Sun is known (SafetyEngine.sun_known, set by app.py); True without an engine.
+        self.sun_known: Callable[[], bool] = lambda: True
         self.homing_begin: Callable[[HomeVerdict], None] = lambda verdict: None
         self.homing_end: Callable[[], None] = lambda: None
         # T3.5c D-SUN: the safety engine's stored route of a command, the monitor's route plan,
@@ -902,6 +908,12 @@ class ControlService:
             return R_NO_PWI4
         if not status.mount.is_connected:
             return R_NO_MOUNT
+        if (
+            cmd.name in MOTION_COMMANDS
+            and not (cmd.name == "tracking" and not cmd.args.get("on"))
+            and not self.sun_known()
+        ):
+            return R_NO_EPHEM  # T6.1a fail-safe: no Sun keep-out without the ephemeris
         if self.route is not None and cmd.name in MOTION_COMMANDS:
             return R_ROUTING  # a D-SUN route is flying: only STOP is accepted
         if cmd.name in MOTION_COMMANDS:

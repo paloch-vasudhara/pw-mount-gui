@@ -2205,8 +2205,8 @@ Status: ⬜ not started · 🟦 design · 🟨 implementing · 🟪 verifying ·
 | T5.5 | ✅ spec approved 11-07, plan revised 11-10 | ✅ 11-10 | ✅ 11-10 | ✅ 11-10 (browser, simulated feed) | ✅ 11-10 user-checked (icon 20 px + sky-contrast outline; tooltip flip: user confirms live) | aircraft layer, card, AIRCRAFT tab, filters, badges |
 | T5.6 | ✅ spec approved 11-07; T5.6b spec 11-10 | ✅ 11-11 (T5.6b) | ✅ 11-11 (unit / API, fakes) | ✅ 11-11 (PWI4-sim 5 / 5; browser on the 8500 simulated feed) | pending (T5.6c: live feed + real overflight) | a: P23 sim probe done 11-07; b: `airtrack.py` (D1–D4) |
 | T5.7 | ✅ spec approved 11-09 (+ Settings scrolling) | ✅ 11-09 | ✅ 11-09 (unit / API) | **browser check owed** | pending | | | | | CCTV view prep (Q56–Q58); independent of the ADS-B work |
-| T6.1 | ⬜ | | | | | |
-| T6.2 | ⬜ | | | | | |
+| T6.1 | a ✅ 11-16 (ephemeris fail-safe) | | | | | the security pass itself not started |
+| T6.2 | ✅ spec approved 11-16 | | | | | mount PC all-in-one installer; T6.1a ephemeris fail-safe first |
 | T6.3 | ⬜ | | | | | |
 
 **Resume point (2026-11-11, T5.6b done):** T5.6b built, PWI4-sim 5 / 5 and the browser check passed (see the T5.6b log), uncommitted. Next: T5.6c (the user: the read token in Settings › ADS-B once the platform is up, the live feed, then a real overflight); owed: the T5.7 CCTV browser check. Earlier (2026-11-10, T5.4b + T5.5 done): Phase 5 complete; T5.2f + T5.7 committed (`373fc39`); Phase 5b plan revised 11-10 (Q59–Q62); T5.4b gateway ADS-B + T5.5 web aircraft display done, uncommitted. Next:
@@ -2308,6 +2308,48 @@ Where they differ, this spec wins.
   The worker writes these but does NOT run them (the supervisor runs them when the user has PWI4 in Simulator mode and their servers stopped).
 - Web vitest: the verdict branches (incl. the polled check), the card's phase lines, the button send + refusal.
 - Gates: touched gateway tests + the non-sim gateway suite once; ruff on touched files; web typecheck / lint / vitest.
+
+### T6.2 — Packaging: the mount PC all-in-one installer (spec, 2026-11-12; approved by the user 11-16 incl. the three supervisor choices: DSN in Credential Manager, Home refused without the ephemeris, MediaMTX not bundled)
+
+**Decisions (user 11-12):** one package, the **mount PC all-in-one** (web + gateway + analysis, standalone mode; the satellite database stays remote); a **Windows installer wrapping a portable folder**; the app opens in **its own window** (pywebview); services start **on launcher click** and stop when the window closes. The web-app mode (remote analysis server) is not packaged now.
+
+**Order:** T6.1a ephemeris fail-safe (user: before packaging) → T6.2a → T6.2b → T6.2c → T6.2d.
+
+**T6.1a — ephemeris fail-safe** (as noted under T6.1): motion refused with "Sun position unavailable (ephemeris missing)" while the ephemeris is not loaded (STOP / Disconnect allowed; Home refused too, it needs the Sun check — user 11-16); a red chip on the Sky Viewer + Mount Status; the gateway retries loading `de421.bsp` every 30 s.
+
+**T6.2a — one origin (production mode):**
+- The gateway serves the generated web app (`nuxt generate` → `web/.output/public`, or `PW_WEB_DIR`) at `/` with the SPA fallback; `/api/mount/*` and `/api/transform` stay the gateway's own.
+- Every other `/api/*` is proxied to the analysis URL (streaming, size / time limits, no redirects, the hop-by-hop headers dropped); the analysis service binds 127.0.0.1 only.
+- The allowed Origin list includes the gateway's own origin; the per-launch token flow is unchanged (the web fetches `/api/mount/session` same-origin).
+- Dev (`pnpm dev` on 3200) keeps working as today.
+
+**T6.2b — launcher + window (`launcher/`):**
+- `pw-mount-control` (a small Python entry, `pythonw`, no console): picks free ports (default 8400 / 8410, next free if busy), starts analysis then the gateway as child processes (a Windows Job Object so they die with the launcher even on a crash), waits for both health checks (timeout 60 s, a clear error window naming the failing part + its log path), then opens a **pywebview** window (Edge WebView2, preinstalled on Windows 10/11) on the gateway URL, title "PW Mount Control", remembered size / position.
+- MediaMTX: started too when Settings › CCTV is enabled and a `mediamtx.exe` + `mediamtx.yml` are found in the install's `relay\` folder or the configured path; otherwise skipped.
+- Closing the window: the WebSocket closes (disconnect = stop applies), the launcher stops the children (gateway shutdown stops the mount as today), exits. A second launch while running focuses the existing window.
+- Logs: `%LOCALAPPDATA%\pw-mount-control\logs\{launcher,gateway,analysis,mediamtx}.log`, rotated (5 × 2 MB).
+- `--browser` flag: open the default browser instead of the window (fallback when WebView2 is missing).
+
+**T6.2c — build script (`tools/package/build.py`) → a portable folder:**
+- Python 3.12 **embeddable** distribution (python.org, pinned version + SHA-256) + the pinned wheels from a new `requirements-lock.txt` (generated from the tested `.venv`, hashes checked) installed into it; `pywebview` added.
+- `adsb_core` copied in from adsb_interpreter at a pinned version / commit (0.3.x check), so the target needs no adsb_interpreter clone (ADS-B still optional at run time).
+- The generated web app, `data/` (de421.bsp, the star data), `pwi4/` client, `gateway/`, `analysis/`, `launcher/`, the relay template + README.
+- Nothing is written under the install folder at run time (settings, audit, logs, astrometry jobs: `%LOCALAPPDATA%`); bytecode precompiled at build time.
+- Output: `dist/pw-mount-control-<version>/` + a zip; the build records versions + hashes in `BUILD-INFO.txt`.
+
+**T6.2d — installer (Inno Setup script `tools/package/installer.iss`):**
+- Installs the folder to `Program Files\PW Mount Control` (per-machine; per-user option), Start menu + optional desktop shortcut, uninstaller (keeps `%LOCALAPPDATA%` data unless the user ticks "remove settings and logs").
+- Pages: the satellite database connection (optional; stored in **Windows Credential Manager** `postgresql_dsn`, like the other secrets — analysis reads env → `.env` → Credential Manager), a WebView2 check (link to Microsoft's installer if missing), a PWI4 check (warn if PWI4 is not installed; it is PlaneWave's own installer, never bundled).
+- First run: the app opens; Station Settings for the location, the astrometry key, the CCTV login, the ADS-B token (as today).
+- Upgrade = run the newer installer (settings kept).
+
+**Not bundled:** PWI4; the adsb_interpreter feed service (separate app; only its library); MediaMTX binary (its licence allows bundling — user to decide; default: the user installs it, the template ships).
+
+**Tests / gates:**
+- Unit: the gateway static serving + SPA fallback + the `/api/*` proxy (limits, no redirect, headers), origin rules with the same-origin page; the launcher's port pick, health wait, child shutdown, single instance (fakes).
+- Build: `build.py` on this PC → the folder starts on a clean user profile with **no** repo, Node, Python or `.venv` on PATH (a Windows Sandbox or a second PC): window opens, Sky Viewer + Sun / Moon, PWI4-sim connect / Go To / STOP, astrometry (fake), close → all child processes gone, mount stopped.
+- Installer: install → shortcut → run → uninstall on the second PC (user check).
+- Sizes measured and listed (folder / installer MB, cold start time).
 
 ### Decision log
 | Date | Ref | Decision |
@@ -3668,6 +3710,14 @@ The user stopped 3200 (8400 / 8410 already down; PWI4 kept running in Simulator 
 - **MediaMTX ≥ v1.2x session handling:** the first `index.m3u8` request answers 302 → `?cookieCheck=1` (+ a cookie); later requests need the `hlsSession` cookie (else 401 "session not found"), OR, when the cookie test fails, the playlist carries `?session=<id>` in each URI. The gateway refuses redirects, so the 302 stopped it. **Working setting:** Stream URL `http://127.0.0.1:8888/mount/index.m3u8?cookieCheck=1` (our proxy keeps each URI's query, so `?session=` flows through). Checker: 1 variant 1920×1080, live, 6 segments of 3.7 s (the C200's keyframe interval, not our 2 s) → about 10 s player delay.
 - **Bug fixed:** `GET /api/mount/cctv/status` was a sync route; on a fresh camera (state connecting, no viewers) it starts the probe with `asyncio.create_task` off the event loop → RuntimeError → the route failed, the web never learned `configured`, no 3D | CCTV toggle, the state stayed Connecting. Now `async`; regression test `test_status_of_a_fresh_camera_probes_it[hls|mjpeg]` (the T5.7 tests always had a result or a viewer first). test_cctv 58 passed; reproduced and fixed against the user's MediaMTX in-process (status live, entry playlist proxied with the session).
 - **Follow-ups (small):** accept MediaMTX's one same-origin `?cookieCheck=1` redirect so the plain URL works; relay README + template: the URL above, the real delay, the Tapo camera account; optional low-latency HLS if 10 s matters (user to decide).
+
+### T6.1a log — ephemeris fail-safe (2026-11-16)
+
+- Worker (Sonnet) per the spec in the T6.2 section. The refusal lives in ONE place, `ControlService._gateway_refusal`: every `MOTION_COMMANDS` member except tracking off → `R_NO_EPHEM` "Sun position unavailable (ephemeris missing)" (code `no_ephemeris`), on the real command and `/api/mount/check` alike; HOME in `SafetyEngine.check_home` (first line). `sun_known` = ephemeris loaded or the test Sun override.
+- Refused: goto_altaz, goto_radec_j2000, tracking on, jog, step, wrap_turn, track_object, track_aircraft, home. Allowed: stop, tracking off, jog_stop, wrap_turn_cancel, take / release control, homed_override, connect (its home step skipped with the reason), disconnect (the "Home is blocked (…); disconnect without homing?" prompt).
+- `Ephem.reload()` + the poller's 30 s retry (off the loop); audit `ephemeris_missing` once at start, `ephemeris_loaded` on success. Snapshot `sun_known` (default True). analysis: a missing file → 503 "Ephemeris unavailable" (was a 500).
+- Web: red chip "Sun position unavailable" in the Sky Viewer chip strip (first, wraps with the ADS-B chips) and in place of Mount Status › Sun Distance; the local button verdicts (TRACK / GOTO / JOG / HOME in `buildControlView`) were missing the gate and now show the reason.
+- Supervisor check: diff read (single gate, wiring, reload ordering); gateway + analysis non-sim **1026 passed** / 72 skipped; web typecheck 0, lint 0 errors, vitest 706; `de421.bsp` untouched.
 
 ## 9. Known limitations & risks
 

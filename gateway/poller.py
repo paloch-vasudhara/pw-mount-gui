@@ -35,6 +35,7 @@ from .state import MotionTracker
 
 STALE_S = 1.0
 RETRY_S = 1.0
+EPHEM_RETRY_S = 30.0  # T6.1a: reload attempts of a missing ephemeris file
 REASON_NOT_RESPONDING = "PWI4 not responding"
 
 
@@ -87,6 +88,14 @@ class Poller:
         self.track_provider: Callable[[], Any] = lambda: None  # T4.2c: the object track
         self.airtrack_provider: Callable[[], Any] = lambda: None  # T5.6b: the aircraft track
         self.adsb_provider: Callable[[], Any] = lambda: None  # T5.4b: the ADS-B block (cached)
+        # T6.1a: "the Sun is known" (ephemeris loaded or the test override set; the safety engine's
+        # `sun_known`) for snapshot.sun_known, and the 30 s reload retry of a missing ephemeris
+        # (interval / clock are test seams; `on_ephem_loaded` logs + audits the first success).
+        self.sun_known_provider: Callable[[], bool] = lambda: self.ephem.available
+        self.ephem_retry_s = EPHEM_RETRY_S
+        self.ephem_clock: Callable[[], float] = time.monotonic
+        self.on_ephem_loaded: Callable[[], None] = lambda: None
+        self._ephem_next: float | None = None
 
     async def fetch_once(self, now_mono: float | None = None) -> PollResult:
         if self._client is None:
@@ -113,7 +122,22 @@ class Poller:
             return (loc.lat_deg, loc.lon_deg, loc.alt_m)
         return site_key(self.last_good) if self.last_good is not None else None
 
+    async def _retry_ephem(self) -> None:
+        """T6.1a: while the ephemeris is not loaded, try again every `ephem_retry_s` (off the
+        event loop); the first try comes one interval after the failed load at start."""
+        now = self.ephem_clock()
+        if self._ephem_next is None:
+            self._ephem_next = now + self.ephem_retry_s
+        if now < self._ephem_next:
+            return
+        self._ephem_next = now + self.ephem_retry_s
+        if await asyncio.to_thread(self.ephem.reload):
+            self.on_ephem_loaded()
+
     async def refresh_ephem(self, force: bool = False) -> None:
+        if not self.ephem.available:
+            with contextlib.suppress(Exception):  # a failed retry just waits for the next one
+                await self._retry_ephem()
         site = self.site_tuple()
         if site is not None and (force or self.ephem.stale(site)):
             with contextlib.suppress(Exception):  # Sun/Moon are advisory
@@ -181,6 +205,10 @@ class Poller:
             track=self.track_provider() if live else None,
             airtrack=self.airtrack_provider() if live else None,
         )
+        try:
+            snap.sun_known = bool(self.sun_known_provider())
+        except Exception:  # unknown = not known: the web shows the chip, never a silent "fine"
+            snap.sun_known = False
         if snap.homed is not None and snap.homed.reason == "stalled" and snap.state == "STOPPED":
             snap.state_reason = self.stall_message_provider()
         try:

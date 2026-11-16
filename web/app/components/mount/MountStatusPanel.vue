@@ -6,12 +6,15 @@ import CctvViewToggle from '~/components/mount/CctvViewToggle.vue'
 import MountHemisphere3D from '~/components/mount/MountHemisphere3D.vue'
 import { useCctvStore } from '~/stores/cctv'
 import { useMountStore } from '~/stores/mount'
+import { sunUnavailableChip } from '~/utils/mount-control'
 import type { ValueTone } from '~/utils/mount-format'
 
 const emit = defineEmits<{ 'open-details': [] }>()
 
 const store = useMountStore()
 const d = computed(() => store.display)
+// T6.1a: no ephemeris = no Sun position (motion is refused): a red chip instead of the Sun Distance value
+const sunChip = computed(() => sunUnavailableChip(store.snapshot))
 
 // T5.7: with a camera configured the slot shows the 3D model or the CCTV feed (never both here).
 const cctv = useCctvStore()
@@ -73,6 +76,13 @@ const TONE: Record<ValueTone, string> = {
       <div class="flex items-baseline justify-between">
         <span class="text-foreground">Sun Distance</span>
         <span
+          v-if="sunChip.show"
+          class="font-semibold text-danger"
+          :title="sunChip.title"
+          data-testid="mount-sun-unavailable"
+        >{{ sunChip.text }}</span>
+        <span
+          v-else
           class="font-semibold tabular-nums"
           :class="TONE[d.sunDistance.tone]"
           data-testid="mount-sun"

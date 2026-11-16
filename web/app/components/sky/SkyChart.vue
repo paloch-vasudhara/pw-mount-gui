@@ -31,6 +31,7 @@
 // for chart-relative CSS px (or null). It only reads the last drawn positions; it changes nothing.
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useMountStore } from '~/stores/mount'
+import { sunUnavailableChip } from '~/utils/mount-control'
 import { useSkyStore, type SkyState } from '~/stores/sky'
 import { useSelectionStore } from '~/stores/selection'
 import { useAircraftStore } from '~/stores/aircraft'
@@ -761,6 +762,7 @@ function onClick(e: MouseEvent) {
 
 const simBadge = computed(() => showSimulatedBadge(air.adsb))
 const feedDown = computed(() => feedDownChip(air.adsb))
+const sunMissing = computed(() => sunUnavailableChip(store.snapshot as { sun_known?: boolean | null } | null))
 
 const airTip = computed(() => {
   const icao = hoverIcao.value
@@ -1121,7 +1123,8 @@ onBeforeUnmount(() => {
     </div>
     <!-- ADS-B chips (T5.5): the top strip of the box, clear of the title chip (above the box), the clock and the
          astrometry pill (below it); they wrap onto a second line when the box is narrow, so they never overlap. -->
-    <div v-if="simBadge || feedDown.show" class="sky-chips">
+    <div v-if="simBadge || feedDown.show || sunMissing.show" class="sky-chips">
+      <span v-if="sunMissing.show" class="sky-chip sky-chip-down" data-testid="sun-unavailable" :title="sunMissing.title">{{ sunMissing.text }}</span>
       <span v-if="feedDown.show" class="sky-chip sky-chip-down" data-testid="adsb-feed-down" :title="feedDown.title">ADS-B feed down</span>
       <span
         v-if="simBadge" class="sky-chip sky-chip-sim" data-testid="adsb-simulated"

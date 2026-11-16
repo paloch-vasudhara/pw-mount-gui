@@ -26,14 +26,23 @@ def ephemeris_path() -> Path:
     return Path(os.environ.get("PW_EPHEMERIS") or REPO_ROOT / "data" / "ephemeris" / "de421.bsp")
 
 
+class EphemerisUnavailable(RuntimeError):
+    """The ephemeris file could not be loaded (T6.1a: the API answers 503, not a 500 trace)."""
+
+
 def warm() -> None:
-    """Load the timescale + ephemeris once (called at start-up, in a worker thread)."""
+    """Load the timescale + ephemeris once (called at start-up, in a worker thread). A missing
+    ephemeris raises EphemerisUnavailable and is retried on the next call."""
     global _ts, _eph
     with _lock:
         if _ts is None:
             _ts = load.timescale()
         if _eph is None:
-            _eph = load_file(str(ephemeris_path()))
+            try:
+                _eph = load_file(str(ephemeris_path()))
+            except Exception:
+                msg = "Ephemeris unavailable (data/ephemeris/de421.bsp)"
+                raise EphemerisUnavailable(msg) from None
 
 
 def _finite(x: float) -> float | None:
