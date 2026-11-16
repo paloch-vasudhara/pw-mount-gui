@@ -10,15 +10,44 @@ from pathlib import Path
 from . import TITLE, paths, windowstate, winjob
 
 log = logging.getLogger("launcher")
+_BLANK = chr(10) * 2  # paragraph break in a message box
 
 
 class WebViewUnavailable(Exception):
     """pywebview / the WebView2 runtime cannot show the window."""
 
 
+def have_tk() -> bool:
+    """tkinter is missing from the embeddable Python of the package: the windows then use a
+    Win32 message box."""
+    try:
+        import tkinter  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def message_box(text: str, title: str = TITLE, icon: int = 0x40) -> None:
+    """A modal Win32 MessageBoxW (0x40 = information, 0x10 = error). Blocks until OK."""
+    import ctypes
+
+    ctypes.windll.user32.MessageBoxW(None, text, title, icon | 0x10000)  # | MB_SETFOREGROUND
+
+
 def error_window(heading: str, detail: str = "", log_folder: Path | None = None) -> None:
     """A small tkinter error dialog (the launcher has no console under pythonw)."""
     log.error("%s", heading)
+    if not have_tk():
+        try:
+            parts = [heading]
+            if detail:
+                parts.append(detail.strip()[-1500:])
+            if log_folder is not None:
+                parts.append(f"Logs: {log_folder}")
+            message_box(_BLANK.join(parts), icon=0x10)
+        except Exception:
+            log.exception("could not show the error window")
+        return
     try:
         import tkinter as tk
         from tkinter import scrolledtext
@@ -44,6 +73,12 @@ def error_window(heading: str, detail: str = "", log_folder: Path | None = None)
 def run_browser(url: str, note: str = "") -> None:
     """--browser mode: default browser + a tiny window; closing it ends the launcher."""
     webbrowser.open(url)
+    if not have_tk():
+        lines = ["PW Mount Control is running. Press OK to stop it."]
+        lines += [note] if note else []
+        lines.append(url)
+        message_box(_BLANK.join(lines))
+        return
     try:
         import tkinter as tk
 

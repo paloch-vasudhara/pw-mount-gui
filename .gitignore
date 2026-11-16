@@ -13,3 +13,7 @@ tools/pwi4_harness/out/
 .env
 .env.*
 !.env.example
+
+# Packaging output (T6.2c)
+dist/
+tools/package/.cache/

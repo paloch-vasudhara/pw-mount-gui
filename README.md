@@ -52,6 +52,33 @@ python -m launcher [--browser] [--console-log] [--gateway-port N] [--analysis-po
   `%LOCALAPPDATA%\pw-mount-control\window.json`.
 - Tests: `pytest launcher/tests`.
 
+## Installer
+
+```
+.venv/Scripts/python tools/package/build.py --installer
+```
+
+Builds the portable folder (T6.2c), then compiles `tools/package/installer.iss` with Inno Setup 7
+(`ISCC.exe`: `PW_ISCC`, else `%LOCALAPPDATA%\Programs\Inno Setup 7`, else Program Files) into
+`dist/PW-Mount-Control-Setup-<version>.exe` (unsigned: SmartScreen shows "unknown publisher").
+
+- Installs to `{autopf}\PW Mount Control` (admin by default; the dialog offers a per-user install),
+  Start menu entries, an optional desktop shortcut, and a "Launch" checkbox on the last page.
+  An upgrade replaces `python`, `gateway`, `analysis`, `launcher`, `pwi4`, `web` and `data`
+  but keeps `relay` (your `mediamtx.exe`). Setup and uninstall ask to close a running app.
+- Page "Satellite database connection": an optional, masked connection string (`postgresql://`,
+  `postgresql+psycopg2://` or `postgres://`). After the files are copied it goes through a private
+  temp file to `python -m analysis.set_dsn --from-file` (run as the user who started setup), which
+  wipes and deletes the file and stores the value in Windows Credential Manager. It never appears on
+  a command line, in the setup log or in the registry. Empty keeps the current login.
+- "Ready to install" lists the checks (never blocking): Edge WebView2 runtime (without it the app
+  opens in the browser) and PlaneWave Interface 4.
+- Uninstall removes the installed files and shortcuts, then asks (default No) whether to also remove
+  settings, logs and stored logins (`python -m launcher.cleanup --all`). A silent uninstall keeps them.
+- Silent: `PW-Mount-Control-Setup-<version>.exe /VERYSILENT /SUPPRESSMSGBOXES /CURRENTUSER /DIR="D:\Apps\PW"`
+  (no database login is taken silently; run `python\python.exe -m analysis.set_dsn` afterwards).
+  Uninstall: `unins000.exe /VERYSILENT`.
+
 ## Python setup
 
 ```

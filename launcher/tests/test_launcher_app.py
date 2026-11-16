@@ -126,7 +126,7 @@ def test_stack_env_and_commands(tmp_path, monkeypatch):
         raise services.StartFailure("stop here", None)
 
     monkeypatch.setattr(services, "spawn", spawn)
-    (tmp_path / "tools" / "package").mkdir(parents=True)
+    monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)  # the stack sets it always
     st = runner.Stack(None, tmp_path / "w", 18767, 18768, root=tmp_path, logs=tmp_path / "l")
     with pytest.raises(services.StartFailure):
         st.start()
@@ -210,3 +210,23 @@ def test_main_webview_missing_falls_back_to_browser(tmp_path, monkeypatch):
     monkeypatch.setattr(ui, "run_browser", lambda url, note="": notes.append(note))
     assert entry.main([]) == 0
     assert "WebView2" in notes[0]
+
+
+def test_error_window_falls_back_to_message_box_without_tk(monkeypatch, tmp_path):
+    boxes = []
+    monkeypatch.setattr(ui, "have_tk", lambda: False)
+    monkeypatch.setattr(ui, "message_box", lambda text, *a, **k: boxes.append((text, k)))
+    ui.error_window("Gateway did not start", "line1\nline2", tmp_path)
+    text, kw = boxes[0]
+    assert text.startswith("Gateway did not start") and "line2" in text and str(tmp_path) in text
+    assert kw["icon"] == 0x10
+
+
+def test_run_browser_keepalive_is_a_message_box_without_tk(monkeypatch):
+    boxes = []
+    monkeypatch.setattr(ui, "have_tk", lambda: False)
+    monkeypatch.setattr(ui.webbrowser, "open", lambda url: True)
+    monkeypatch.setattr(ui, "message_box", lambda text, *a, **k: boxes.append(text))
+    ui.run_browser("http://127.0.0.1:1/", "a note")
+    assert "PW Mount Control is running. Press OK to stop it." in boxes[0]
+    assert "a note" in boxes[0] and "http://127.0.0.1:1/" in boxes[0]

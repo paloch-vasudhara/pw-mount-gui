@@ -18,7 +18,11 @@ import time
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+# repo: tools/cctv_relay/ -> the repo root; package: relay/ -> the app root (gateway/ beside it)
+for _root in (Path(__file__).resolve().parents[1], Path(__file__).resolve().parents[2]):
+    if (_root / "gateway").is_dir():
+        sys.path.insert(0, str(_root))
+        break
 
 import httpx  # noqa: E402
 

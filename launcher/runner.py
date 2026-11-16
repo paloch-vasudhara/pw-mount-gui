@@ -41,8 +41,8 @@ class Stack:
 
     def _env(self) -> dict[str, str]:
         env = dict(os.environ)
-        if (self.root / "tools" / "package").is_dir():  # the repo, not the package
-            env["PYTHONDONTWRITEBYTECODE"] = "1"
+        # nothing may write under the app folder (it may be Program Files); the package ships .pyc
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         return env
 
     def start(self) -> None:
