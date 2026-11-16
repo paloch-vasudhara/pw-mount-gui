@@ -31,6 +31,16 @@ def _csv(value: str) -> list[str]:
     return [v.strip().rstrip("/") for v in value.split(",") if v.strip()]
 
 
+def default_web_dir() -> Path | None:
+    """T6.2a: PW_WEB_DIR (relative = to the repo), else <repo>/web/.output/public when built."""
+    env = os.environ.get("PW_WEB_DIR")
+    if env:
+        p = Path(env)
+        return p if p.is_absolute() else REPO_ROOT / p
+    p = REPO_ROOT / "web" / ".output" / "public"
+    return p if p.is_dir() else None
+
+
 @dataclass
 class Settings:
     port: int = DEFAULT_PORT
@@ -47,6 +57,8 @@ class Settings:
     pwi4_start_timeout_s: float = 60.0
     # T4.1: the analysis service the TLE of a tracked object is fetched from (by NORAD id).
     analysis_url: str = "http://127.0.0.1:8410"
+    # T6.2a: the built web app the gateway serves (None = dev mode, no static serving).
+    web_dir: Path | None = None
 
     @classmethod
     def from_env(cls, port: int | None = None) -> Settings:
@@ -70,6 +82,7 @@ class Settings:
             pwi4_exe=env.get("PW_PWI4_EXE") or None,
             pwi4_start_timeout_s=float(env.get("PW_PWI4_START_TIMEOUT_S", "60")),
             analysis_url=env.get("PW_ANALYSIS_URL", "http://127.0.0.1:8410").rstrip("/"),
+            web_dir=default_web_dir(),
         )
 
     @property

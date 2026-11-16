@@ -212,7 +212,7 @@ def test_upload_409_is_not_retried(fits_path):
 
 
 def test_upload_connection_error_before_a_response_is_retried(fits_path):
-    f = FakeHttp(upload=[requests.ConnectionError(), requests.Timeout(),
+    f = FakeHttp(upload=[requests.ConnectionError(), requests.ConnectTimeout(),
                          ok({"status": "success", "subid": 7})])
     c, clk = client(f)
     solve(c, fits_path)

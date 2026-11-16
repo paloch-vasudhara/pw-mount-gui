@@ -163,3 +163,61 @@ def target_point(dets: list[dict]) -> Optional[tuple[float, float]]:
         if d.get("role") == ROLE_TARGET:
             return det_midpoint(d)
     return None
+
+
+# -- T5.2g: a sky-position hint from the image header -------------------------
+def _sexagesimal(v, hours: bool) -> Optional[float]:
+    """'12 34 56.7' / '12:34:56.7' / '-05 12 00' -> degrees (hours x 15 for RA)."""
+    parts = [p for p in re.split(r"[\s:hHdDmMsS'\"]+", str(v).strip()) if p]
+    if not 1 <= len(parts) <= 3:
+        return None
+    try:
+        nums = [float(p) for p in parts]
+    except ValueError:
+        return None
+    neg = str(v).strip().startswith("-")
+    deg = abs(nums[0]) + (nums[1] / 60.0 if len(nums) > 1 else 0) + (
+        nums[2] / 3600.0 if len(nums) > 2 else 0)
+    deg = -deg if neg else deg
+    return deg * 15.0 if hours else deg
+
+
+def _coord(v, hours_if_sexagesimal: bool) -> Optional[float]:
+    """A header value as degrees: a number (or numeric string) is degrees; a string with
+    separators is sexagesimal."""
+    if isinstance(v, bool) or v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip()
+    try:
+        return float(s)
+    except ValueError:
+        return _sexagesimal(s, hours_if_sexagesimal)
+
+
+def header_pointing(header: Optional[dict]) -> Optional[tuple[float, float]]:
+    """(ra_deg, dec_deg) the file says it points at, else None. In order: ``RA`` / ``DEC``
+    (degrees), ``OBJCTRA`` / ``OBJCTDEC`` (sexagesimal hours / degrees), ``CRVAL1`` /
+    ``CRVAL2`` when ``CTYPE`` is RA / DEC and ``CRPIX`` exists (a valid WCS). A value outside
+    RA 0..360 / Dec -90..90, or exactly (0, 0), is ignored. Never the mount's pointing."""
+    h = header or {}
+
+    def ok(ra, dec):
+        if ra is None or dec is None or not (np.isfinite(ra) and np.isfinite(dec)):
+            return None
+        if not (0.0 <= ra <= 360.0 and -90.0 <= dec <= 90.0) or (ra == 0.0 and dec == 0.0):
+            return None
+        return (float(ra) % 360.0, float(dec))
+
+    got = ok(_coord(h.get("RA"), True), _coord(h.get("DEC"), False))
+    if got:
+        return got
+    got = ok(_coord(h.get("OBJCTRA"), True), _coord(h.get("OBJCTDEC"), False))
+    if got:
+        return got
+    c1, c2 = str(h.get("CTYPE1") or ""), str(h.get("CTYPE2") or "")
+    if c1.upper().startswith("RA") and c2.upper().startswith("DEC") \
+            and h.get("CRPIX1") is not None and h.get("CRPIX2") is not None:
+        return ok(_coord(h.get("CRVAL1"), False), _coord(h.get("CRVAL2"), False))
+    return None

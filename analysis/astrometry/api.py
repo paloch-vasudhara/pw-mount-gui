@@ -63,6 +63,9 @@ ERR_KEY = "Invalid astrometry.net API key"
 ERR_UNREACHABLE = "astrometry.net unreachable (network)"
 ERR_FAILED = "astrometry.net could not solve this frame"
 ERR_TIMEOUT = "Solve timed out"
+ERR_UPLOAD_SENT = ("Upload sent but astrometry.net did not answer; check 'My submissions' on "
+                   "nova.astrometry.net, then retry")
+ERR_UPLOAD_TIMEOUT = "astrometry.net upload timed out"
 ALLOWED_EXTS = SUPPORTED_EXTS - {".fts"}   # the spec's list: fits fit tif tiff jpg jpeg png
 
 
@@ -115,12 +118,14 @@ def _validate_run(body: RunIn) -> tuple[str, tuple[float, float], list[tuple[flo
     return epoch, tgt, service.star_midpoints(streaks)
 
 
-def _fingerprint(image_id: str, stars, hint_scale) -> str:
-    """(image, the star midpoints used for the solve, the hint scale): what nova is shown.
-    The target / epoch / exposure are not part of it - they only affect the mapping."""
+def _fingerprint(image_id: str, stars, hint_scale, sky_hint=None, mode=None) -> str:
+    """(image, the star midpoints used for the solve, the hint scale, the header sky hint, the
+    upload mode): what nova is shown. The target / epoch / exposure are not part of it - they
+    only affect the mapping."""
     pts = sorted((round(float(x), 3), round(float(y), 3)) for x, y in stars)
     hs = None if hint_scale is None else round(float(hint_scale), 4)
-    raw = json.dumps([image_id, pts, hs])
+    sh = None if sky_hint is None else [round(float(v), 4) for v in sky_hint]
+    raw = json.dumps([image_id, pts, hs, sh, mode])
     return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
 
@@ -128,6 +133,10 @@ def _nova_error_text(e: nova.NovaError) -> str:
     if e.kind == nova.INVALID_KEY:
         return ERR_KEY
     if e.kind == nova.UNREACHABLE:
+        if e.reason == nova.UPLOAD_SENT:
+            return ERR_UPLOAD_SENT
+        if e.reason == nova.UPLOAD_TIMEOUT:
+            return ERR_UPLOAD_TIMEOUT
         return ERR_UNREACHABLE
     if e.kind == nova.BUSY:
         base = f"astrometry.net busy (HTTP {e.status})"
@@ -138,7 +147,7 @@ def _nova_error_text(e: nova.NovaError) -> str:
 def _make_worker(client, *, spec: dict):
     """The job body. ``client`` holds the key; the job never does. ``spec`` is what a
     resume needs (width, height, epoch, exposure_s, target, stars, hint_scale, source,
-    station_scale). If the job
+    station_scale, flux, sky_hint, upload_mode). If the job
     already carries a ``nova_subid`` the submission is re-attached, never re-uploaded; if it
     carries a ``solution`` no nova call is made at all."""
     width, height, epoch = spec["width"], spec["height"], spec["epoch"]
@@ -148,7 +157,7 @@ def _make_worker(client, *, spec: dict):
     def work(job: Job) -> dict:
         reattach = job.nova_subid
 
-        def progress(stage=None, subid=None, jobid=None):
+        def progress(stage=None, subid=None, jobid=None, text=None):
             if subid is not None:
                 job.nova_subid = subid
             if jobid is not None:
@@ -157,7 +166,7 @@ def _make_worker(client, *, spec: dict):
                 if reattach is not None and stage != jobs_mod.SOLVING:
                     job.set_state(stage, f"Re-attached to astrometry.net submission {reattach}")
                 else:
-                    job.set_state(stage)
+                    job.set_state(stage, text)
 
         job.check_cancel()
         sol = job.solution
@@ -165,7 +174,9 @@ def _make_worker(client, *, spec: dict):
             try:
                 sol = solve_mod.solve_points(client, stars, width, height, hint_scale,
                                              SOLVE_TIMEOUT_S, progress, job.check_cancel,
-                                             resume_subid=reattach)
+                                             resume_subid=reattach, flux=spec.get("flux"),
+                                             hint=spec.get("sky_hint"),
+                                             mode=spec.get("upload_mode"))
             except nova.NovaError as e:
                 job.unsolvable = e.unsolvable
                 if e.kind == nova.TIMED_OUT:
@@ -294,12 +305,19 @@ def make_router(sessions: ImageSessions, jobs: JobRegistry | None = None) -> API
         epoch, target, stars = _validate_run(body)
         factory = getattr(request.app.state, "nova_factory", nova.real_factory)
         hint = solve_mod.hint_scale_arcsec(body.focal_mm, body.pixel_um)
+        width, height = int(s.image.width), int(s.image.height)
+        sky = service.header_pointing(s.image.header)   # the file's own pointing, never the mount's
+        sky_hint = None if sky is None else (sky[0], sky[1],
+                                             solve_mod.hint_radius_deg(hint, width, height))
+        mode = solve_mod.upload_mode()
         spec = {"width": int(s.image.width), "height": int(s.image.height), "epoch": epoch,
                 "exposure_s": body.exposure_s, "target": target, "stars": stars,
                 "hint_scale": hint, "source": body.source,
+                "flux": [float(d.get("brt") or 0) for d in _complete_streaks(body.detections)],
+                "sky_hint": sky_hint, "upload_mode": mode,
                 "station_scale": solve_mod.hint_scale_arcsec(body.station_focal_mm,
                                                              body.station_pixel_um)}
-        fp = _fingerprint(body.image_id, stars, hint)
+        fp = _fingerprint(body.image_id, stars, hint, sky_hint, mode)
         prev = jobs.find_reusable(fp)
 
         def init(job: Job) -> None:

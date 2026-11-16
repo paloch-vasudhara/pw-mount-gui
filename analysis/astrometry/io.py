@@ -27,6 +27,11 @@ FITS_EXTS = {".fit", ".fits", ".fts"}
 RASTER_EXTS = {".tif", ".tiff", ".jpg", ".jpeg", ".png"}
 SUPPORTED_EXTS = FITS_EXTS | RASTER_EXTS
 
+# FITS keys kept on ImageData.header: the exposure / optics ones plus the pointing ones
+# (RA/DEC, OBJCTRA/OBJCTDEC, a WCS reference point) that give the solver a sky-position hint.
+HEADER_KEYS = ("BITPIX", "EXPTIME", "DATE-OBS", "FOCALLEN", "XPIXSZ", "RA", "DEC", "OBJCTRA",
+               "OBJCTDEC", "CTYPE1", "CTYPE2", "CRVAL1", "CRVAL2", "CRPIX1", "CRPIX2")
+
 # Rec.709 luminance weights for colour -> mono.
 _LUMA = np.array([0.2126, 0.7152, 0.0722], dtype=np.float64)
 
@@ -155,8 +160,7 @@ def _load_fits(path: str) -> ImageData:
         data=data, width=w, height=h, source_format="fits",
         bit_depth=bit_depth, exposure_s=exposure_s, epoch=epoch,
         is_color_original=was_color,
-        header={k: hdr.get(k) for k in ("BITPIX", "EXPTIME", "DATE-OBS", "FOCALLEN", "XPIXSZ")
-                if k in hdr},
+        header={k: hdr.get(k) for k in HEADER_KEYS if k in hdr},
         warnings=warnings,
     )
 

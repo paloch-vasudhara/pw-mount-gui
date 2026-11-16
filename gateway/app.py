@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 from . import cctv as cctv_mod
+from . import webserve
 from .adsb import AdsbRunner
 from .airtrack import AirChecker
 from .audit import AuditLog
@@ -233,6 +234,7 @@ def create_app(
             await monitor.stop()
             tle_source.close()
             await app.state.cctv.aclose()
+            await app.state.analysis_proxy.aclose()
             await control.shutdown()  # G4 graceful-exit stop
             if task is not None:
                 task.cancel()
@@ -558,6 +560,8 @@ def create_app(
             with contextlib.suppress(Exception):
                 await websocket.close()
 
+    # T6.2a: last on purpose: the catch-all analysis proxy and the static web app
+    webserve.install(app, settings, analysis_transport)
     return app
 
 

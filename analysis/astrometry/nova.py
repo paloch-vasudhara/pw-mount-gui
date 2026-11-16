@@ -45,6 +45,8 @@ ANET_SITE = "https://nova.astrometry.net"   # wcs_file lives at the ROOT, not /a
 SOLVE_TIMEOUT_S = 1800.0   # slow is not failed: 30 min wall clock
 POLL_S = 5.0
 REQUEST_TIMEOUT_S = 60.0
+UPLOAD_DEADLINE_XYLS_S = 120.0    # login + upload, an x,y list is a few KB
+UPLOAD_DEADLINE_IMAGE_S = 300.0   # login + upload of the (downscaled) image fallback
 
 INVALID_KEY = "invalid_key"
 UNREACHABLE = "unreachable"
@@ -59,19 +61,25 @@ MAX_POLL_FAILURES = 5                           # consecutive failed polls that 
 RESULTS_WAIT_S = 30.0                           # "job succeeded but results not ready" budget
 RESULTS_RETRY_S = 3.0
 
+# NovaError.reason (only set for the upload stage)
+UPLOAD_SENT = "upload_sent"          # the body went out, no answer: it may exist at nova
+UPLOAD_TIMEOUT = "upload_timeout"    # the login + upload deadline passed
+
 
 class NovaError(Exception):
     """A nova failure. ``kind`` is one of the constants above; the message is fixed text.
     ``status`` = the last HTTP status behind a ``busy`` failure; ``retries`` = retries spent;
-    ``unsolvable`` = nova itself reported that it could not solve this field."""
+    ``unsolvable`` = nova itself reported that it could not solve this field; ``reason`` =
+    UPLOAD_SENT / UPLOAD_TIMEOUT for the two upload-stage unreachable cases."""
 
     def __init__(self, kind: str, status: Optional[int] = None, retries: int = 0,
-                 unsolvable: bool = False):
+                 unsolvable: bool = False, reason: Optional[str] = None):
         super().__init__(kind)
         self.kind = kind
         self.status = status
         self.retries = retries
         self.unsolvable = unsolvable
+        self.reason = reason
 
 
 @dataclass
@@ -88,7 +96,10 @@ class NovaClient(Protocol):
     def solve(self, image_path: str, *, width: int, height: int,
               scale_est_arcsec: Optional[float], timeout: float,
               progress: Optional[Callable], check_cancel: Optional[Callable],
-              resume_subid: Optional[int] = None) -> NovaSolution: ...
+              resume_subid: Optional[int] = None,
+              hint: Optional[tuple] = None) -> NovaSolution: ...
+    # ``image_path`` ending in ``.xyls`` is an x,y list (width / height = the sensor size);
+    # anything else is an image of ``width`` x ``height``. ``hint`` = (ra, dec, radius) deg.
 
 
 def _jsonable_header(hdr) -> dict:
@@ -135,7 +146,8 @@ class NovaHttpClient:
                  request_timeout: float = REQUEST_TIMEOUT_S, waits=RETRY_WAITS_S,
                  sleep: Optional[Callable] = None, max_poll_failures: int = MAX_POLL_FAILURES,
                  results_wait_s: float = RESULTS_WAIT_S,
-                 results_retry_s: float = RESULTS_RETRY_S, clock: Callable = time.monotonic):
+                 results_retry_s: float = RESULTS_RETRY_S, clock: Callable = time.monotonic,
+                 upload_deadlines=(UPLOAD_DEADLINE_XYLS_S, UPLOAD_DEADLINE_IMAGE_S)):
         self._apikey = apikey
         self._clock = clock
         self._http = http
@@ -146,6 +158,7 @@ class NovaHttpClient:
         self.max_poll_failures = max_poll_failures
         self.results_wait_s = results_wait_s
         self.results_retry_s = results_retry_s
+        self._deadlines = tuple(upload_deadlines)      # (x,y list, image) seconds
         self._subid: Optional[int] = None
         self._jobid: Optional[int] = None
 
@@ -156,17 +169,34 @@ class NovaHttpClient:
                  step, attempt, total, outcome, self._subid, self._jobid)
 
     def _request(self, http, step: str, method: str, url: str, check_cancel=None,
-                 retry_statuses=RETRY_STATUSES, **kw):
+                 retry_statuses=RETRY_STATUSES, on_attempt=None, deadline=None,
+                 retry_error=None, **kw):
         """One logical request with retries. Returns a response whose status is not
-        retryable (the caller judges it); raises ``NovaError`` busy / unreachable."""
+        retryable (the caller judges it); raises ``NovaError`` busy / unreachable.
+        ``on_attempt(attempt, total)`` is called before each try; cancel is checked before
+        each try; ``deadline`` (a clock value) ends the request with UPLOAD_TIMEOUT;
+        ``retry_error(exc) -> bool`` False = do not retry that failure (UPLOAD_SENT)."""
         import requests
         total = len(self._waits) + 1
         for attempt in range(1, total + 1):
             last = attempt == total
+            if check_cancel:
+                check_cancel()
+            timeout = self.request_timeout
+            if deadline is not None:
+                left = deadline - self._clock()
+                if left <= 0:
+                    raise NovaError(UNREACHABLE, retries=attempt - 1, reason=UPLOAD_TIMEOUT)
+                timeout = max(1.0, min(timeout, left))
+            if on_attempt:
+                on_attempt(attempt, total)
             try:
-                resp = getattr(http, method)(url, timeout=self.request_timeout, **kw)
+                resp = getattr(http, method)(url, timeout=timeout, **kw)
             except (requests.RequestException, OSError) as e:
                 self._note(step, attempt, total, type(e).__name__)
+                if retry_error is not None and not retry_error(e):
+                    raise NovaError(UNREACHABLE, retries=attempt - 1,
+                                    reason=UPLOAD_SENT) from None
                 if last:
                     raise NovaError(UNREACHABLE, retries=attempt - 1) from None
             else:
@@ -190,8 +220,13 @@ class NovaHttpClient:
             raise NovaError(BUSY, status=resp.status_code)
         return data
 
-    def _login(self, http, check_cancel=None) -> str:
+    def _login(self, http, check_cancel=None, progress=None, deadline=None) -> str:
+        def on_attempt(n, total):
+            if progress:
+                progress(stage="uploading",
+                         text=f"Logging in to astrometry.net \u00b7 attempt {n}/{total}")
         resp = self._request(http, "login", "post", f"{ANET_BASE}/login", check_cancel,
+                             on_attempt=on_attempt, deadline=deadline,
                              data={"request-json": json.dumps({"apikey": self._apikey})})
         if resp.status_code in (401, 403):
             raise NovaError(INVALID_KEY)
@@ -200,22 +235,64 @@ class NovaHttpClient:
             raise NovaError(INVALID_KEY)
         return data["session"]
 
+    @staticmethod
+    def _connect_phase(e: BaseException) -> bool:
+        """True when the failure happened before anything was sent (a retry cannot create a
+        second submission): a connect error / timeout, a refused / unresolvable host."""
+        import requests
+        if isinstance(e, requests.ConnectTimeout):
+            return True
+        if isinstance(e, requests.Timeout):          # a ReadTimeout: the body went out
+            return False
+        if isinstance(e, requests.ConnectionError):
+            # urllib3 wraps the cause in args[0] (MaxRetryError.reason); a bare error (no cause)
+            # is a connect failure; "Connection aborted" (ProtocolError) is a drop after send
+            cause = e.args[0] if e.args else None
+            cause = getattr(cause, "reason", cause)
+            if cause is None or isinstance(cause, str):
+                return True
+            return type(cause).__name__ in ("NewConnectionError", "ConnectTimeoutError",
+                                            "NameResolutionError", "ConnectionRefusedError",
+                                            "gaierror")
+        if isinstance(e, requests.RequestException):
+            return False
+        return not isinstance(e, (TimeoutError, ConnectionResetError, ConnectionAbortedError,
+                                  BrokenPipeError))
+
     def _submit(self, http, session: str, path: str, scale_est: Optional[float],
-                check_cancel=None) -> int:
+                check_cancel=None, hint=None, width: Optional[int] = None,
+                height: Optional[int] = None, progress=None, deadline=None) -> int:
+        xyls = path.lower().endswith(".xyls")
         params: dict[str, Any] = {
             "session": session, "allow_commercial_use": "n", "allow_modifications": "n",
-            "publicly_visible": "n", "downsample_factor": 2,
+            "publicly_visible": "n",
         }
+        if xyls:
+            # nova needs the sensor size to place an x,y list (1-based FITS pixel coordinates)
+            params.update({"image_width": int(width), "image_height": int(height)})
         if scale_est is not None:
             params.update({"scale_units": "arcsecperpix", "scale_est": scale_est,
                            "scale_err": 25.0})
+        if hint is not None:
+            params.update({"center_ra": float(hint[0]), "center_dec": float(hint[1]),
+                           "radius": float(hint[2])})
+
+        def on_attempt(n, total):
+            if progress:
+                progress(stage="uploading",
+                         text=f"Uploading to astrometry.net \u00b7 attempt {n}/{total}")
+        name = "field.xyls" if xyls else "field.fits"
         with open(path, "rb") as fh:
-            # only "no response" and 429 / 503 are retried: any other status may mean the
-            # submission was created, so a retry could double-submit
+            # connection-phase failures and 429 / 503 are retried; any other status or a drop
+            # after the body went out may mean the submission exists, so it is not retried.
+            # (A cancel is checked before each request; a request already in flight cannot be
+            # interrupted - moot for an x,y list, a few KB; for the image fallback it ends at
+            # the request timeout / the deadline.)
             resp = self._request(http, "upload", "post", f"{ANET_BASE}/upload", check_cancel,
-                                 retry_statuses=UPLOAD_RETRY_STATUSES,
+                                 retry_statuses=UPLOAD_RETRY_STATUSES, on_attempt=on_attempt,
+                                 deadline=deadline, retry_error=self._connect_phase,
                                  data={"request-json": json.dumps(params)},
-                                 files={"file": ("field.fits", fh, "application/octet-stream")})
+                                 files={"file": (name, fh, "application/octet-stream")})
         data = self._json(resp)
         if data.get("status") != "success":
             raise NovaError(FAILED)
@@ -309,18 +386,20 @@ class NovaHttpClient:
             waited += self.results_retry_s
 
     def solve(self, image_path, *, width, height, scale_est_arcsec, timeout=SOLVE_TIMEOUT_S,
-              progress=None, check_cancel=None, resume_subid=None) -> NovaSolution:
+              progress=None, check_cancel=None, resume_subid=None, hint=None) -> NovaSolution:
         import requests
+        xyls = str(image_path).lower().endswith(".xyls")
+        deadline = self._clock() + self._deadlines[0 if xyls else 1]   # login + upload
         try:
             with (self._http or requests.Session()) as http:
                 if progress:
                     progress(stage="uploading")
-                session = self._login(http, check_cancel)
+                session = self._login(http, check_cancel, progress, deadline)
                 if resume_subid is not None:
                     subid = int(resume_subid)            # log in again, but never re-upload
                 else:
                     subid = self._submit(http, session, image_path, scale_est_arcsec,
-                                         check_cancel)
+                                         check_cancel, hint, width, height, progress, deadline)
                 self._subid = subid
                 if progress:
                     progress(stage="queued", subid=subid)
@@ -366,7 +445,7 @@ class FakeNova:
         self.step_s = step_s
 
     def solve(self, image_path, *, width, height, scale_est_arcsec, timeout=SOLVE_TIMEOUT_S,
-              progress=None, check_cancel=None, resume_subid=None) -> NovaSolution:
+              progress=None, check_cancel=None, resume_subid=None, hint=None) -> NovaSolution:
         scale = float(scale_est_arcsec) if scale_est_arcsec else FAKE_SCALE
         override = os.environ.get("PW_ASTROMETRY_FAKE_SCALE")   # tests / browser gate: a mismatch
         if override:

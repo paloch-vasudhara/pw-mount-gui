@@ -18,6 +18,13 @@ export default defineNuxtConfig({
     head: {
       title: 'PW MOUNT CONTROL',
       meta: [{ name: 'viewport', content: 'width=device-width, initial-scale=1.0' }],
+      // Placeholder icon (11-16): the L-350 + RASA 11 model on a night tile; master + app.ico in
+      // tools/package/icon/ (the launcher / installer reuse it). Replace all of them together.
+      link: [
+        { rel: 'icon', href: '/favicon.ico', sizes: 'any' },
+        { rel: 'icon', type: 'image/png', href: '/icon-512.png' },
+        { rel: 'apple-touch-icon', href: '/apple-touch-icon.png' },
+      ],
     },
   },
 
