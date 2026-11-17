@@ -3,10 +3,12 @@
 The pipeline itself (platform client, CPR, times, heights, prediction) is the sibling repo's
 `adsb_core` library (read only for us). This module owns the gateway side:
 
-- an OPTIONAL import (`load_core`): missing / broken / not 0.3.x -> state `module_missing`, the
+- an OPTIONAL import (`load_core`): missing / broken / not 0.4.x -> state `module_missing`, the
   gateway starts and every satellite / mount function works as before;
-- two sources behind one interface: LIVE (`adsb_core.platform.PlatformClient` ->
-  `AircraftTable`) and SIMULATED (a client of adsb_interpreter's feed on 8500, started with
+- two sources behind one interface: LIVE (`adsb_core.records.RecordsPoller` -> `AircraftTable`;
+  REST `decoded` records at 1 Hz since the platform's 9 Nov 2026 update made the full WebSocket
+  administrator-only: a read token gets 1008 there, adsb_core 0.4.0, user 11-17) and SIMULATED
+  (a client of adsb_interpreter's feed on 8500, started with
   `--simulate`; each snapshot aircraft is adapted to an `adsb_core.state.Aircraft`, so the same
   `adsb_core.predict.path` cues both);
 - the runner: its own asyncio tasks with bounded queues. A failing or slow source never blocks
@@ -42,7 +44,7 @@ from .settings import SettingsStore
 
 log = logging.getLogger("gateway.adsb")
 
-SUPPORTED_PREFIX = "0.3."
+SUPPORTED_PREFIX = "0.4."  # 0.4.0 added records.RecordsPoller (the live source)
 SITE_HAE_OFFSET_M = -30.0  # HAE = MSL - 30 m (the geoid near Bangkok; adsb_interpreter's rule)
 DEFAULT_FEED_URL = "http://127.0.0.1:8500"
 TICK_S = 1.0
@@ -96,6 +98,7 @@ def feed_url_from_env() -> str:
 class Core:
     version: str
     platform: ModuleType
+    records: ModuleType
     state: ModuleType
     predict: ModuleType
     geometry: ModuleType
@@ -110,10 +113,10 @@ def load_core() -> tuple[Core | None, str]:
 
         version = str(getattr(adsb_core, "__version__", ""))
         if not version.startswith(SUPPORTED_PREFIX):
-            return None, f"ADS-B module version {version or '?'} is not supported (need 0.3.x)"
+            return None, f"ADS-B module version {version or '?'} is not supported (need 0.4.x)"
         mods = [
             importlib.import_module(f"adsb_core.{n}")
-            for n in ("platform", "state", "predict", "geometry", "timebase")
+            for n in ("platform", "records", "state", "predict", "geometry", "timebase")
         ]
         return Core(version, *mods), ""
     except ModuleNotFoundError as exc:
@@ -190,7 +193,7 @@ def _scrub(text: str, secret: str | None) -> str:
 
 
 class LiveSource:
-    """`PlatformClient` -> bounded queue -> `AircraftTable.ingest` (expired every 1 s)."""
+    """`RecordsPoller` -> bounded queue -> `AircraftTable.ingest` (expired every 1 s)."""
 
     simulated = False
 
@@ -217,7 +220,9 @@ class LiveSource:
         self.errors = 0
 
     def _default_factory(self, url, token, on_event, on_status):
-        return self.core.platform.PlatformClient(
+        # the poller has PlatformClient's interface and states (run / on_event envelopes / status);
+        # only the URL's host is used
+        return self.core.records.RecordsPoller(
             url, token, on_event, kinds=("decoded",), on_status=on_status
         )
 

@@ -224,7 +224,10 @@ begin
            mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
       begin
         App := ExpandConstant('{app}');
-        if not (ExecAsOriginalUser(App + '\python\python.exe', '-m launcher.cleanup --all', App, SW_HIDE,
+        { plain Exec: Inno refuses ExecAsOriginalUser at uninstall time ("Cannot call ... during
+          uninstall", user 11-17). The uninstaller runs as the user who started it (elevated with
+          the same account under UAC), so the logins and %LOCALAPPDATA% are that user's. }
+        if not (Exec(App + '\python\python.exe', '-m launcher.cleanup --all', App, SW_HIDE,
                   ewWaitUntilTerminated, Code) and (Code = 0)) then
           MsgBox('Your settings and stored logins could not be removed automatically. ' +
             'Delete the "pw-mount-control" entries in Windows Credential Manager and the folder ' +

@@ -57,7 +57,7 @@ PY_SHA256 = "4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3"
 
 ADSB_SRC = ROOT.parent / "adsb_interpreter" / "adsb_core" / "src" / "adsb_core"
 ADSB_REPO = ROOT.parent / "adsb_interpreter"
-ADSB_MAJOR_MINOR = "0.3."
+ADSB_MAJOR_MINOR = "0.4."  # 0.4.0: records.RecordsPoller is the live source (11-17)
 
 # Left out of the lock: copied separately (adsb_core) or only there to build the venv.
 LOCK_SKIP = {"adsb-core", "pip", "setuptools", "wheel"}
@@ -504,7 +504,8 @@ def _clean_env(local: Path) -> dict[str, str]:
 
 
 IMPORTS = (
-    "gateway.app, analysis.app, launcher.__main__, webview, adsb_core, skyfield, astropy, "
+    "gateway.app, analysis.app, launcher.__main__, webview, adsb_core, adsb_core.records, "
+    "skyfield, astropy, "
     "photutils, skimage, scipy, numpy, keyring, sqlalchemy, psycopg2, sgp4, PIL, tifffile, "
     "requests, httpx, uvicorn, dotenv, tzdata, websockets, multipart"
 )

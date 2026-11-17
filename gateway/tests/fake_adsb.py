@@ -191,7 +191,7 @@ class FakeFeed:
             return
         self.auth_ok += 1
         try:
-            await ws.send(json.dumps({"type": "hello", "service": "feed", "adsb_core": "0.3.0"}))
+            await ws.send(json.dumps({"type": "hello", "service": "feed", "adsb_core": "0.4.0"}))
             while True:
                 self._seq += 1
                 await ws.send(json.dumps({

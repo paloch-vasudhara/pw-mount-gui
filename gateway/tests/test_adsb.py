@@ -17,7 +17,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from gateway import adsb as adsb_mod
-from gateway.adsb import AdsbRunner, adapt_feed_aircraft, is_green, load_core
+from gateway.adsb import AdsbRunner, LiveSource, adapt_feed_aircraft, is_green, load_core
 from gateway.app import create_app
 from gateway.config import Settings
 from gateway.hub import Hub
@@ -34,7 +34,7 @@ from .conftest import FakePwi4
 
 adsb_core = pytest.importorskip("adsb_core")
 pytestmark = pytest.mark.skipif(
-    not str(adsb_core.__version__).startswith("0.3."), reason="needs adsb_core 0.3.x"
+    not str(adsb_core.__version__).startswith("0.4."), reason="needs adsb_core 0.4.x"
 )
 
 TOKEN = "t" * 43
@@ -70,7 +70,7 @@ async def until(pred, timeout=5.0, step=0.02):
 
 def test_load_core_ok():
     core, why = load_core()
-    assert core is not None and why == "" and core.version.startswith("0.3.")
+    assert core is not None and why == "" and core.version.startswith("0.4.")
 
 
 def test_load_core_missing(monkeypatch):
@@ -79,10 +79,24 @@ def test_load_core_missing(monkeypatch):
     assert core is None and why == "ADS-B module not installed"
 
 
-def test_load_core_wrong_version(monkeypatch):
-    monkeypatch.setattr(adsb_core, "__version__", "0.4.1")
+def test_live_source_polls_records_not_the_websocket():
+    """11-17: since the platform's 9 Nov update a read token gets 1008 on /api/v1/ws, so the live
+    source is adsb_core's REST RecordsPoller (0.4.0). Built only: no network, the token never in
+    its repr."""
     core, why = load_core()
-    assert core is None and "0.4.1" in why and "0.3.x" in why
+    assert core is not None, why
+    site = core.geometry.Geodetic(13.8, 100.6, 70.0)
+    src = LiveSource(core, "wss://10.22.123.68/api/v1/ws", "SECRET-READ-TOKEN-123", site, 100.0,
+                     lambda *a, **k: None)
+    client = src._default_factory(src._url, src._token, src._on_event, lambda st: None)
+    assert isinstance(client, core.records.RecordsPoller)
+    assert "SECRET-READ-TOKEN-123" not in repr(client)
+
+
+def test_load_core_wrong_version(monkeypatch):
+    monkeypatch.setattr(adsb_core, "__version__", "0.3.0")
+    core, why = load_core()
+    assert core is None and "0.3.0" in why and "0.4.x" in why
 
 
 def test_load_core_broken_submodule(monkeypatch):

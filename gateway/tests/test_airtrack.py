@@ -40,7 +40,7 @@ from .tle_stub import TleStub
 
 adsb_core = pytest.importorskip("adsb_core")
 pytestmark = pytest.mark.skipif(
-    not str(adsb_core.__version__).startswith("0.3."), reason="needs adsb_core 0.3.x"
+    not str(adsb_core.__version__).startswith("0.4."), reason="needs adsb_core 0.4.x"
 )
 
 CORE, _WHY = load_core()
