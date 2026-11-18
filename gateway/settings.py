@@ -14,11 +14,11 @@ import logging
 import os
 import threading
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 log = logging.getLogger("gateway.settings")
 
@@ -214,9 +214,21 @@ ADSB_TOKEN_MAX_LEN = 4096
 class Adsb(BaseModel):
     """T5.4b ADS-B platform connection. The read token is a secret (own Credential entry)."""
 
-    enabled: bool = False
+    mode: Literal["off", "live", "sim"] = "live"
     url: str = Field(ADSB_DEFAULT_URL, max_length=2048)
     range_limit_km: Literal[20, 50, 100, 200, 350] = 100
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_enabled(cls, data: Any) -> Any:
+        """T5.4c: settings files from before the mode (`enabled: true|false`) -> live | off;
+        the URL / range are kept. No `enabled` and no `mode` -> the default (live)."""
+        if isinstance(data, dict) and "enabled" in data:
+            data = dict(data)
+            enabled = data.pop("enabled")
+            if "mode" not in data and isinstance(enabled, bool):
+                data["mode"] = "live" if enabled else "off"
+        return data
 
 
 def adsb_url_error(url: str) -> str | None:
@@ -458,7 +470,7 @@ class SettingsStore:
         a = self.current.adsb
         # the URL is not secret; the token is write-only
         d["adsb"] = {
-            "enabled": a.enabled,
+            "mode": a.mode,
             "url": a.url,
             "range_limit_km": a.range_limit_km,
             "token_set": self.adsb_token_set(),

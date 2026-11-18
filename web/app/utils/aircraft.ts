@@ -18,6 +18,11 @@ export const MAX_AHEAD_S = 2
 export const RATE_MIN_DT_S = 0.2
 export const RATE_MAX_DT_S = 5
 
+/** A correction larger than this (deg) snaps instead of blending (T5.6d). */
+export const SNAP_DEG = 5
+/** A re-anchor's offset from the position shown before fades out over this long (s, T5.6d). */
+export const BLEND_S = 0.5
+
 export interface AzElRate { daz: number, del: number }
 
 /** One aircraft as the store keeps it: the latest row + the position anchor the chart extrapolates from. */
@@ -29,6 +34,9 @@ export interface TrackedAircraft {
   t: number
   /** deg/s from the last two distinct positions; null until a second one arrives. */
   rate: AzElRate | null
+  /** The offset (deg) between what was shown before this frame and the new anchor; fades to 0 over
+   *  BLEND_S so a re-anchor does not jump. null = none (first sighting, a snap, the fallback path). */
+  corr: AzElRate | null
 }
 
 /** Shortest signed azimuth difference b - a, in (-180, 180]. */
@@ -42,9 +50,17 @@ export function azDiff(a: number, b: number): number {
 export const normAz = (a: number): number => ((a % 360) + 360) % 360
 
 /**
- * Fold a 1 Hz frame into the tracked map. A row whose az/el equals the previous frame's (the feed
- * had no new fix) keeps the old anchor and rate, so the dead-reckoning carries on instead of
- * freezing and then jumping; a moved row re-anchors and derives the rate from the two positions.
+ * Fold a 1 Hz frame into the tracked map (T5.6d).
+ *
+ * A row with the gateway's rates (`daz_dps` / `del_dps`, both finite: its az / el is the PREDICTED
+ * "now" position) anchors at (az, el) at the frame's arrival with exactly those rates, every frame,
+ * even when az / el equal the previous frame's. When an aircraft already shown is re-anchored, the
+ * offset between the position displayed just before and the new anchor is kept and fades over
+ * BLEND_S (`predictAzEl`); a larger one than SNAP_DEG snaps.
+ *
+ * Fallback (older gateway, or no prediction): a row whose az / el equals the previous frame's keeps
+ * the old anchor and rate, so the dead-reckoning carries on instead of freezing and then jumping; a
+ * moved row re-anchors and derives the rate from the two positions and the ARRIVAL times.
  */
 export function ingestFrame(
   prev: ReadonlyMap<string, TrackedAircraft>,
@@ -55,6 +71,16 @@ export function ingestFrame(
   for (const row of rows) {
     if (!row || typeof row.icao !== 'string' || !finite(row.az) || !finite(row.el)) continue
     const old = prev.get(row.icao)
+    if (finite(row.daz_dps) && finite(row.del_dps)) {
+      let corr: AzElRate | null = null
+      if (old) {
+        const shown = predictAzEl(old, tMs)
+        const c = { daz: azDiff(row.az, shown.az), del: shown.el - row.el }
+        if (Math.hypot(c.daz, c.del) <= SNAP_DEG) corr = c
+      }
+      out.set(row.icao, { row, az: row.az, el: row.el, t: tMs, rate: { daz: row.daz_dps, del: row.del_dps }, corr })
+      continue
+    }
     if (old && old.az === row.az && old.el === row.el) {
       out.set(row.icao, { ...old, row })
       continue
@@ -66,16 +92,27 @@ export function ingestFrame(
         rate = { daz: azDiff(old.az, row.az) / dt, del: (row.el - old.el) / dt }
       }
     }
-    out.set(row.icao, { row, az: row.az, el: row.el, t: tMs, rate })
+    out.set(row.icao, { row, az: row.az, el: row.el, t: tMs, rate, corr: null })
   }
   return out
 }
 
-/** Az / el at wall time `nowMs`: the anchor plus rate x min(elapsed, 2 s). */
+/** Az / el at wall time `nowMs`: the anchor plus rate x min(elapsed, 2 s), plus the fading correction. */
 export function predictAzEl(tr: TrackedAircraft, nowMs: number): { az: number, el: number } {
-  if (!tr.rate) return { az: tr.az, el: tr.el }
-  const h = Math.min(MAX_AHEAD_S, Math.max(0, (nowMs - tr.t) / 1000))
-  return { az: normAz(tr.az + tr.rate.daz * h), el: tr.el + tr.rate.del * h }
+  const elapsed = Math.max(0, (nowMs - tr.t) / 1000)
+  let az = tr.az
+  let el = tr.el
+  if (tr.rate) {
+    const h = Math.min(MAX_AHEAD_S, elapsed)
+    az += tr.rate.daz * h
+    el += tr.rate.del * h
+  }
+  if (tr.corr) {
+    const k = Math.max(0, 1 - elapsed / BLEND_S)
+    az += tr.corr.daz * k
+    el += tr.corr.del * k
+  }
+  return { az: normAz(az), el }
 }
 
 // ---------------------------------------------------------------- chart helpers
@@ -252,11 +289,17 @@ export function aircraftFilterState(adsb: AdsbInfo | null | undefined): { enable
   return { enabled: false, reason: adsb.detail || 'ADS-B feed down' }
 }
 
-/** "ADS-B feed down" chip: ADS-B is in use (enabled / simulated) but not green. Off, not configured or module missing: no chip. */
+/** "ADS-B feed down" chip: ADS-B is in use (mode LIVE / SIM) but not green. Off, not configured or module missing: no chip. */
 export function feedDownChip(adsb: AdsbInfo | null | undefined): { show: boolean, title: string } {
-  if (!adsb || adsb.green) return { show: false, title: '' }
+  if (!adsb || adsb.green || adsb.connecting) return { show: false, title: '' }
   const quiet = adsb.state === 'disabled' || adsb.state === 'not_configured' || adsb.state === 'module_missing'
   return { show: !quiet, title: adsb.detail || 'ADS-B feed down' }
+}
+
+/** T5.4c: the neutral "ADS-B connecting" chip during the 30 s grace after a (re)start. */
+export function connectingChip(adsb: AdsbInfo | null | undefined): { show: boolean, title: string } {
+  if (!adsb || adsb.green || !adsb.connecting) return { show: false, title: '' }
+  return { show: true, title: adsb.detail || 'Connecting to the ADS-B platform' }
 }
 
 /** "SIMULATED DATA" badge. */

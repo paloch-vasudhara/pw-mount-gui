@@ -47,6 +47,9 @@ const statusText = computed(() => {
   return airState.value.line ?? verdict.value.reason ?? (verdict.value.enabled ? 'Ready' : '')
 })
 
+// T5.6e: an allowed track's first check note (e.g. a near-zenith pass) is a warning: amber
+const statusIsNote = computed(() => verdict.value.enabled && verdict.value.reason !== null && statusText.value === verdict.value.reason)
+
 async function onTrack(): Promise<void> {
   const i = sel.selectedIcao
   if (i === null || !canTrack.value) return
@@ -166,7 +169,7 @@ function onClear(): void {
       TRACK SELECTED TARGET
     </button>
   </span>
-  <p class="tt-status" data-testid="tt-air-status" role="status">
+  <p class="tt-status" :class="{ 'tt-note-warn': statusIsNote }" data-testid="tt-air-status" role="status">
     {{ statusText }}
   </p>
 </template>
@@ -179,4 +182,5 @@ function onClear(): void {
 .tt-dialog .tt-c-air-range { width: 140px; }
 .tt-dialog .tt-c-air-el { width: 120px; }
 .tt-dialog .tt-c-air-callsign { width: auto; }
+.tt-dialog .tt-status.tt-note-warn { color: #e0a63c; }
 </style>

@@ -210,6 +210,7 @@ class AdsbInfo(BaseModel):
     state: str
     green: bool
     simulated: bool = False
+    connecting: bool = False  # T5.4c: the 30 s grace after a (re)start (retrying, never green)
     detail: str = ""
     delay_p50_s: float | None = None
     delay_p95_s: float | None = None

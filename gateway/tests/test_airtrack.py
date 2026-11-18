@@ -220,14 +220,44 @@ def test_rule_2_not_in_view():
     assert evaluate(r, "AAA111").code == "not_in_view"
 
 
+def kalman_record(flight, latency, n=3):
+    """A record with no velocity whose Kalman filter is ready (n fixes), the last `latency` old."""
+    prev = None
+    for k in range(n):
+        prev = record(
+            flight, T0 - (n - 1 - k), latency=latency, prev=prev, gs_kt=None, track_deg=None
+        )
+    return prev
+
+
 def test_rule_3_stale_fix_and_target():
+    # velocity predictor (T5.6d): up to 8 s old is accepted, beyond refused
     r = FakeRunner()
-    r.aircraft[ICAO] = record(ga(), T0, latency=3.5)
+    r.aircraft[ICAO] = record(ga(), T0, latency=8.5)
     v = evaluate(r)
     assert (v.reason, v.code) == ("ADS-B position too old", "stale_fix")
     assert v.target is not None  # the position is known: the card shows where it is
-    r.aircraft[ICAO] = record(ga(), T0, latency=2.9)
-    assert evaluate(r).reason is None  # inside the 3 s
+    r.aircraft[ICAO] = record(ga(), T0, latency=7.9)
+    assert evaluate(r).reason is None  # inside the 8 s
+    # the Kalman fallback keeps the old 3 s
+    r.aircraft[ICAO] = kalman_record(ga(), 3.5)
+    assert r.aircraft[ICAO].velocity_t is None
+    v = evaluate(r)
+    assert (v.reason, v.code) == ("ADS-B position too old", "stale_fix")
+    r.aircraft[ICAO] = kalman_record(ga(), 2.9)
+    assert evaluate(r).code != "stale_fix"
+
+
+def test_rule_3_a_7_s_old_fix_is_projected_to_the_rendezvous():
+    f = ga()
+    r = runner_with(f, latency=7.0)
+    v = evaluate(r)
+    assert v.reason is None and v.plan is not None, v
+    p = v.plan
+    # 130 m/s for 7 s = 910 m of flight: the rendezvous is where the aircraft will be, not the fix
+    assert sep((p.rendezvous.alt, p.rendezvous.az), f.altaz(p.t_r)) < 0.02
+    assert sep((p.rendezvous.alt, p.rendezvous.az), f.altaz(T0 - 7.0)) > 1.0
+    assert sep(v.target, f.altaz(T0)) < 0.05  # the target is its position NOW
 
 
 def test_rule_4_out_of_range():
@@ -263,21 +293,25 @@ def test_rule_6_sun():
     assert evaluate(runner_with(f), sun=(alt + 25.0, az)).reason is None
 
 
-def test_rule_7_zenith_rate_and_note():
-    # straight over the site at 10.7 km, 250 m/s: the azimuth flips at the zenith
+def test_rule_7_zenith_rate_is_a_note_not_a_refusal():
+    # T5.6e: straight over the site at 10.7 km, 250 m/s: the azimuth flips at the zenith. The pass
+    # is allowed; ONE note warns that the mount may not keep up.
     over = Flight(-250.0 * 30, 0.0, 10_700.0, 250.0, 90.0)
     v = evaluate(runner_with(over))
-    assert (v.reason, v.code) == ("Overflight too close to the zenith", "zenith")
-    # a slow aircraft 300 m aside at 6 km: peak > 87 deg, needs ~11 deg/s < 0.8 * 20: allowed + note
+    assert v.reason is None and v.code is None, v
+    assert v.notes == [at.R_ZENITH_NOTE]
+    assert at.R_ZENITH_NOTE == "Passes near the zenith: the mount may not keep up near the peak"
+    # a slow aircraft 300 m aside at 6 km: peak > 87 deg: allowed + the same single note
     slow = Flight(-60.0 * 30, 300.0, 6000.0, 60.0, 90.0)
     v = evaluate(runner_with(slow))
     assert v.reason is None, v
-    assert at.R_ZENITH_NOTE in v.notes
+    assert v.notes == [at.R_ZENITH_NOTE]
     assert v.aircraft["peak_el"] >= 87.0 and v.aircraft["t_peak"] == pytest.approx(T0 + 30, abs=2)
-    # the same pass, with a slower mount axis 0 (vmax 8 deg/s -> limit 6.4): refused
+    # a slower mount axis 0 (vmax 8 deg/s -> limit 6.4) and a pass needing ~11 deg/s: still allowed
     slow_mount = parse(status_text({"mount.axis0.max_velocity_degs_per_sec": 8}))
     v = evaluate(runner_with(slow), status=slow_mount)
-    assert v.code == "zenith"
+    assert v.reason is None and v.notes == [at.R_ZENITH_NOTE]
+    assert "zenith" not in at.CODE_BY_REASON.values()
     # a normal fly-by has no note and reports its peak
     v = evaluate(runner_with(ga()))
     assert v.reason is None and v.notes == []
@@ -357,7 +391,7 @@ def test_d2_refraction_is_applied(monkeypatch):
 def test_rule_order_first_failing_wins():
     f = ga(e0=150_000.0, n0=0.0, speed=100.0, heading=270.0)
     r = FakeRunner()
-    r.aircraft[ICAO] = record(f, T0, latency=4.0)  # stale AND out of range
+    r.aircraft[ICAO] = record(f, T0, latency=9.0)  # stale AND out of range
     assert evaluate(r).code == "stale_fix"
     r.aircraft[ICAO] = record(f, T0)  # out of range AND below Lim EL (it is at 150 km, 3 km up)
     assert evaluate(r).code == "out_of_range"
@@ -446,11 +480,30 @@ def test_cut_wrap_window_range_and_zenith():
     rng = GEO.look_angles(SITE_HAE, f.geodetic(T0 + 85.0)).range
     far = at.build_path(ctx_for(range_m=rng), late, T0 + 80.0, T0 + 90.0, -180.0)
     assert far.reason == at.R_END_RANGE and 0 < len(far.points) < 21
-    # zenith rate: a fly-by at 3.7 deg/s against a mount axis 0 of vmax 4 (limit 3.2)
+    # T5.6e: no cut on the axis-0 rate: a fly-by at 3.7 deg/s against a mount axis 0 of vmax 4
     slow = at.build_path(ctx_for(vmax0=4.0), record(f, T0 + 55.0), T0 + 54.5, T0 + 65.0, -180.0)
-    assert slow.reason == at.R_END_ZENITH
-    ok = at.build_path(ctx_for(vmax0=20.0), record(f, T0 + 55.0), T0 + 54.5, T0 + 65.0, -180.0)
-    assert ok.reason is None
+    assert slow.reason is None and len(slow.points) == 22
+    assert not hasattr(at, "R_END_ZENITH") and not hasattr(at, "R_ZENITH")
+
+
+def test_near_zenith_overflight_is_cut_only_by_lim_el_or_the_wrap_window():
+    # ~88.9 deg peak: 200 m north of the site at 10.7 km, eastbound at 250 m/s (az sweeps 270 -> 90)
+    f = Flight(-250.0 * 30, 200.0, 10_700.0, 250.0, 90.0)
+    assert f.altaz(T0 + 30.0)[0] > 88.5
+    ac = record(f, T0)
+    t_exit = f.exit_time(T0 + 30.0)
+    # the window holds the whole sweep (az 270 -> 450): cut only where the aircraft leaves Lim EL
+    fits = at.build_path(ctx_for(mech=(-400.0, 500.0)), ac, T0, T0 + 400.0, 265.0)
+    assert fits.reason == at.R_END_BELOW
+    assert fits.points[-1].t == pytest.approx(t_exit, abs=0.6) and max(
+        p.alt for p in fits.points
+    ) > 88.5
+    # axis 0 may be faster than any real mount: still no cut
+    slow = at.build_path(ctx_for(vmax0=4.0, mech=(-400.0, 500.0)), ac, T0, T0 + 400.0, 265.0)
+    assert slow.reason == fits.reason
+    # a window the sweep leaves: "Track left the wrap window"
+    out = at.build_path(ctx_for(), ac, T0, T0 + 400.0, -60.0)
+    assert out.reason == at.R_END_WRAP and out.points[-1].t < t_exit - 20.0
 
 
 def test_no_prediction_basis_gives_reason():
@@ -485,6 +538,7 @@ class Rig:
         self.follow = False  # move the fake mount along the uploaded path
         self.real_s = 0.01
         self.offset = (0.0, 0.0)  # the fake mount's deviation from the path (alt, axis0), deg
+        self.lag_s = 0.0  # the fake mount flies this many seconds behind the path (older uploads)
         self.upload_times: list[float] = []
         self.sleeps: list[float] = []
         self.seen: list[tuple[str | None, tuple | None]] = []  # (phase, state override) per wait
@@ -523,8 +577,13 @@ class Rig:
         ups = uploads(self.fake)
         if not self.follow or a is None or not ups or a.phase == "slewing":
             return
-        pts = [((jd - 2440587.5) * 86400.0, az, alt) for jd, az, alt in ups[-1]]
-        t = min(max(self.t, pts[0][0]), pts[-1][0])
+        want = self.t - self.lag_s
+        pts = []
+        for up in reversed(ups):  # the newest upload that covers the (lagging) time
+            pts = [((jd - 2440587.5) * 86400.0, az, alt) for jd, az, alt in up]
+            if pts[0][0] <= want:
+                break
+        t = min(max(want, pts[0][0]), pts[-1][0])
         for (t0, az0, al0), (t1, az1, al1) in zip(pts, pts[1:], strict=False):
             if t0 <= t <= t1:
                 u = (t - t0) / (t1 - t0)
@@ -858,22 +917,22 @@ def test_turning_flight_is_followed():
 # ------------------------------------------------------------------ feed gaps (Q60)
 
 
-def test_fix_9_s_old_continues_and_11_s_stops():
+def test_fix_14_s_old_continues_and_16_s_stops():
     with running() as (tc, fake, app):
         ctl = app.state.control
         rig, w, plan, ack = start_track(tc, app, fake=fake, pause_after_tr=None)
         assert ack["ok"], ack
         rig.feed_stop_at = T0 + 40.5  # the last fix arrives at T0 + 40 (taken at T0 + 39.7)
-        rig.pause_at = T0 + 39.7 + 9.2  # its age is 9.2 s
+        rig.pause_at = T0 + 39.7 + 14.2  # its age is 14.2 s
         assert rig.wait_paused()
         assert ctl.airx.active and ctl.airx.a.phase == "tracking"
         last = rig.last_fix_t
-        assert rig.t - last == pytest.approx(9.2, abs=0.05)
+        assert rig.t - last == pytest.approx(14.2, abs=0.05)
         rig.resume()
         run_to_end(app, rig)
         e = ended(tc)
         assert e["reason"] == "ADS-B data lost"
-        assert 10.0 < e["at"] - last <= 11.0 + 1e-6, e["at"] - last
+        assert 15.0 < e["at"] - last <= 16.0 + 1e-6, e["at"] - last
         names = paths(fake)
         assert "/mount/stop" in names[-6:] or "/mount/tracking_off" in names[-3:]
         wait_for(lambda: state_is_stopped("ADS-B data lost"), 5.0)
@@ -946,18 +1005,18 @@ def test_sun_approaching_cuts_the_path(tmp_path):
         w.close()
 
 
-def test_rate_cut_ends_with_zenith_reason():
+def test_slow_axis_0_does_not_cut_the_track():
     with running() as (tc, fake, app):
         rig, w, plan, ack = start_track(tc, app, fake=fake, pause_after_tr=30.0)
         assert ack["ok"] and rig.wait_paused()
-        # the closest approach (3.7 deg/s) is ~10 s ahead; the mount's axis 0 is "slowed" to 4 deg/s
+        # T5.6e: the closest approach (3.7 deg/s) is ~10 s ahead; the mount's axis 0 is "slowed"
+        # to 4 deg/s: the track goes on (PWI4 follows as fast as it can) and ends at Lim EL
         fake.set(mount__axis0__max_velocity_degs_per_sec=4)
         rig.resume()
         run_to_end(app, rig)
         e = ended(tc)
-        assert e["reason"] == "Overflight too close to the zenith"
-        t_peak = T0 + 60.0
-        assert rig.t < t_peak + 5.0  # ended around the closest approach, not after the exit
+        assert e["reason"] == "Aircraft below Lim EL"
+        assert rig.t > T0 + 60.0 + 5.0  # past the closest approach
         w.close()
 
 
@@ -1137,6 +1196,53 @@ def test_replacements_do_not_trip_the_corridor_monitor(tmp_path):
         stopped = events(tmp_path, "airtrack_stopped")
         assert stopped and stopped[-1]["reason"] == "Mount left the validated slew path"
         w.close()
+
+
+def _zenith_monitor_run(tmp_path, *, lag_s=0.0, offset=(0.0, 0.0)):
+    """A near-zenith overflight (peak ~88.9 deg at T0 + 30 s) with the 10 Hz monitor; the fake
+    mount follows the path `lag_s` behind / `offset` off it from T0 + 27 s."""
+    with running() as (tc, fake, app):
+        ctl = app.state.control
+        f = Flight(-250.0 * 30, 200.0, 10_700.0, 250.0, 90.0)
+        rig = Rig(app, fake, f, FakeRunner(), monitor=True)
+        rig.follow = True
+        rig.real_s = 0.12
+        plan = plan_now(app)
+        rig.pause_at = T0 + 27.0
+        w = Win(tc)
+        assert w.send("track_aircraft", {"icao": ICAO}, "k1")["ok"]
+        assert rig.wait_paused(60.0)
+        assert ctl.airx.active and ctl.airx.a.phase == "tracking"
+        mon = app.state.monitor
+        assert mon.stops == 0
+        rig.lag_s, rig.offset = lag_s, offset
+        rig.pause_at = T0 + 34.0
+        rig.resume()
+        wait_for(lambda: rig.paused.is_set() or not ctl.airx.active, 40)
+        stops = mon.stops
+        alt_t, az_t = f.altaz(T0 + 30.0 - lag_s)
+        az_now = f.altaz(T0 + 30.0)[1]
+        lag_az = abs((az_t - az_now + 180.0) % 360.0 - 180.0)
+        rig.resume()
+        wait_for(lambda: not ctl.airx.active, 40)
+        w.close()
+        return stops, alt_t, lag_az, plan
+
+
+def test_zenith_lag_along_the_path_does_not_trip_the_corridor(tmp_path):
+    # a mount 5 s behind on the path near the peak: its az lags by tens of degrees at el ~86, which
+    # is far more than 2 deg on the sky from the NEW path alone; the history keeps it inside
+    stops, el, lag_az, _ = _zenith_monitor_run(tmp_path, lag_s=5.0)
+    assert el > 80.0 and lag_az > 30.0, (el, lag_az)
+    assert stops == 0
+    assert not events(tmp_path, "limit_stop")
+
+
+def test_zenith_mount_off_the_path_still_trips_the_corridor(tmp_path):
+    stops, *_ = _zenith_monitor_run(tmp_path, offset=(6.0, 0.0))
+    assert stops >= 1
+    stopped = events(tmp_path, "airtrack_stopped")
+    assert stopped and stopped[-1]["reason"] == "Mount left the validated slew path"
 
 
 def test_monitor_replace_route_keeps_its_clock_and_plan():

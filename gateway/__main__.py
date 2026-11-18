@@ -18,7 +18,8 @@ def main() -> None:
     parser.add_argument(
         "--simulated-adsb",
         action="store_true",
-        help="read aircraft from adsb_interpreter's simulated feed (PW_ADSB_FEED_URL, default "
+        help="DEV OVERRIDE: force ADS-B mode SIM regardless of Settings (OFF | LIVE | SIM): read "
+        "aircraft from adsb_interpreter's simulated feed (PW_ADSB_FEED_URL, default "
         "http://127.0.0.1:8500) instead of the SIP AERO platform (validation only)",
     )
     args = parser.parse_args()

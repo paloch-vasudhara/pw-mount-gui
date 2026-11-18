@@ -280,6 +280,32 @@ def test_status_of_a_fresh_camera_probes_it(tmp_path, kind):
     assert c.get("/api/mount/settings", headers=AUTH).json()["cctv"]["status"] == "Live"
 
 
+def test_an_unrelated_save_keeps_the_camera(tmp_path):
+    """User 11-18: a location / mount save keeps the camera client and streams; a camera setting
+    or password change resets them."""
+    cam = FakeCamera()
+    cam.default = mjpeg_response([unit(1)])
+    c, app, _ = make(tmp_path, cam)
+    calls = []
+    orig = app.state.cctv.config_changed
+
+    async def spy():
+        calls.append(1)
+        await orig()
+
+    app.state.cctv.config_changed = spy
+    moved = body(location={"lat_deg": 14.25, "lon_deg": 100.75})
+    moved["cctv"] = {"enabled": True, "type": "mjpeg"}  # what the web sends (no url / user)
+    assert c.put("/api/mount/settings", headers=AUTH, json=moved).status_code == 200
+    assert calls == []
+    assert c.put("/api/mount/settings", headers=AUTH,
+                 json={**moved, "cctv_password": "NEW-PASS-9"}).status_code == 200
+    assert calls == [1]
+    off = {**moved, "cctv": {"enabled": False, "type": "mjpeg"}}
+    assert c.put("/api/mount/settings", headers=AUTH, json=off).status_code == 200
+    assert calls == [1, 1]
+
+
 def test_ticket_requires_auth_and_config(tmp_path):
     c, _, _ = make(tmp_path, FakeCamera(), configure=False)
     assert c.post("/api/mount/cctv/ticket", headers=AUTH).status_code == 409

@@ -73,7 +73,7 @@ describe('station-settings utils', () => {
     expect(p).toEqual({
       ...rest,
       cctv: { enabled: false, type: 'mjpeg' },
-      adsb: { enabled: false, url: 'wss://10.22.123.68/api/v1/ws', range_limit_km: 100 },
+      adsb: { mode: 'live', url: 'wss://10.22.123.68/api/v1/ws', range_limit_km: 100 },
     })
   })
 
@@ -151,10 +151,10 @@ describe('ADS-B settings (T5.4b)', () => {
 
   it('form defaults, from the DTO and from an old gateway without the block', () => {
     const f = formFromDto(DTO)
-    expect(f).toMatchObject({ adsbEnabled: false, adsbUrl: 'wss://10.22.123.68/api/v1/ws', adsbRangeKm: 100, adsbToken: '', adsbTokenSet: false })
+    expect(f).toMatchObject({ adsbMode: 'live', adsbUrl: 'wss://10.22.123.68/api/v1/ws', adsbRangeKm: 100, adsbToken: '', adsbTokenSet: false })
     const { adsb: _a, ...old } = DTO
-    expect(formFromDto(old)).toMatchObject({ adsbEnabled: false, adsbRangeKm: 100, adsbUrl: 'wss://10.22.123.68/api/v1/ws' })
-    expect(formFromDto(adsbDto({ enabled: true, range_limit_km: 50, token_set: true }))).toMatchObject({ adsbEnabled: true, adsbRangeKm: 50, adsbTokenSet: true })
+    expect(formFromDto(old)).toMatchObject({ adsbMode: 'live', adsbRangeKm: 100, adsbUrl: 'wss://10.22.123.68/api/v1/ws' })
+    expect(formFromDto(adsbDto({ mode: 'sim', range_limit_km: 50, token_set: true }))).toMatchObject({ adsbMode: 'sim', adsbRangeKm: 50, adsbTokenSet: true })
   })
 
   it('the URL must be wss://, without a login, query or fragment; enabled needs one', () => {
@@ -166,8 +166,9 @@ describe('ADS-B settings (T5.4b)', () => {
     f.adsbUrl = 'wss://10.22.123.99/api/v1/ws'
     expect(validateForm(f, ZONES)).toEqual({})
     f.adsbUrl = ''
-    expect(validateForm(f, ZONES).adsbUrl).toBeUndefined() // disabled + empty is allowed
-    f.adsbEnabled = true
+    f.adsbMode = 'sim'
+    expect(validateForm(f, ZONES).adsbUrl).toBeUndefined() // not LIVE + empty is allowed
+    f.adsbMode = 'live'
     expect(validateForm(f, ZONES).adsbUrl).toBeTruthy()
   })
 
@@ -180,9 +181,9 @@ describe('ADS-B settings (T5.4b)', () => {
   })
 
   it('the token is on the wire only when typed or cleared; the block never carries it', () => {
-    const f = formFromDto(adsbDto({ enabled: true, token_set: true }))
+    const f = formFromDto(adsbDto({ mode: 'live', token_set: true }))
     expect('adsb_token' in buildPayload(f)).toBe(false)
-    expect(buildPayload(f).adsb).toEqual({ enabled: true, url: 'wss://10.22.123.68/api/v1/ws', range_limit_km: 100 })
+    expect(buildPayload(f).adsb).toEqual({ mode: 'live', url: 'wss://10.22.123.68/api/v1/ws', range_limit_km: 100 })
     f.adsbToken = 'TOK-1'
     expect(buildPayload(f).adsb_token).toBe('TOK-1')
     expect(JSON.stringify(buildPayload(f).adsb)).not.toContain('TOK-1')
@@ -191,14 +192,14 @@ describe('ADS-B settings (T5.4b)', () => {
     expect(buildPayload(f).adsb_token).toBe('')
   })
 
-  it('enable, URL, range, a typed token and a cleared token each make the form dirty', () => {
+  it('mode, URL, range, a typed token and a cleared token each make the form dirty', () => {
     const base = formFromDto(DTO)
     const edit = (fn: (f: ReturnType<typeof formFromDto>) => void) => {
       const f = formFromDto(DTO)
       fn(f)
       return isDirty(f, base)
     }
-    expect(edit((f) => { f.adsbEnabled = true })).toBe(true)
+    expect(edit((f) => { f.adsbMode = 'sim' })).toBe(true)
     expect(edit((f) => { f.adsbUrl = 'wss://other/ws' })).toBe(true)
     expect(edit((f) => { f.adsbRangeKm = 200 })).toBe(true)
     expect(edit((f) => { f.adsbToken = 'x' })).toBe(true)
@@ -510,8 +511,32 @@ describe('StationSettingsDialog', () => {
     await flushPromises()
     const body = JSON.parse(calls.find(c => c.method === 'PUT')!.body!)
     expect(body.adsb_token).toBe('PLATFORM-TOK')
-    expect(body.adsb).toEqual({ enabled: false, url: 'wss://10.22.123.68/api/v1/ws', range_limit_km: 100 })
+    expect(body.adsb).toEqual({ mode: 'live', url: 'wss://10.22.123.68/api/v1/ws', range_limit_km: 100 })
     expect(document.body.innerHTML).not.toContain('PLATFORM-TOK')
+    w.unmount()
+  })
+
+  it('ADS-B: the OFF | LIVE | SIM control; live fields only in LIVE, range active unless OFF; the mode is saved', async () => {
+    const w = await openDialog()
+    const seg = q('ss-adsb-mode') as HTMLElement
+    expect([...seg.querySelectorAll('button')].map(b => b.textContent?.trim())).toEqual(['OFF', 'LIVE', 'SIM'])
+    expect(seg.querySelector('button.active')?.textContent?.trim()).toBe('LIVE')
+    const dis = (id: string) => (q(id) as HTMLInputElement).disabled
+    const pick = async (label: string) => {
+      ;[...seg.querySelectorAll('button')].find(b => b.textContent?.trim() === label)!.click()
+      await flushPromises()
+    }
+    expect([dis('ss-adsb-url'), dis('ss-adsb-token')]).toEqual([false, false])
+    await pick('SIM')
+    expect([dis('ss-adsb-url'), dis('ss-adsb-token')]).toEqual([true, true])
+    expect((q('ss-adsb-sim-note') as HTMLElement).textContent).toContain('127.0.0.1:8500')
+    await pick('OFF')
+    expect([dis('ss-adsb-url'), dis('ss-adsb-token')]).toEqual([true, true])
+    expect(q('ss-adsb-sim-note')).toBeNull()
+    await pick('SIM')
+    ;(q('ss-save') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(JSON.parse(calls.find(c => c.method === 'PUT')!.body!).adsb.mode).toBe('sim')
     w.unmount()
   })
 
@@ -526,10 +551,10 @@ describe('StationSettingsDialog', () => {
     w.unmount()
   })
 
-  it('ADS-B: simulated mode shows SIMULATED with the source and makes the live fields inactive', async () => {
+  it('ADS-B: the dev override (forced) shows SIMULATED with the source and makes the live fields inactive', async () => {
     const orig = DTO.adsb
     DTO.adsb = {
-      ...DTO.adsb!, simulated: true, token_set: true,
+      ...DTO.adsb!, simulated: true, forced: true, token_set: true,
       status: { state: 'simulated', green: true, simulated: true, detail: 'Simulated aircraft (adsb_interpreter feed 8500)', last_event_age_s: 0.4 },
     }
     const w = await openDialog()

@@ -7,8 +7,8 @@ import { effectiveVisibility, DEFAULT_FILTERS, parseFilters } from '../../app/ut
 import type { AdsbInfo, AircraftRow } from '../../app/utils/adsb'
 import {
   aircraftCardValues, aircraftFilterState, aircraftLabel, aircraftTitle, aircraftTrackVerdict, AIRCRAFT_NOT_IN_VIEW,
-  azDiff, feedDownChip, formatAgeS, formatAltFt, formatKt, formatLat, formatLon, formatRangeKm,
-  formatTrack, formatVRate, heightSourceFlag, iconRotationRad, ingestFrame, MAX_AHEAD_S, normAz, predictAzEl,
+  azDiff, connectingChip, feedDownChip, formatAgeS, formatAltFt, formatKt, formatLat, formatLon, formatRangeKm,
+  formatTrack, formatVRate, heightSourceFlag, iconRotationRad, ingestFrame, BLEND_S, MAX_AHEAD_S, normAz, predictAzEl, SNAP_DEG,
   showSimulatedBadge,
 } from '../../app/utils/aircraft'
 import {
@@ -206,9 +206,80 @@ describe('TRACK AIRCRAFT verdict, filter enable rule, chips', () => {
     expect(feedDownChip({ ...DOWN, state: 'module_missing' }).show).toBe(false)
     expect(feedDownChip({ ...DOWN, state: 'connecting', simulated: true }).show).toBe(true)
     expect(feedDownChip(null).show).toBe(false)
+    // T5.4c: hidden during the connecting grace; the neutral connecting chip shows instead
+    const CONN: AdsbInfo = { ...DOWN, connecting: true, detail: 'Connecting to the ADS-B platform' }
+    expect(feedDownChip(CONN).show).toBe(false)
+    expect(connectingChip(CONN)).toEqual({ show: true, title: 'Connecting to the ADS-B platform' })
+    expect(connectingChip(DOWN).show).toBe(false)
+    expect(connectingChip(GREEN).show).toBe(false)
+    expect(connectingChip(null).show).toBe(false)
+    expect(aircraftFilterState(CONN)).toEqual({ enabled: false, reason: 'Connecting to the ADS-B platform' })
     expect(showSimulatedBadge(SIM)).toBe(true)
     expect(showSimulatedBadge(GREEN)).toBe(false)
     expect(showSimulatedBadge({ ...SIM, green: false })).toBe(false)
+  })
+})
+
+describe('server rates (T5.6d): "now" positions, no rate from arrival times', () => {
+  const srv = (o: Partial<AircraftRow> = {}) => row({ predicted: true, daz_dps: 1, del_dps: -0.5, ...o })
+
+  it('the rate IS the server rate and every frame re-anchors, even at an equal position', () => {
+    const a = ingestFrame(new Map(), [srv({ az: 90, el: 30 })], 0)
+    const t0 = a.get('ABC123')!
+    expect(t0.rate).toEqual({ daz: 1, del: -0.5 })
+    expect(t0.corr).toBeNull() // a first sighting
+    const b = ingestFrame(a, [srv({ az: 90, el: 30 })], 1000).get('ABC123')!
+    expect(b.t).toBe(1000) // re-anchored although az / el are unchanged
+    expect(b.rate).toEqual({ daz: 1, del: -0.5 })
+  })
+
+  it('a burst frame with a big jump moves at the server rate (no 5x overshoot)', () => {
+    const a = ingestFrame(new Map(), [srv({ az: 90, el: 30 })], 0)
+    const b = ingestFrame(a, [srv({ az: 93, el: 30 })], 1000).get('ABC123')! // 3 deg in 1 s of arrival
+    expect(b.rate).toEqual({ daz: 1, del: -0.5 }) // the arrival-time derivation would say 3 deg/s
+    expect(predictAzEl(b, 1000).az).toBeCloseTo(91, 6) // still where the old anchor had put it
+    expect(predictAzEl(b, 2000).az).toBeCloseTo(94, 6) // anchor + 1 deg/s x 1 s, blend gone
+  })
+
+  it('the correction fades to zero over BLEND_S', () => {
+    expect(BLEND_S).toBe(0.5)
+    const a = ingestFrame(new Map(), [srv({ az: 90, el: 30 })], 0)
+    // displayed at t = 1 s: 91, 29.5; the new anchor is 91.4, 29.4: correction (-0.4, +0.1)
+    const b = ingestFrame(a, [srv({ az: 91.4, el: 29.4 })], 1000).get('ABC123')!
+    expect(b.corr!.daz).toBeCloseTo(-0.4, 9)
+    expect(b.corr!.del).toBeCloseTo(0.1, 9)
+    expect(predictAzEl(b, 1000)).toEqual({ az: expect.closeTo(91, 9), el: expect.closeTo(29.5, 9) })
+    const mid = predictAzEl(b, 1250) // half the blend left: new(now) + corr / 2
+    expect(mid.az).toBeCloseTo(91.4 + 0.25 - 0.2, 9)
+    expect(mid.el).toBeCloseTo(29.4 - 0.125 + 0.05, 9)
+    const end = predictAzEl(b, 1500)
+    expect(end.az).toBeCloseTo(91.4 + 0.5, 9)
+    expect(end.el).toBeCloseTo(29.4 - 0.25, 9)
+    expect(predictAzEl(b, 1800).az).toBeCloseTo(91.4 + 0.8, 9)
+  })
+
+  it('a correction above SNAP_DEG snaps; the blend takes the shortest azimuth difference', () => {
+    expect(SNAP_DEG).toBe(5)
+    const a = ingestFrame(new Map(), [srv({ az: 90, el: 30 })], 0)
+    const snap = ingestFrame(a, [srv({ az: 97, el: 30 })], 1000).get('ABC123')! // shown 91 vs 97
+    expect(snap.corr).toBeNull()
+    expect(predictAzEl(snap, 1000).az).toBeCloseTo(97, 9)
+    const w = ingestFrame(ingestFrame(new Map(), [srv({ az: 359.5 })], 0), [srv({ az: 0.8 })], 1000).get('ABC123')!
+    expect(w.corr!.daz).toBeCloseTo(-0.3, 9) // shown 0.5 (359.5 + 1) vs anchor 0.8, not +359.7
+    expect(predictAzEl(w, 1000).az).toBeCloseTo(0.5, 9)
+  })
+
+  it('MAX_AHEAD_S still caps the extrapolation', () => {
+    const b = ingestFrame(new Map(), [srv({ az: 90 })], 0).get('ABC123')!
+    expect(predictAzEl(b, 10_000).az).toBeCloseTo(92, 9)
+  })
+
+  it('a row with null or missing rates falls back to the arrival-time derivation', () => {
+    const a = ingestFrame(new Map(), [row({ az: 90, predicted: false, daz_dps: null, del_dps: null })], 0)
+    const b = ingestFrame(a, [row({ az: 91, predicted: false, daz_dps: null, del_dps: null })], 1000).get('ABC123')!
+    expect(b.rate).toEqual({ daz: 1, del: 0 })
+    expect(b.corr).toBeNull()
+    expect(predictAzEl(b, 1000).az).toBeCloseTo(91, 9)
   })
 })
 

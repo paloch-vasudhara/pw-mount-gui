@@ -17,7 +17,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 from gateway import adsb as adsb_mod
-from gateway.adsb import AdsbRunner, LiveSource, adapt_feed_aircraft, is_green, load_core
+from gateway.adsb import (
+    CONNECT_GRACE_S,
+    AdsbRunner,
+    LiveSource,
+    adapt_feed_aircraft,
+    is_green,
+    load_core,
+)
 from gateway.app import create_app
 from gateway.config import Settings
 from gateway.hub import Hub
@@ -45,11 +52,13 @@ READ_TOKEN = "PLATFORM-READ-TOKEN-ABC123XYZ"
 URL = "wss://10.22.123.68/api/v1/ws"
 
 
-def make_store(tmp_path, *, enabled=True, token=READ_TOKEN, range_km=100) -> SettingsStore:
+def make_store(
+    tmp_path, *, enabled=True, token=READ_TOKEN, range_km=100, mode=None
+) -> SettingsStore:
     store = SettingsStore(tmp_path / "s.json", MemorySecretStore(), MemorySecretStore(),
                           MemorySecretStore(token))
     cur = store.current.model_copy(deep=True)
-    cur.adsb.enabled = enabled
+    cur.adsb.mode = mode or ("live" if enabled else "off")
     cur.adsb.range_limit_km = range_km
     cur.location.timezone = "UTC"
     store.save(cur)
@@ -131,7 +140,7 @@ def test_gateway_starts_and_works_without_the_module(tmp_path):
         # saving settings with the module missing is fine too
         put = StationSettings().model_dump()
         put["location"]["timezone"] = "UTC"
-        put["adsb"]["enabled"] = True
+        put["adsb"]["mode"] = "live"
         assert c.put("/api/mount/settings", headers=AUTH, json=put).status_code == 200
         assert c.get("/api/mount/status").json()["adsb"]["state"] == "module_missing"
 
@@ -241,6 +250,112 @@ def test_adapter_without_position_has_no_path():
     assert adapt_feed_aircraft(core, {"icao": ""}, 0.0) is None
 
 
+# ---------------------------------------------------------------- rows: "now" positions (T5.6d)
+
+ROW_T = 1_800_000_000.0
+
+
+def rows_for(ac, now=ROW_T, range_m=100_000.0):
+    core, _ = load_core()
+    site = core.geometry.Geodetic(fake_adsb.SITE_LAT, fake_adsb.SITE_LON, 0.0)
+    return core, site, adsb_mod.aircraft_rows(core, [ac], site, range_m, now)
+
+
+def east_flyer(age, north_km=10.0, east_km=0.0, **kw):
+    core, _ = load_core()
+    kw = {"gs": 450.0, "track": 90.0, "callsign": "TST1", **kw}
+    row = fake_adsb.offset_row("AAA111", east_km, north_km, 10000.0, pos_age=age, **kw)
+    return adapt_feed_aircraft(core, row, ROW_T)
+
+
+def test_rows_with_velocity_show_the_predicted_now_position():
+    ac = east_flyer(6.0)
+    core, site, rows = rows_for(ac)
+    r = rows[0]
+    assert r["predicted"] is True and r["predictor"] == "velocity"
+    assert r["pos_age_s"] == 6.0 and r["stale"] is False  # the card keeps the FIX age
+    fix = core.geometry.look_angles(site, core.geometry.Geodetic(ac.lat, ac.lon, ac.height_m))
+    assert (r["az"] - fix.az + 180.0) % 360.0 - 180.0 > 5.0  # 6 s due east: ~8 deg of azimuth
+    assert r["lon"] > round(ac.lon, 5) and r["lat"] == pytest.approx(ac.lat, abs=1e-4)
+    want = core.predict.position_at(ac, ROW_T)
+    assert r["lon"] == round(want.lon, 5) and r["lat"] == round(want.lat, 5)
+    # the rates: the azimuth grows clockwise for a flyer east of the meridian, heading east
+    p1 = core.predict.position_at(ac, ROW_T + 1.0)
+    l1 = core.geometry.look_angles(site, core.geometry.Geodetic(p1.lat, p1.lon, p1.height_m))
+    assert r["daz_dps"] == pytest.approx(l1.az - r["az"], abs=2e-3)
+    assert r["del_dps"] == pytest.approx(l1.el - r["el"], abs=2e-3)
+    assert r["daz_dps"] > 0 and round(r["daz_dps"], 3) == r["daz_dps"]
+    assert r["del_dps"] < 0  # moving away from the site: the elevation falls
+
+
+def test_rows_rates_wrap_through_north():
+    # 10 km north, flying east, now 100 m west of the meridian: the azimuth crosses 360 -> 0
+    age = 0.5
+    ac = east_flyer(age, east_km=(-100.0 - 231.5 * age) / 1000.0, gs=450.0)
+    _, _, rows = rows_for(ac)
+    r = rows[0]
+    assert r["az"] > 359.0
+    assert r["daz_dps"] == pytest.approx(1.33, abs=0.08)  # not -358.7
+
+
+def test_rows_without_prediction_or_with_an_old_fix_keep_the_fix_position():
+    core, _ = load_core()
+    # no velocity and no Kalman yet: the fix position, no rates
+    ac = east_flyer(6.0, gs=None, track=None)
+    _, site, rows = rows_for(ac)
+    r = rows[0]
+    assert (r["predicted"], r["predictor"], r["daz_dps"], r["del_dps"]) == (False, None, None, None)
+    fix = core.geometry.look_angles(site, core.geometry.Geodetic(ac.lat, ac.lon, ac.height_m))
+    assert r["az"] == round(fix.az, 3) and r["lon"] == round(ac.lon, 5)
+    # a velocity fix older than 15 s: the fix position, the predictor still reported
+    old = east_flyer(16.0)
+    _, _, rows = rows_for(old)
+    r = rows[0]
+    assert r["predicted"] is False and r["predictor"] == "velocity"
+    assert r["daz_dps"] is None and r["del_dps"] is None
+    assert r["lon"] == round(old.lon, 5) and r["pos_age_s"] == 16.0 and r["stale"] is True
+    assert rows_for(east_flyer(14.9))[2][0]["predicted"] is True
+    # a fix older than 60 s is hidden as before
+    assert rows_for(east_flyer(61.0))[2] == []
+
+
+def test_rows_with_a_ready_kalman_are_predicted():
+    core, _ = load_core()
+    prev = None
+    for k in range(4):
+        row = fake_adsb.offset_row("BBB222", 0.2 * k, 12.0, 8000.0, gs=None, track=None,
+                                   pos_age=0.5)
+        prev = adapt_feed_aircraft(core, row, ROW_T + k, prev)
+    _, _, rows = rows_for(prev, now=ROW_T + 5.0)
+    r = rows[0]
+    assert r["predicted"] is True and r["predictor"] == "kalman"
+    assert r["daz_dps"] is not None and r["del_dps"] is not None
+
+
+def test_rows_filters_use_the_predicted_position():
+    # 99 km out (inside 100 km), flying away at 231 m/s: 6 s later it is beyond the limit
+    far = east_flyer(6.0, north_km=99.0, track=0.0, gs=450.0)
+    far.height_m = 12000.0
+    _, _, rows = rows_for(far)
+    assert rows == []
+    assert [x["predicted"] for x in rows_for(far, now=ROW_T - 5.5)[2]] == [True]  # 0.5 s old
+    # an old fix is not predicted: it shows at its (in-range) fix position
+    old = east_flyer(16.0, north_km=99.0, track=0.0, gs=450.0)
+    old.height_m = 12000.0
+    assert len(rows_for(old)[2]) == 1
+    # just above the horizon and descending: the predicted position is below 0 deg
+    core, _ = load_core()
+    row = fake_adsb.offset_row("CCC333", 0.0, 10.0, 60.0, gs=100.0, track=90.0, vrate=-3000.0,
+                               pos_age=6.0)
+    low = adapt_feed_aircraft(core, row, ROW_T)
+    fix = core.geometry.look_angles(
+        core.geometry.Geodetic(fake_adsb.SITE_LAT, fake_adsb.SITE_LON, 0.0),
+        core.geometry.Geodetic(low.lat, low.lon, low.height_m),
+    )
+    assert fix.el > 0.0
+    assert rows_for(low)[2] == []
+
+
 # ---------------------------------------------------------------- live source (fake client)
 
 
@@ -277,6 +392,7 @@ def test_live_source_end_to_end(tmp_path):
     assert set(row) == {
         "icao", "callsign", "lat", "lon", "az", "el", "range_m", "track_deg", "alt_ft",
         "gs_kt", "vrate_fpm", "pos_age_s", "stale", "height_source", "predictor",
+        "predicted", "daz_dps", "del_dps",
     }
     assert row["icao"] == "ABC123" and row["callsign"] == "TST100"
     assert 0 < row["el"] < 90 and 8_000 < row["range_m"] < 40_000
@@ -325,7 +441,9 @@ def test_live_states_map_and_never_leak_the_token(tmp_path, caplog):
         assert b["state"] == state
         assert b["green"] is (state in ("stale", "connected"))
         assert READ_TOKEN not in json.dumps(m) and READ_TOKEN not in b["detail"]
-    assert "unreachable" in seen["unreachable"][0]["detail"].lower()
+    # first seconds after the start: the retrying state is the connecting grace (T5.4c)
+    assert seen["unreachable"][0]["connecting"] is True
+    assert "connecting" in seen["unreachable"][0]["detail"].lower()
     assert "token" in seen["auth_failed"][0]["detail"]
     assert "TLS" in seen["tls_error"][0]["detail"]
     assert READ_TOKEN not in caplog.text
@@ -534,10 +652,10 @@ def test_token_is_write_only_everywhere(tmp_path, caplog):
     c, secrets, s = make_app(tmp_path, adsb_client_factory=fake_adsb.factory())
     with c:
         r = c.put("/api/mount/settings", headers=AUTH,
-                  json={**body(enabled=True), "adsb_token": READ_TOKEN})
+                  json={**body(mode="live"), "adsb_token": READ_TOKEN})
         assert r.status_code == 200
         a = r.json()["adsb"]
-        assert a["token_set"] is True and a["enabled"] is True and a["url"] == URL
+        assert a["token_set"] is True and a["mode"] == "live" and a["url"] == URL
         assert a["range_limit_km"] == 100 and a["simulated"] is False
         assert READ_TOKEN not in r.text
         g = c.get("/api/mount/settings", headers=AUTH)
@@ -546,14 +664,14 @@ def test_token_is_write_only_everywhere(tmp_path, caplog):
         for path in ("/api/mount/status", "/api/mount/site-check"):
             assert READ_TOKEN not in c.get(path, headers=AUTH).text
         # absent / null keep, "" clears
-        c.put("/api/mount/settings", headers=AUTH, json=body(enabled=True))
+        c.put("/api/mount/settings", headers=AUTH, json=body(mode="live"))
         assert secrets.get() == READ_TOKEN
         c.put("/api/mount/settings", headers=AUTH, json={**body(), "adsb_token": None})
         assert secrets.get() == READ_TOKEN
         r = c.put("/api/mount/settings", headers=AUTH, json={**body(), "adsb_token": ""})
         assert secrets.get() is None and r.json()["adsb"]["token_set"] is False
         c.put("/api/mount/settings", headers=AUTH,
-              json={**body(enabled=True), "adsb_token": READ_TOKEN})
+              json={**body(mode="live"), "adsb_token": READ_TOKEN})
         # the aircraft message and the 10 Hz status never carry it either
         with c.websocket_connect("/api/mount/ws", headers=WS_GOOD) as ws:
             ws.send_text(json.dumps({"type": "auth", "token": TOKEN}))
@@ -605,14 +723,48 @@ def test_defaults_and_old_files_and_location_block(tmp_path):
         "lat_deg": 14.0, "lon_deg": 100.0, "alt_m": 5.0, "timezone": "UTC"}}))
     st = SettingsStore(p, MemorySecretStore(), MemorySecretStore(), MemorySecretStore())
     a = st.current.adsb
-    assert (a.enabled, a.url, a.range_limit_km) == (False, URL, 100)
-    assert st.public()["adsb"] == {"enabled": False, "url": URL, "range_limit_km": 100,
+    assert (a.mode, a.url, a.range_limit_km) == ("live", URL, 100)
+    assert st.public()["adsb"] == {"mode": "live", "url": URL, "range_limit_km": 100,
                                    "token_set": False}
     st.save(st.current, adsb_token=READ_TOKEN)
     saved = json.loads(p.read_text())
     assert saved["location"] == {"lat_deg": 14.0, "lon_deg": 100.0, "alt_m": 5.0,
                                  "timezone": "UTC"}
-    assert saved["adsb"] == {"enabled": False, "url": URL, "range_limit_km": 100}
+    assert saved["adsb"] == {"mode": "live", "url": URL, "range_limit_km": 100}
+
+
+def test_an_unrelated_save_keeps_the_connection_and_moves_the_site(tmp_path):
+    """User 11-18: a mount / location / range save keeps the running ADS-B connection (no new
+    client); the new site and range limit are applied in place. Mode / URL / token reconnect."""
+    f = fake_adsb.factory()
+    c, _, _ = make_app(tmp_path, adsb_client_factory=f)
+    with c:
+        c.put("/api/mount/settings", headers=AUTH,
+              json={**body(mode="live"), "adsb_token": READ_TOKEN})
+        for _ in range(100):
+            if fake_adsb.FakeClient.instances:
+                break
+            time.sleep(0.05)
+        n = len(fake_adsb.FakeClient.instances)
+        runner = c.app.state.adsb
+        src = runner._source
+        moved = body(mode="live", range_limit_km=50)
+        moved["location"].update({"lat_deg": 14.25, "lon_deg": 100.75, "alt_m": 40.0})
+        moved["hardware"]["lim_el_deg"] = 25.0
+        assert c.put("/api/mount/settings", headers=AUTH, json=moved).status_code == 200
+        time.sleep(0.3)
+        assert len(fake_adsb.FakeClient.instances) == n  # no reconnect
+        assert runner._source is src
+        assert src.table.site.lat == 14.25 and src.table.site.lon == 100.75
+        assert src.table.range_limit_m == 50_000.0 and runner.range_limit_m == 50_000.0
+        # an explicit token save reconnects
+        c.put("/api/mount/settings", headers=AUTH,
+              json={**moved, "adsb_token": "OTHER-TOKEN-1234567"})
+        for _ in range(100):
+            if len(fake_adsb.FakeClient.instances) > n:
+                break
+            time.sleep(0.05)
+        assert len(fake_adsb.FakeClient.instances) > n
 
 
 def test_a_settings_save_restarts_the_runner_with_the_new_values(tmp_path):
@@ -620,7 +772,7 @@ def test_a_settings_save_restarts_the_runner_with_the_new_values(tmp_path):
     c, secrets, _ = make_app(tmp_path, adsb_client_factory=f)
     with c:
         c.put("/api/mount/settings", headers=AUTH,
-              json={**body(enabled=True, range_limit_km=50), "adsb_token": READ_TOKEN})
+              json={**body(mode="live", range_limit_km=50), "adsb_token": READ_TOKEN})
         for _ in range(100):
             if fake_adsb.FakeClient.instances:
                 break
@@ -630,7 +782,7 @@ def test_a_settings_save_restarts_the_runner_with_the_new_values(tmp_path):
         n = len(fake_adsb.FakeClient.instances)
         newurl = "wss://10.22.123.99/api/v1/ws"
         c.put("/api/mount/settings", headers=AUTH,
-              json={**body(enabled=True, url=newurl), "adsb_token": "OTHER-TOKEN-1234567"})
+              json={**body(mode="live", url=newurl), "adsb_token": "OTHER-TOKEN-1234567"})
         for _ in range(100):
             if len(fake_adsb.FakeClient.instances) > n:
                 break
@@ -639,7 +791,7 @@ def test_a_settings_save_restarts_the_runner_with_the_new_values(tmp_path):
         assert second is not first and second.url == newurl
         assert second.token == "OTHER-TOKEN-1234567"
         # switching it off stops the source
-        c.put("/api/mount/settings", headers=AUTH, json=body(enabled=False))
+        c.put("/api/mount/settings", headers=AUTH, json=body(mode="off"))
         for _ in range(100):
             if c.get("/api/mount/status").json()["adsb"]["state"] == "disabled":
                 break
@@ -676,7 +828,7 @@ def rate_under(tmp_path, adsb_kw, seconds=2.0):
                          adsb_secrets=MemorySecretStore(READ_TOKEN), **adsb_kw["app"])
         store = app.state.store
         cur = store.current.model_copy(deep=True)
-        cur.adsb.enabled = adsb_kw.get("enabled", True)
+        cur.adsb.mode = "live" if adsb_kw.get("enabled", True) else "off"
         cur.location.timezone = "UTC"
         store.save(cur)
         poller = app.state.poller
@@ -798,3 +950,160 @@ def test_aircraft_frames_only_while_there_are_aircraft(tmp_path):
     for _ in range(7):
         runner._publish_now()
     assert sent == ["frame2", "frame3", "frame0", "frame1"]
+
+
+# ---------------------------------------------------------------- T5.4c mode + connecting grace
+
+@pytest.mark.parametrize("old,mode", [({"enabled": True}, "live"), ({"enabled": False}, "off"),
+                                       ({}, "live")])
+def test_settings_migration_enabled_to_mode(tmp_path, old, mode):
+    p = tmp_path / "old.json"
+    p.write_text(json.dumps({"version": 1, "adsb": {"url": "wss://h/x", "range_limit_km": 50,
+                                                    **old}}))
+    st = SettingsStore(p, MemorySecretStore(), MemorySecretStore(), MemorySecretStore())
+    a = st.current.adsb
+    assert (a.mode, a.url, a.range_limit_km) == (mode, "wss://h/x", 50)
+    assert "enabled" not in st.public()["adsb"] and st.public()["adsb"]["mode"] == mode
+
+
+@pytest.mark.parametrize("mode", ["off", "live", "sim"])
+def test_put_accepts_each_mode_and_rejects_a_bad_one(tmp_path, mode):
+    c, _, _ = make_app(tmp_path, adsb_loader=lambda: (None, "ADS-B module not installed"))
+    with c:
+        r = c.put("/api/mount/settings", headers=AUTH, json=body(mode=mode))
+        assert r.status_code == 200 and r.json()["adsb"]["mode"] == mode
+        assert c.get("/api/mount/settings", headers=AUTH).json()["adsb"]["mode"] == mode
+        bad = c.put("/api/mount/settings", headers=AUTH, json=body(mode="loud"))
+        assert bad.status_code == 422
+        assert c.get("/api/mount/settings", headers=AUTH).json()["adsb"]["mode"] == mode
+
+
+def test_runner_follows_the_mode_and_the_dev_override(tmp_path):
+    async def go():
+        out = {}
+        hub = Hub()
+        async with fake_adsb.FakeFeed(sim_rows()) as feed:
+            r = AdsbRunner(make_store(tmp_path, mode="off"), hub, simulated=False,
+                           client_factory=fake_adsb.factory(), feed_url=feed.url,
+                           feed_backoff_s=(0.1, 0.3))
+            await r.apply()
+            out["off"] = (r.state, r.simulated, r.block()["connecting"])
+            r.store.current.adsb.mode = "live"
+            await r.apply()
+            out["live"] = (r.state, r.simulated, type(r._source).__name__)
+            r.store.current.adsb.mode = "sim"  # a mode change at runtime = a fresh source
+            await r.apply()
+            ok = await until(lambda: r.state == "simulated")
+            out["sim"] = (ok, r.simulated, r.block()["simulated"], type(r._source).__name__)
+            r.store.current.adsb.mode = "off"
+            await r.apply()
+            out["off2"] = (r.state, r.simulated, r._source)
+            # the dev override forces sim whatever the Settings say
+            f = AdsbRunner(make_store(tmp_path, mode="off"), hub, simulated=True,
+                           feed_url=feed.url, feed_backoff_s=(0.1, 0.3))
+            await f.apply()
+            ok = await until(lambda: f.state == "simulated")
+            out["forced"] = (ok, f.simulated)
+            await f.stop()
+            await r.stop()
+        n = AdsbRunner(make_store(tmp_path, token=None), hub, simulated=False)
+        await n.apply()
+        out["nocfg"] = n.state
+        return out
+
+    o = asyncio.run(go())
+    assert o["off"] == ("disabled", False, False)
+    assert o["live"] == ("connecting", False, "LiveSource")
+    assert o["sim"] == (True, True, True, "SimulatedSource")
+    assert o["off2"] == ("disabled", False, None)
+    assert o["forced"] == (True, True)
+    assert o["nocfg"] == "not_configured"
+
+
+def test_connecting_grace(tmp_path):
+    async def go():
+        now = [1000.0]
+        out = {}
+        hub = Hub()
+
+        async def unreachable(c):
+            c.status("unreachable", "boom")
+
+        r = AdsbRunner(make_store(tmp_path), hub, simulated=False,
+                       client_factory=fake_adsb.factory(unreachable), clock=lambda: now[0])
+        await r.apply()
+        await until(lambda: r.state == "unreachable")
+        b = r.block()
+        out["early"] = (b["connecting"], b["detail"])
+        now[0] += CONNECT_GRACE_S + 1
+        b = r.block()
+        out["late"] = (b["connecting"], b["detail"])
+        await r.stop()
+
+        async def auth(c):
+            c.status("auth_failed")
+
+        r = AdsbRunner(make_store(tmp_path), hub, simulated=False,
+                       client_factory=fake_adsb.factory(auth), clock=lambda: now[0])
+        await r.apply()
+        await until(lambda: r.state == "auth_failed")
+        out["fatal"] = r.block()["connecting"]
+        await r.stop()
+
+        async def up_then_down(c):
+            c.status("connected")
+            await asyncio.sleep(0.2)
+            c.status("unreachable")
+
+        now[0] = 5000.0
+        r = AdsbRunner(make_store(tmp_path), hub, simulated=False,
+                       client_factory=fake_adsb.factory(up_then_down), clock=lambda: now[0])
+        await r.apply()
+        await until(lambda: r.state == "connected")
+        await until(lambda: r.state == "unreachable")
+        out["dropped"] = r.block()["connecting"]
+        await r.stop()
+        # off / module missing: never
+        r = AdsbRunner(make_store(tmp_path, mode="off"), hub, simulated=False)
+        await r.apply()
+        out["off"] = r.block()["connecting"]
+        # a fresh apply restarts the grace
+        now[0] = 9000.0
+        s2 = make_store(tmp_path)
+        r = AdsbRunner(s2, hub, simulated=False,
+                       client_factory=fake_adsb.factory(unreachable), clock=lambda: now[0])
+        await r.apply()
+        await until(lambda: r.state == "unreachable")
+        now[0] += 31
+        out["expired"] = r.block()["connecting"]
+        await r.apply()
+        await until(lambda: r.state == "unreachable")
+        out["restarted"] = r.block()["connecting"]
+        await r.stop()
+        return out
+
+    o = asyncio.run(go())
+    assert o["early"] == (True, "Connecting to the ADS-B platform")
+    assert o["late"] == (False, "ADS-B platform unreachable: boom")
+    assert o["fatal"] is False and o["dropped"] is False and o["off"] is False
+    assert o["expired"] is False and o["restarted"] is True
+
+
+def test_connecting_grace_sim_text(tmp_path):
+    async def go():
+        now = [1.0]
+        r = AdsbRunner(make_store(tmp_path, mode="sim"), Hub(), simulated=False,
+                       feed_url="http://127.0.0.1:18759", feed_backoff_s=(0.1, 0.2),
+                       clock=lambda: now[0])
+        await r.apply()  # nothing listens on 18759: retrying
+        await until(lambda: r.state in ("unreachable", "connecting"))
+        b = r.block()
+        now[0] += CONNECT_GRACE_S + 1
+        late = r.block()
+        await r.stop()
+        return b, late
+
+    b, late = asyncio.run(go())
+    assert b["connecting"] is True and b["simulated"] is True
+    assert b["detail"] == "Connecting to the simulated feed (adsb_interpreter 8500)"
+    assert late["connecting"] is False

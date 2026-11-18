@@ -132,7 +132,7 @@ describe('Sky Viewer chip', () => {
   })
 
   it('the strip is shown for the Sun chip alone and wraps (flex-wrap) so chips never overlap', () => {
-    expect(strip.slice(0, 120)).toContain('simBadge || feedDown.show || sunMissing.show')
+    expect(strip.slice(0, 120)).toContain('simBadge || feedDown.show || connecting.show || sunMissing.show')
     expect(src).toMatch(/\.sky-chips \{[^}]*display: flex; flex-wrap: wrap;/)
   })
 })

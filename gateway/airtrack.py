@@ -5,7 +5,7 @@ every 1 s without stops or jumps). Two parts:
 
 * `AirChecker` (the verdict, shared by POST /api/mount/check and the real command through
   `ControlService.air_verdict`): the aircraft rules in order, the straight-line overflight
-  prediction (D3 zenith rule), and the rendezvous plan.
+  prediction (the near-zenith note), and the rendezvous plan.
 * `AirTrackExecutor` (one per gateway, `ControlService.airx`): the rendezvous goto, then every 1 s
   a new path from the runner's aircraft record (`adsb_core.predict.path`, from now - 0.5 s to
   now + 10 s, 0.5 s points, look angles from PWI4's site, refracted like PWI4, D1 / D2),
@@ -23,9 +23,9 @@ Phases (`AirTrackInfo.phase`):
 
 The wrap window is set ONCE, before the rendezvous goto, and never moved (P9 / P23); a path point
 outside it is a cut. A path is cut before the first point below Lim EL, within 16 deg of the Sun,
-outside the window, beyond the range limit or needing more than RATE_FRACTION of axis 0's vmax; the
-track then ends 1 s after its last point, with that reason. The loop never relies on the path hold:
-it stops the mount itself, also when it crashes (`_abort`).
+outside the window or beyond the range limit (T5.6e: a near-zenith swing is no cut, PWI4 follows
+as fast as it can); the track then ends 1 s after its last point, with that reason. The loop
+never relies on the path hold: it stops the mount itself, also when it crashes (`_abort`).
 
 Timers use `ControlService.air_clock` (Unix seconds) and `air_sleep` (test seams).
 """
@@ -64,9 +64,13 @@ if TYPE_CHECKING:
 AIRCRAFT_REFRACT = True  # D2: the path is sent refracted (PWI4 works in observed alt/az)
 
 # the check (Q44 / Q46)
-MAX_FIX_AGE_S = 3.0  # a fix older than this is refused ("ADS-B position too old")
+# T5.6d (user 11-18, amends Q44): the REST records feed delivers fixes 4-7 s old, so a start is
+# allowed on a fix up to MAX_FIX_AGE_VELOCITY_S old while the reported velocity projects it (the
+# predictor is `velocity`); on the Kalman fallback the old MAX_FIX_AGE_S applies.
+MAX_FIX_AGE_S = 3.0  # Kalman predictor: a fix older than this is refused ("ADS-B position too old")
+MAX_FIX_AGE_VELOCITY_S = 8.0  # velocity predictor: the same refusal beyond this
 CROSS_WINDOW_S = 60.0  # below Lim EL now: it may cross within this
-OVERFLIGHT_S = 180.0  # the straight-line overflight prediction for the zenith rule
+OVERFLIGHT_S = 180.0  # the straight-line overflight prediction (near-zenith note, path window)
 OVERFLIGHT_STEP_S = 1.0
 RDV_MARGIN_S = 3.0
 RDV_ITERATIONS = 3
@@ -80,7 +84,7 @@ UPDATE_S = 1.0  # a new path every second (P23: not faster)
 HORIZON_S = 10.0
 STEP_S = 0.5
 LEAD_BACK_S = 0.5  # the first point is never in the future
-LOST_AFTER_S = 10.0  # Q60: the last fix older than this ends the track
+LOST_AFTER_S = 15.0  # Q60 (11-18: 10 -> 15 for the REST feed): a fix older than this ends it
 KALMAN_MAX_S = 5.0  # Q60: on the Kalman fallback this long ends the track
 END_DELAY_S = 1.0  # settle after the last path point before the stop
 MONITOR_SETTLE_S = 3.0  # the monitor's route plan outlives the path by this
@@ -88,6 +92,7 @@ ARRIVE_TOL_DEG = 0.3
 ARRIVE_POLL_S = 0.2
 REPLAN_GOTO_DEG = 0.5
 ENDED_TTL_S = 30.0
+CORRIDOR_HISTORY_S = 10.0  # T5.6e: the monitor corridor also holds the last uploads this long
 
 R_NOT_AVAILABLE = "ADS-B not available"
 R_NOT_IN_VIEW = "Aircraft not in view"
@@ -95,16 +100,14 @@ R_STALE_FIX = "ADS-B position too old"
 R_OUT_OF_RANGE = "Out of range"
 R_BELOW = "Below Lim EL"
 R_SUN_NOW = "Within 15° of the Sun"
-R_ZENITH = "Overflight too close to the zenith"
 R_NO_RDV = "Cannot reach the aircraft in time"
 R_WRAP_FIT = "Track does not fit the wrap window"
-R_ZENITH_NOTE = "Near-zenith overflight: tracking lags near the peak"
+R_ZENITH_NOTE = "Passes near the zenith: the mount may not keep up near the peak"
 # end reasons (path cuts and feed conditions)
 R_END_BELOW = "Aircraft below Lim EL"
 R_END_SUN = "Sun approaching"
 R_END_WRAP = "Track left the wrap window"
 R_END_RANGE = "Out of range"
-R_END_ZENITH = "Overflight too close to the zenith"
 R_DATA_LOST = "ADS-B data lost"
 R_PREDICTION = "ADS-B prediction unreliable"
 R_LOST = "Aircraft lost"
@@ -117,7 +120,6 @@ CODE_BY_REASON = {
     R_OUT_OF_RANGE: "out_of_range",
     R_BELOW: "below_limit",
     R_SUN_NOW: "sun",
-    R_ZENITH: "zenith",
     R_NO_RDV: "no_rendezvous",
     R_WRAP_FIT: "no_rendezvous",
 }
@@ -127,12 +129,11 @@ CHECK_REASON_OF_CUT = {
     R_END_SUN: R_SUN_NOW,
     R_END_WRAP: R_WRAP_FIT,
     R_END_RANGE: R_OUT_OF_RANGE,
-    R_END_ZENITH: R_ZENITH,
     R_PREDICTION: R_NOT_IN_VIEW,
     R_LOST: R_NOT_IN_VIEW,
 }
 # cuts that end the track as "done" (the path ran out); the rest are stops
-PATH_ENDS = frozenset({R_END_BELOW, R_END_SUN, R_END_WRAP, R_END_RANGE, R_END_ZENITH})
+PATH_ENDS = frozenset({R_END_BELOW, R_END_SUN, R_END_WRAP, R_END_RANGE})
 
 
 def _jd(t_unix: float) -> float:
@@ -203,12 +204,11 @@ class AirPath:
 def build_path(ctx: AirCtx, ac: Any, t0: float, t1: float, wrap_min: float) -> AirPath:
     """The predicted path from t0 to t1 as PWI4 alt/az points, cut before the first violation
     (below Lim EL, within R_DETOUR_DEG of the Sun, outside the wrap window or the mechanical
-    range, beyond the range limit, or a required axis-0 rate above RATE_FRACTION * vmax)."""
+    range, or beyond the range limit). No cut on the axis-0 rate (T5.6e)."""
     preds = ctx.core.predict.path(ac, t0, max(t1, t0), STEP_S)
     if not preds:
         return AirPath([], R_PREDICTION)
     lo, hi = wrap_min + ROUTE_WRAP_MARGIN_DEG, wrap_min + ROUTE_WRAP_FIT_DEG + 1.0
-    max_rate = dsun.RATE_FRACTION * ctx.vmax0
     pts: list[AirPoint] = []
     for t, p in preds:
         lk = look(ctx, p)
@@ -229,8 +229,6 @@ def build_path(ctx: AirCtx, ac: Any, t0: float, t1: float, wrap_min: float) -> A
             d_ax0 = abs(ax0 - pts[-1].axis0)
             if d_ax0 > 180.0:  # the azimuth ran across the window edge
                 reason = R_END_WRAP
-            elif d_ax0 / (t - pts[-1].t) > max_rate:
-                reason = R_END_ZENITH
         if reason is not None:
             return AirPath(pts, reason)
         pts.append(AirPoint(t, az, alt, ax0))
@@ -335,12 +333,14 @@ class AirChecker:
             if d > SITE_NOTE_M:
                 notes.append(f"Settings location differs from PWI4's site by {round(d)} m")
 
-        pos = look(ctx, ctx.core.predict.position_at(ac, now))
+        pred = ctx.core.predict.position_at(ac, now)
+        pos = look(ctx, pred)
         if pos is None:
             return refuse(R_NOT_IN_VIEW)
         alt, az, rng = pos
         target = (alt, az)
-        if now - ac.fix_t > MAX_FIX_AGE_S:
+        max_age = MAX_FIX_AGE_VELOCITY_S if pred.method == "velocity" else MAX_FIX_AGE_S
+        if now - ac.fix_t > max_age:
             return refuse(R_STALE_FIX, target)
         if rng > ctx.range_m:
             return refuse(R_OUT_OF_RANGE, target)
@@ -359,9 +359,9 @@ class AirChecker:
         rate, peak = self._overflight(ctx, line, now)
         if peak is not None:
             info["peak_el"], info["t_peak"] = round(peak[1], 2), round(peak[0], 1)
-        if rate > dsun.RATE_FRACTION * ctx.vmax0:
-            return refuse(R_ZENITH, target)
-        if peak is not None and peak[1] >= ZENITH_NOTE_ALT_DEG:
+        if rate > dsun.RATE_FRACTION * ctx.vmax0 or (
+            peak is not None and peak[1] >= ZENITH_NOTE_ALT_DEG
+        ):  # T5.6e: a warning, not a refusal
             notes.append(R_ZENITH_NOTE)
 
         res = self._rendezvous(ctx, ac, line, mount, now, t_cross)
@@ -487,6 +487,7 @@ class _Air:
         self.cut: tuple[float, str] | None = None  # (time of the last kept point, reason)
         self.mount: TrackMount | None = None
         self.updates = 0
+        self.corridor_hist: list[tuple[float, float, float]] = []  # (t, axis0, alt) of past uploads
 
 
 class AirTrackExecutor:
@@ -840,7 +841,11 @@ class AirTrackExecutor:
             return False
         a.cut = (pts[-1].t, path.reason) if path.reason is not None else None
         last = pts[-1]
-        corridor = [(p.axis0, p.alt) for p in pts]
+        # T5.6e: the corridor also holds the last CORRIDOR_HISTORY_S of earlier uploads, so a mount
+        # lagging along the path stays inside the sky corridor (a mount off the path still trips it)
+        hist = [h for h in a.corridor_hist if now - CORRIDOR_HISTORY_S <= h[0] < pts[0].t]
+        corridor = [(h[1], h[2]) for h in hist] + [(p.axis0, p.alt) for p in pts]
+        a.corridor_hist = hist + [(p.t, p.axis0, p.alt) for p in pts]
         total = max(0.0, last.t - now) + END_DELAY_S + MONITOR_SETTLE_S
         if not a.started:
             svc.motion_cleared()

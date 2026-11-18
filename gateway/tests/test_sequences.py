@@ -953,9 +953,18 @@ def test_check_home_uses_settings_home_pose(tmp_path):
     assert eng.check_home(st_at()).reason is None
 
 
+def test_check_home_allowed_from_an_unreferenced_low_reading(tmp_path):
+    """Power-on (user 11-18): before the first home the altitude encoder may read below Lim EL
+    (or below the horizon); HOME stays available unless the Sun blocks it."""
+    eng = make_engine(tmp_path, (-60.0, 0.0))
+    for alt in (5.0, -10.0):
+        assert eng.check_home(st_at(alt=alt)).reason is None
+
+
 def test_check_home_other_refusals(tmp_path):
+    # a home pose below Lim EL is no refusal any more (user 11-18: HOME is blocked by the Sun only)
     eng = make_engine(tmp_path, (-60.0, 0.0), {"home_alt_deg": 10.0})
-    assert "below the station limit" in eng.check_home(st_at()).reason
+    assert eng.check_home(st_at()).reason is None
     eng = make_engine(tmp_path, (-60.0, 0.0))
     eng.store.current.location.lat_deg = 40.0  # site differs from PWI4's
     assert eng.check_home(st_at()).reason == "Station location differs from PWI4's site"
@@ -1022,8 +1031,17 @@ def test_homing_watch_does_not_use_predictive_or_corridor_rules(tmp_path):
     # fast descent 45 -> 20 within the limits: the predictive look-ahead would have stopped it
     ds = [feed(120, 45 - 5 * i) for i in range(6)]
     assert all(d is None for d in ds)
-    # but actually below Lim EL: stop
-    assert feed(120, 14.0) is not None
+    # below Lim EL too (user 11-18: an unreferenced encoder before the first home): no stop
+    assert feed(120, 14.0) is None
+    assert feed(120, -20.0) is None
+
+
+def test_homing_watch_ignores_a_bogus_start_below_lim_el(tmp_path):
+    """Power-on: the unhomed altitude encoder reads below Lim EL and jumps while the axis seeks
+    its sensor: HOME keeps going; only the Sun stops it (user 11-18)."""
+    mon, feed = make_monitor(tmp_path, (-60.0, 0.0), None)
+    mon.homing = HomingWatch(start_alt=-5.0)
+    assert all(feed(120, a) is None for a in (-5.0, -12.0, 3.0, 40.0, 60.0))
 
 
 def test_homing_watch_cleared_by_clear_and_end(tmp_path):

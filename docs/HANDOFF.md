@@ -1,36 +1,29 @@
-# Session handoff — updated 2026-11-10 (T5.4b + T5.5 done; next T5.6b aircraft cueing)
+# Session handoff — updated 2026-11-18 (Phase 6 packaging + Phase 5b live fixes; branch `package`)
 
-Read this first, then `docs/BUILD_PLAN.md` (§7 tracker + **resume point**, §6 task specs, §8 logs/findings), then `docs/logic_sheet.txt` as needed.
+Read this first, then `docs/BUILD_PLAN.md` (§7 tracker + **resume point**, §6 task specs, §8 logs/findings — the newest logs are at the end of §8, just before "## 9. Known limitations"), then `docs/logic_sheet.txt` as needed.
 
 ## START HERE (after compaction / next session)
 
-1. **First: `git log` / `git status`, and the file mtimes vs this handoff** (a worker's lingering task once rewrote files after a handoff).
-2. **Committed:** `373fc39` (T5.2f astrometry other-setup images, T5.7 CCTV prep). **Uncommitted, verified (11-10):**
-   - **T5.4b** gateway ADS-B (`gateway/adsb.py`; Settings › ADS-B; `--simulated-adsb`), plus the supervisor fix: aircraft frames only while aircraft exist.
-   - **T5.5** web: Sky Viewer aircraft (20 px icon, sky-contrast outline), A1b card, Track Target › AIRCRAFT tab, filters, SIMULATED / feed-down chips, the tooltip flip (the user confirms the flip live).
-   - BUILD_PLAN: Phase 5b revised plan (11-10), Q59–Q62, T5.4b / T5.5 logs.
-3. **Next: T5.6b aircraft cueing** (BUILD_PLAN "Phase 5b — implementation plan (revised 2026-11-10)", T5.6b):
-   - `track_aircraft {icao}` + the check;
-   - every 1 s, `adsb_core.predict.path(ac, now − 0.5, now + 10, 0.5)` → az / el (site HAE = alt − 30 m) → new + add + apply(update_wrap=0) (P23);
-   - the wrap set once before the rendezvous goto;
-   - Lim EL / Sun 16° cut;
-   - Q60 stop (fix > 10 s, Kalman > 5 s), green-only (Q62), simulated aircraft allowed (Q61);
-   - the verdict function `aircraftTrackVerdict` in `web/app/utils/aircraft.ts` (its last branch).
-   - Test candidates: the 8500 scenario has aircraft high over the site (e.g. N688CP ≈ +47°, AIQ3141 ≈ +31° at 13.8451 / 100.5696); plus synthetic overflights (`gateway/tests/fake_adsb.py`, adsb_core's CPR encoder).
-   - Sim tests need PWI4 running in Simulator mode + the user's 8400 stopped.
-4. **ADS-B setup facts:**
-   - `adsb_core` 0.3.0 is linked into our `.venv` by `adsb_core_dev.pth` → `C:\Users\soar\Desktop\DELV\adsb_interpreter\adsb_core\src` (nothing is written there; run Python with `PYTHONDONTWRITEBYTECODE=1`).
-   - Simulated data = adsb_interpreter's `python -m feed --simulate` on 8500 (the user's; read only) + our gateway with `--simulated-adsb`.
-   - Live: the user stores the second read token in Settings › ADS-B (Credential Manager `adsb_read_token`) when the platform is up — **nudge the user at T5.6c**.
-   - adsb_interpreter reads our settings' `location` block (keep its format).
-5. **Owed checks:** the T5.7 CCTV browser check (+ measured toggle sizes for the user); the T5.2f real other-setup images (the user).
-6. **Open user choices:** CCTV URL / username write-only (now) or visible; format the 34 lint-clean Phase 5 files.
-7. **Flaky list (T6.3):** `test_compute_pass_budget_30ms` (CPU load), `test_near_zenith_pass[88.0]` (start pose).
+1. **First: `git branch` (expect `package`), `git log` / `git status`, and the file mtimes vs this handoff** (a worker's lingering task once rewrote files after a handoff).
+2. **Committed on `package`:** up to `bbeda15` (ADS-B REST source + uninstaller fix). **Uncommitted, verified 11-18 (the user checked the pass clean):**
+   - **T5.6d** aircraft for the REST feed: `aircraft_rows` = predicted "now" rows (`predicted`, `daz_dps`, `del_dps`, ≤ 15 s), web uses server rates + 0.5 s blend (snap > 5°); airtrack start ≤ 8 s with velocity (Kalman 3 s), data lost 15 s (amends Q44 / Q60).
+   - **HOME blocked by the Sun only** (`safety.home_limit_decision`; no Lim EL floor while homing, no home-pose Lim EL refusal) — the unreferenced encoder at power-on.
+   - **T5.6e** near-zenith passes: a note "Passes near the zenith: the mount may not keep up near the peak" (no refusal, no rate cut); the monitor corridor holds the last 10 s of flown points.
+   - **T5.4c** ADS-B mode OFF / LIVE / SIM (default LIVE; `enabled` migrated; `--simulated-adsb` = dev override → `adsb.forced`), 30 s connecting grace (`adsb.connecting`, grey "ADS-B connecting…" chip).
+   - **Saves keep connections:** ADS-B reconnects only on mode / URL / token; location + range applied in place (`AdsbRunner.update_geometry`); CCTV resets only on its own block / password.
+   - Gateway non-sim 830 passed; web vitest 715, typecheck 0, lint 0 errors.
+   - **Installer rebuilt 11-18** from this tree: `dist\PW-Mount-Control-Setup-0.1.0+bbeda15-dirty.exe` (see the T6.2 logs; the user installs it on the mount PC).
+3. **Open (user, at the mount's final site): aircraft tracks look 12–15° EAST** (BUILD_PLAN "HOME blocked by the Sun only" section → the 11-18 diagnosis bullet). Ruled out: PWI4 site vs Settings (43 m). To check: satellite / star centred? offset always east or along the flight direction? was the mount at its configured coordinates (≈1° per 200 m at 10 km)? Offered and NOT built: a per-second aircraft tracking log (prediction / command / actual), a timing-offset setting if timing is confirmed.
+4. **Packaging facts (T6.2, all done):** `python tools/package/build.py [--installer|--lock|--clean]` → `dist/pw-mount-control-<ver>/` + zip + `PW-Mount-Control-Setup-<ver>.exe` (Inno Setup 7.1.1 at `%LOCALAPPDATA%\Programs\Inno Setup 7\`; AppId `{310D671C-09D3-4893-8539-DEDC985CEDFA}` — never change). Embeddable Python 3.12.10 (pinned SHA-256), `requirements-lock.txt` (58), adsb_core copied from adsb_interpreter (needs **0.4.x**). Launcher `launcher/` (pywebview 6.2.1, `Local\PWMountControl` mutex, graceful CTRL_BREAK stop → the gateway's G4 mount stop). Gateway serves the web build + proxies `/api/*` to analysis (`gateway/webserve.py`). DSN from Credential Manager (`python -m analysis.set_dsn`, the installer page). Only the Setup.exe (or the zip) goes to another machine; PWI4 / mediamtx.exe / adsb_interpreter's feed are separate.
+5. **ADS-B facts:** adsb_core **0.4.0** (`.pth` link in `.venv` → `..\adsb_interpreter\adsb_core\src`, read only; run Python with `PYTHONDONTWRITEBYTECODE=1`). Live source = `adsb_core.records.RecordsPoller` (REST `records?kind=decoded` at 1 Hz) because the platform's full `/api/v1/ws` is administrator-only since 9 Nov (1008 for read tokens). Fixes arrive 4–7 s old in batches. Noted for adsb_interpreter (D): positions from `/api/v1/ws/flights` + REST for velocity / callsign. Offered, not built: Settings "Live source: Automatic" (WebSocket first, REST on 1008). The user's feed delay p50 / p95 still not reported.
+6. **Owed checks (user):** a power-on HOME on the real L-350; a real near-zenith overflight; the installed app's live ADS-B; the T5.7 CCTV toggle look (the camera works via MediaMTX v1.21.3, URL `http://127.0.0.1:8888/mount/index.m3u8?cookieCheck=1`).
+7. **Remaining plan:** T6.1 security pass (rest of it), T6.3 full regression (sim suite + flaky list: `test_compute_pass_budget_30ms`, `test_near_zenith_pass[88.0]`, `test_homed.py::test_connect_on_an_already_connected_mount_ends_homed`, airtrack / jog timing tests under load) + real-hardware acceptance.
 8. **Environment:**
-   - `PWI4.cfg` baseline `54bd3e19…` (site 13.8451 / 100.5696).
-   - Throwaway ports only: Nuxt 13270–13272, analysis 18710/18711, gateway 18733/18734, fake camera 18740–18749, fake ADS-B 18750–18759.
-   - The user's servers: 3200 / 8400 / 8410 (+ adsb_interpreter 3300 / 8500 / 8510) — never touched; browser / sim checks need 3200 / 8400 / 8410 stopped.
-   - No `.py` files in the repo `scratchpad/`. Workers must run every gate to completion and leave no background process.
+   - `PWI4.cfg` baseline `54bd3e19…` (sim site 13.8451 / 100.5696).
+   - Throwaway ports only: Nuxt 13270–13272, analysis 18710/18711, gateway 18733/18734, fake camera 18740–18749, fake ADS-B 18750–18759, launcher marker 18761–18769.
+   - The user's services: 3200 / 8400 / 8410 (+ adsb_interpreter 3300 / 8500 / 8510, MediaMTX 8888) — never touched; browser / sim / launcher checks need 3200 / 8400 / 8410 stopped (ask).
+   - Secrets: never read `.env` / DSNs / tokens; the repo's `tools/cctv_relay/mediamtx.yml` holds the camera login (user accepted; the build writes a placeholder template).
+   - No `.py` files in the repo `scratchpad/`. Workers run every gate to completion and leave no background process.
 9. **Read only:** ssa-toolkit, sip-aero-python, adsb_interpreter.
 
 ## Where we are

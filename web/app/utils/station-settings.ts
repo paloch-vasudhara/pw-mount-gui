@@ -1,5 +1,5 @@
 // Station Settings (T1.2): types, form validation and payload building (pure, unit-tested).
-import type { AdsbInfo } from '@/utils/adsb'
+import type { AdsbInfo, AdsbMode } from '@/utils/adsb'
 import { ADSB_DEFAULT_RANGE_KM, ADSB_DEFAULT_URL, adsbTokenError, adsbUrlError } from '@/utils/adsb'
 import type { AltUnit } from '@/utils/altitude'
 
@@ -18,12 +18,15 @@ export interface StationSettingsDto {
 }
 
 export interface AdsbSettingsDto {
-  enabled: boolean
+  /** T5.4c: OFF | LIVE | SIM (replaces the old Enable switch). */
+  mode: AdsbMode
   url: string
   range_limit_km: number
   token_set: boolean
-  /** The gateway runs on adsb_interpreter's simulated feed (--simulated-adsb): the live fields are inactive. */
+  /** The runner is on the simulated feed (mode SIM, or the dev override). */
   simulated?: boolean
+  /** The gateway was launched with --simulated-adsb (dev override): the mode is fixed to SIM. */
+  forced?: boolean
   status?: AdsbInfo
 }
 
@@ -82,7 +85,7 @@ export interface SettingsForm {
   clearCctvUser: boolean
   clearCctvPass: boolean
   /** T5.4b ADS-B: enable, platform URL, default range limit and the write-only read token. */
-  adsbEnabled: boolean
+  adsbMode: AdsbMode
   adsbUrl: string
   adsbRangeKm: number
   /** What the user typed in the read-token box (empty = untouched). */
@@ -128,7 +131,7 @@ export function formFromDto(d: StationSettingsDto): SettingsForm {
     clearCctvUrl: false,
     clearCctvUser: false,
     clearCctvPass: false,
-    adsbEnabled: d.adsb?.enabled ?? false,
+    adsbMode: d.adsb?.mode ?? 'live',
     adsbUrl: d.adsb?.url ?? ADSB_DEFAULT_URL,
     adsbRangeKm: d.adsb?.range_limit_km ?? ADSB_DEFAULT_RANGE_KM,
     adsbToken: '',
@@ -171,7 +174,7 @@ export function validateForm(f: SettingsForm, zones: readonly string[]): FieldEr
   else if (f.cctvEnabled && f.cctvUrl.trim() === '' && (!f.cctvUrlSet || f.clearCctvUrl)) e.cctvUrl = 'Enter the camera stream URL'
   const adsbUrlErr = adsbUrlError(f.adsbUrl)
   if (adsbUrlErr) e.adsbUrl = adsbUrlErr
-  else if (f.adsbEnabled && f.adsbUrl.trim() === '') e.adsbUrl = 'Enter the ADS-B platform URL'
+  else if (f.adsbMode === 'live' && f.adsbUrl.trim() === '') e.adsbUrl = 'Enter the ADS-B platform URL'
   const adsbTokenErr = adsbTokenError(f.adsbToken)
   if (adsbTokenErr) e.adsbToken = adsbTokenErr
   return e
@@ -196,7 +199,7 @@ export function buildPayload(f: SettingsForm): Record<string, unknown> {
   else if (f.cctvUser !== '') cctv.username = f.cctvUser
   body.cctv = cctv
   // ADS-B: the read token is sent only when typed ("" = clear), else omitted = keep.
-  body.adsb = { enabled: f.adsbEnabled, url: f.adsbUrl.trim(), range_limit_km: f.adsbRangeKm }
+  body.adsb = { mode: f.adsbMode, url: f.adsbUrl.trim(), range_limit_km: f.adsbRangeKm }
   if (f.clearAdsbToken) body.adsb_token = ''
   else if (f.adsbToken !== '') body.adsb_token = f.adsbToken
   if (f.clearCctvPass) body.cctv_password = ''
@@ -255,7 +258,7 @@ export function isDirty(f: SettingsForm, baseline: SettingsForm): boolean {
     && f.mount === baseline.mount && f.ota === baseline.ota
     && f.astrometry === baseline.astrometry && f.satelliteDb === baseline.satelliteDb
     && f.cctvEnabled === baseline.cctvEnabled && f.cctvType === baseline.cctvType
-    && f.adsbEnabled === baseline.adsbEnabled && f.adsbUrl.trim() === baseline.adsbUrl.trim()
+    && f.adsbMode === baseline.adsbMode && f.adsbUrl.trim() === baseline.adsbUrl.trim()
     && f.adsbRangeKm === baseline.adsbRangeKm
   )
 }

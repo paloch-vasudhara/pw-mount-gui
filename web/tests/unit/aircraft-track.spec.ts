@@ -47,9 +47,9 @@ describe('aircraftTrackVerdict', () => {
     expect(aircraftTrackVerdict(row(), GREEN, refused)).toEqual({ enabled: false, reason: 'Below Lim EL' })
     const ok = parseAircraftVerdict({ ok: true, reason: null, notes: [] })
     expect(aircraftTrackVerdict(row(), GREEN, ok)).toEqual({ enabled: true, reason: null })
-    const note = parseAircraftVerdict({ ok: true, reason: null, notes: ['Near-zenith overflight: tracking lags near the peak'] })
+    const note = parseAircraftVerdict({ ok: true, reason: null, notes: ['Passes near the zenith: the mount may not keep up near the peak'] })
     expect(aircraftTrackVerdict(row(), GREEN, note)).toEqual({
-      enabled: true, reason: 'Near-zenith overflight: tracking lags near the peak',
+      enabled: true, reason: 'Passes near the zenith: the mount may not keep up near the peak',
     })
     const bad = parseAircraftVerdict('garbage')
     expect(aircraftTrackVerdict(row(), GREEN, bad)).toEqual({ enabled: false, reason: 'Gateway not responding' })
@@ -63,8 +63,8 @@ describe('airTrackCardState', () => {
     expect(airTrackCardState(run({ phase: 'slewing' }), 'ABC123')).toEqual({ isTracked: true, line: 'Slewing to rendezvous' })
     expect(airTrackCardState(run({ phase: 'waiting' }), 'ABC123')).toEqual({ isTracked: true, line: 'Waiting for the aircraft' })
     expect(airTrackCardState(run({ phase: 'tracking' }), 'ABC123')).toEqual({ isTracked: true, line: 'Tracking' })
-    expect(airTrackCardState(run({ notes: ['Near-zenith overflight: tracking lags near the peak'] }), 'ABC123').line)
-      .toBe('Tracking · Near-zenith overflight: tracking lags near the peak')
+    expect(airTrackCardState(run({ notes: ['Passes near the zenith: the mount may not keep up near the peak'] }), 'ABC123').line)
+      .toBe('Tracking · Passes near the zenith: the mount may not keep up near the peak')
   })
 
   it('another aircraft, no track, no selection: nothing to show', () => {
@@ -162,12 +162,21 @@ describe('A1b card: the polled check', () => {
   })
 
   it('an allowed track with a note shows the note on the reason line', async () => {
-    api.post.mockImplementation(async () => ({ ok: true, reason: null, notes: ['Near-zenith overflight: tracking lags near the peak'] }))
+    api.post.mockImplementation(async () => ({ ok: true, reason: null, notes: ['Passes near the zenith: the mount may not keep up near the peak'] }))
     setup(GREEN, [row()])
     w = mount(TrackCard, { attachTo: document.body })
     await flushPromises()
     expect((q('[data-testid="track-aircraft"]') as HTMLButtonElement).disabled).toBe(false)
-    expect(text('aircraft-reason')).toBe('Near-zenith overflight: tracking lags near the peak')
+    expect(text('aircraft-reason')).toBe('Passes near the zenith: the mount may not keep up near the peak')
+    expect(q('[data-testid="aircraft-reason"]')!.classList.contains('track-note')).toBe(true) // T5.6e: amber warning
+  })
+
+  it('a refusal reason is not styled as a warning', async () => {
+    api.post.mockImplementation(async () => ({ ok: false, reason: 'Below Lim EL', code: 'below_limit' }))
+    setup(GREEN, [row()])
+    w = mount(TrackCard, { attachTo: document.body })
+    await flushPromises()
+    expect(q('[data-testid="aircraft-reason"]')!.classList.contains('track-note')).toBe(false)
   })
 })
 
@@ -242,6 +251,15 @@ describe('Track Target > AIRCRAFT tab', () => {
     await flushPromises()
   }
 
+  it('an allowed track with a near-zenith note shows the note under the button, as a warning', async () => {
+    api.post.mockImplementation(async () => ({ ok: true, reason: null, notes: ['Passes near the zenith: the mount may not keep up near the peak'] }))
+    setup(GREEN, [row()])
+    await openAircraftTab()
+    expect((q('[data-testid="tt-air-track"]') as HTMLButtonElement).disabled).toBe(false)
+    expect(text('tt-air-status')).toBe('Passes near the zenith: the mount may not keep up near the peak')
+    expect(q('[data-testid="tt-air-status"]')!.classList.contains('tt-note-warn')).toBe(true)
+  })
+
   it('TRACK SELECTED TARGET sends track_aircraft {icao} and closes the dialog on an ok ack', async () => {
     setup(GREEN, [row()])
     const m = useMountStore()
@@ -251,6 +269,7 @@ describe('Track Target > AIRCRAFT tab', () => {
     expect(checkCalls()[0]![1]).toEqual({ cmd: 'track_aircraft', args: { icao: 'ABC123' } })
     expect(go.disabled).toBe(false)
     expect(text('tt-air-status')).toBe('Ready')
+    expect(q('[data-testid="tt-air-status"]')!.classList.contains('tt-note-warn')).toBe(false)
     go.click()
     await flushPromises()
     expect(m.sendCommand).toHaveBeenCalledWith('track_aircraft', { icao: 'ABC123' })

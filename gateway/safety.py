@@ -322,9 +322,32 @@ def actual_limit_decision(
     return None
 
 
+def home_limit_decision(
+    alt: float,
+    az: float,
+    sun: tuple[float, float] | None,
+    start_sun_sep: float | None,
+) -> tuple[str, dict[str, float]] | None:
+    """HOME's watch (user 11-18): the Sun is the ONLY stop. No altitude floor: before the first
+    home the altitude encoder is unreferenced (a reading below Lim EL, or one that jumps while the
+    axis seeks its home sensor, must not cancel the home). Sun: actual separation <= 15 deg, or
+    deeper than at the start when it started inside."""
+    if sun is None:
+        return None
+    sep = sun_sep(az, alt, sun)
+    limit = (
+        KEEPOUT_DEG
+        if start_sun_sep is None or start_sun_sep > KEEPOUT_DEG
+        else start_sun_sep - 0.05
+    )
+    if sep <= limit:
+        return R_SUN, {"sun_sep": sep}
+    return None
+
+
 @dataclass
 class HomingWatch:
-    """While HOME runs the real path is unknown (P12): only the ACTUAL limits are watched."""
+    """While HOME runs the real path is unknown (P12): only the Sun is watched (11-18)."""
 
     start_alt: float
     start_sun_sep: float | None = None  # None: Sun checks do not apply (shortcut / no Sun)
@@ -559,8 +582,9 @@ class SafetyEngine:
                 return HomeVerdict(R_SITE)
         lim = self.lim_el()
         h_alt, h_az = self.home_pose()
-        if h_alt < lim:
-            return HomeVerdict(f"Home elevation {h_alt:g}° is below the station limit ({lim:g}°)")
+        # User 11-18: HOME is blocked by the Sun only. No Lim EL refusal (neither the home pose nor
+        # the start pose): before the first home after power-on the altitude encoder is not
+        # referenced, so its reading (often below Lim EL) says nothing about the real pose.
         sun = self.sun_altaz(site)
         use_sun = sun is not None and not sun_shortcut(sun[0], lim, m.altitude_degs)
         if use_sun and sun_sep(h_az, h_alt, sun) <= KEEPOUT_DEG:
@@ -1075,9 +1099,9 @@ class SafetyMonitor:
         if sun is not None and sun_shortcut(sun[0], lim, m.altitude_degs):
             sun = None
         watch = self.homing
-        if watch is not None:  # HOME: actual limits only, no corridor / no extrapolation
-            return actual_limit_decision(
-                m.altitude_degs, m.azimuth_degs, lim, sun, watch.start_alt, watch.start_sun_sep
+        if watch is not None:  # HOME: the actual Sun separation only (no Lim EL, no prediction)
+            return home_limit_decision(
+                m.altitude_degs, m.azimuth_degs, sun, watch.start_sun_sep
             )
         plan = self.plan
         if plan is not None:

@@ -16,6 +16,14 @@ The pipeline itself (platform client, CPR, times, heights, prediction) is the si
   callbacks; ingesting yields to the loop every few hundred events);
 - the 1 Hz `aircraft` message on the hub's separate slot, and the `adsb` block for the status.
 
+T5.4c MODE (Settings `adsb.mode`, read at every `apply()` = launch and every Settings save):
+`off` -> state `disabled`; `live` -> the platform source (URL + token set, else `not_configured`);
+`sim` -> the simulated feed. DEV OVERRIDE: `--simulated-adsb` / PW_ADSB_SIMULATE=1 forces `sim`
+whatever the Settings say (tests, the sim harness). CONNECTING GRACE: for CONNECT_GRACE_S after an
+`apply()` in live / sim, while the source has not been green yet, the retrying states
+(`connecting`, `unreachable`) are reported as `connecting: true` ("Connecting to ..."); fatal
+states show at once, and a drop after having been green shows the real state.
+
 The read token comes from the secret store (`adsb_read_token`) only; it is handed to the platform
 client and never logged, never put in a state detail, never sent to the web (J2).
 """
@@ -53,10 +61,13 @@ SNAPSHOT_QUEUE_MAX = 4  # simulated feed snapshots waiting to be adapted
 DRAIN_BATCH = 200  # events ingested before yielding to the loop
 STALE_AFTER_S = 10.0  # position older: faded (Q42)
 HIDE_AFTER_S = 60.0  # position older: not shown (Q42)
+PREDICT_MAX_S = 15.0  # a fix up to this old is shown at its predicted "now" position (T5.6d)
 FEED_HELLO_TIMEOUT_S = 10.0
 
 LIVE_GREEN = frozenset({"connected", "stale"})
 SIMULATED_GREEN = frozenset({"simulated"})
+CONNECT_GRACE_S = 30.0  # after a (re)start the retrying states read "connecting", not "down"
+GRACE_STATES = frozenset({"connecting", "unreachable"})  # the retrying (non-fatal) states
 
 DETAIL_TEXT = {
     "disabled": "ADS-B is switched off in Settings",
@@ -84,6 +95,7 @@ def is_green(state: str, simulated: bool) -> bool:
 
 
 def simulated_from_env() -> bool:
+    """The dev override (`--simulated-adsb` / PW_ADSB_SIMULATE=1): forces mode `sim`."""
     return os.environ.get("PW_ADSB_SIMULATE") == "1"
 
 
@@ -474,7 +486,16 @@ def _r(v: float | None, nd: int) -> float | None:
 def aircraft_rows(
     core: Core, aircraft: list[Any], site: Any, range_limit_m: float, now: float
 ) -> list[dict]:
-    """The visible aircraft: within the range limit, above 0 deg, a position <= 60 s old."""
+    """The visible aircraft: within the range limit, above 0 deg, a position <= 60 s old.
+
+    T5.6d: the records feed delivers fixes 4-7 s old in batches, so a fix up to PREDICT_MAX_S old
+    is shown where the predictor puts the aircraft NOW (`predicted` true; az / el / range / lat /
+    lon and the range / horizon filters use it) with the angular rate over the next second
+    (`daz_dps` / `del_dps`, for the web's smooth motion). No prediction (no velocity, Kalman not
+    ready) or an older fix: the fix position, `predicted` false, rates null. `pos_age_s` stays the
+    FIX age."""
+    geo, look_angles = core.geometry.Geodetic, core.geometry.look_angles
+    position_at = core.predict.position_at
     out = []
     for ac in aircraft:
         if ac.fix_t is None or ac.lat is None or ac.lon is None or ac.height_m is None:
@@ -482,18 +503,29 @@ def aircraft_rows(
         age = now - ac.fix_t
         if age > HIDE_AFTER_S:
             continue
-        look = core.geometry.look_angles(
-            site, core.geometry.Geodetic(ac.lat, ac.lon, ac.height_m)
-        )
+        pred = position_at(ac, now)
+        lat, lon, h = ac.lat, ac.lon, ac.height_m
+        daz = dele = None
+        predicted = pred is not None and age <= PREDICT_MAX_S
+        if predicted:
+            lat, lon = pred.lat, pred.lon
+            h = ac.height_m if pred.height_m is None else pred.height_m
+        look = look_angles(site, geo(lat, lon, h))
         if look.el < 0.0 or look.range > range_limit_m:
             continue
-        pred = core.predict.position_at(ac, now)
+        if predicted:
+            p1 = position_at(ac, now + 1.0)
+            if p1 is not None:
+                h1 = ac.height_m if p1.height_m is None else p1.height_m
+                l1 = look_angles(site, geo(p1.lat, p1.lon, h1))
+                daz = (l1.az - look.az + 180.0) % 360.0 - 180.0
+                dele = l1.el - look.el
         out.append(
             {
                 "icao": ac.icao,
                 "callsign": ac.callsign,
-                "lat": _r(ac.lat, 5),
-                "lon": _r(ac.lon, 5),
+                "lat": _r(lat, 5),
+                "lon": _r(lon, 5),
                 "az": _r(look.az, 3),
                 "el": _r(look.el, 3),
                 "range_m": _r(look.range, 0),
@@ -505,6 +537,9 @@ def aircraft_rows(
                 "stale": age > STALE_AFTER_S,
                 "height_source": None if ac.height_source is None else str(ac.height_source),
                 "predictor": None if pred is None else pred.method,
+                "predicted": predicted,
+                "daz_dps": _r(daz, 3),
+                "del_dps": _r(dele, 3),
             }
         )
     out.sort(key=lambda r: r["icao"])
@@ -532,7 +567,11 @@ class AdsbRunner:
     ) -> None:
         self.store = store
         self.hub = hub
-        self.simulated = simulated_from_env() if simulated is None else simulated
+        # the dev override forces sim regardless of Settings; otherwise the mode decides (apply)
+        self._force_sim = simulated_from_env() if simulated is None else simulated
+        self.simulated = self._force_sim
+        self._grace_until = 0.0  # no grace until an apply() with mode live / sim
+        self._was_green = False
         self.feed_url = feed_url or feed_url_from_env()
         self._client_factory = client_factory
         self._loader = loader
@@ -576,6 +615,24 @@ class AdsbRunner:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
+    def update_geometry(self) -> None:
+        """A Settings save that did not touch the connection (mode / URL / token): apply the new
+        site (location) and range limit IN PLACE, keeping the running source and its connection
+        (user 11-18: a mount or location change must not reconnect ADS-B)."""
+        cfg = self.store.current
+        self._range_limit_km = cfg.adsb.range_limit_km
+        self._range_limit_m = cfg.adsb.range_limit_km * 1000.0
+        if self._core is not None:
+            loc = cfg.location
+            self._site = self._core.geometry.Geodetic(
+                loc.lat_deg, loc.lon_deg, loc.alt_m + SITE_HAE_OFFSET_M
+            )
+        table = getattr(self._source, "table", None)
+        if table is not None:
+            table.site = self._site
+            table.range_limit_m = self._range_limit_m
+        self._publish_now()
+
     async def apply(self) -> None:
         """(Re)start from the current Settings: a Settings save calls this."""
         async with self._lock:
@@ -585,6 +642,10 @@ class AdsbRunner:
             loc = cfg.location
             core, why = self._loader()
             self._core = core
+            self.simulated = self._force_sim or cfg.adsb.mode == "sim"
+            self._was_green = False
+            live_or_sim = cfg.adsb.mode != "off" or self._force_sim
+            self._grace_until = self._clock() + CONNECT_GRACE_S if live_or_sim else 0.0
             self._range_limit_km = cfg.adsb.range_limit_km
             self._range_limit_m = cfg.adsb.range_limit_km * 1000.0
             self._last_event_at = None
@@ -612,7 +673,7 @@ class AdsbRunner:
                     self._feed_transport,
                 )
                 self._set("connecting", "")
-            elif not cfg.adsb.enabled:
+            elif cfg.adsb.mode == "off":
                 self._set("disabled", "")
             else:
                 try:
@@ -653,6 +714,8 @@ class AdsbRunner:
         if state != self._state:
             log.info("ADS-B state: %s", state)
         self._state, self._raw_detail = state, detail
+        if is_green(state, self.simulated):
+            self._was_green = True
         if last_event_at is not None:
             self._last_event_at = last_event_at
 
@@ -664,8 +727,25 @@ class AdsbRunner:
     def green(self) -> bool:
         return self._core is not None and is_green(self._state, self.simulated)
 
+    @property
+    def forced(self) -> bool:
+        """The dev override (--simulated-adsb / PW_ADSB_SIMULATE=1) is on: mode is fixed to sim."""
+        return self._force_sim
+
+    @property
+    def connecting(self) -> bool:
+        """T5.4c grace: within CONNECT_GRACE_S of a (re)start, never green yet, still retrying.
+        Fatal states (auth_failed, tls_error, error, not_configured, module_missing) never."""
+        return (
+            self._state in GRACE_STATES
+            and not self._was_green
+            and self._clock() < self._grace_until
+        )
+
     def detail(self) -> str:
         s, raw = self._state, self._raw_detail
+        if self.connecting:
+            return (SIM_DETAIL_TEXT if self.simulated else DETAIL_TEXT)["connecting"]
         if s == "module_missing":
             return raw
         text = (SIM_DETAIL_TEXT.get(s) if self.simulated else None) or DETAIL_TEXT.get(s, s)
@@ -682,6 +762,7 @@ class AdsbRunner:
             "state": self._state,
             "green": self.green,
             "simulated": self.simulated,
+            "connecting": self.connecting,
             "detail": self.detail(),
             "delay_p50_s": _r(self._stats["p50"], 2),
             "delay_p95_s": _r(self._stats["p95"], 2),

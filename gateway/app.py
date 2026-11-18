@@ -274,6 +274,7 @@ def create_app(
         d = store.public()
         d["cctv"]["status"] = cctv.status_line()
         d["adsb"]["simulated"] = adsb.simulated
+        d["adsb"]["forced"] = adsb.forced  # the dev override fixes the mode to sim
         d["adsb"]["status"] = adsb.block()
         return d
 
@@ -315,14 +316,26 @@ def create_app(
         why = adsb_token_error(update.adsb_token or "")
         if why:
             raise HTTPException(status_code=422, detail=why)
+        before = store.current
         try:
             store.save(update, update.api_key, update.cctv_password, update.adsb_token)
         except Exception as exc:  # keyring / disk failure: never echo details (may touch a key)
             raise HTTPException(
                 status_code=503, detail=f"could not save ({type(exc).__name__})"
             ) from None
-        await adsb.apply()  # a save restarts the ADS-B runner (new URL / token / site / range)
-        await cctv.config_changed()  # new camera settings: drop the old client / streams / result
+        after = store.current
+        # user 11-18: keep the ADS-B connection (and the camera stream) through saves that do not
+        # touch them; a new site / range limit is applied in place
+        if (
+            before.adsb.mode != after.adsb.mode
+            or before.adsb.url != after.adsb.url
+            or update.adsb_token is not None
+        ):
+            await adsb.apply()  # restart: new mode / URL / token (and a fresh connecting grace)
+        else:
+            adsb.update_geometry()
+        if before.cctv != after.cctv or update.cctv_password is not None:
+            await cctv.config_changed()  # new camera settings: drop the old client / streams
         await poller.refresh_ephem(force=True)  # apply live: Sun/Moon for the new site now
         return JSONResponse(with_check(public_settings()), headers={"Cache-Control": "no-store"})
 

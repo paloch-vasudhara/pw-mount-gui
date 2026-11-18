@@ -41,7 +41,7 @@ import {
 } from '~/utils/sky-pick'
 import { formatAz, formatEl, formatRange, formatTleAge, illuminationOf, ILLUMINATION_LABEL } from '~/utils/track-format'
 import {
-  AIRCRAFT_ICON_PX, AIRCRAFT_OUTLINE_PX, AIRCRAFT_PATH, AIRCRAFT_PATH_SIZE, AIRCRAFT_PICK_RADIUS_PX, AIRCRAFT_STALE_ALPHA, aircraftIconColors, aircraftLabel, aircraftTitle, feedDownChip, formatAgeS, formatAltFt,
+  AIRCRAFT_ICON_PX, AIRCRAFT_OUTLINE_PX, AIRCRAFT_PATH, AIRCRAFT_PATH_SIZE, AIRCRAFT_PICK_RADIUS_PX, AIRCRAFT_STALE_ALPHA, aircraftIconColors, aircraftLabel, aircraftTitle, connectingChip, feedDownChip, formatAgeS, formatAltFt,
   formatRangeKm, iconRotationRad, predictAzEl, showSimulatedBadge, type TrackedAircraft,
 } from '~/utils/aircraft'
 import {
@@ -762,6 +762,7 @@ function onClick(e: MouseEvent) {
 
 const simBadge = computed(() => showSimulatedBadge(air.adsb))
 const feedDown = computed(() => feedDownChip(air.adsb))
+const connecting = computed(() => connectingChip(air.adsb))
 const sunMissing = computed(() => sunUnavailableChip(store.snapshot as { sun_known?: boolean | null } | null))
 
 const airTip = computed(() => {
@@ -1123,9 +1124,10 @@ onBeforeUnmount(() => {
     </div>
     <!-- ADS-B chips (T5.5): the top strip of the box, clear of the title chip (above the box), the clock and the
          astrometry pill (below it); they wrap onto a second line when the box is narrow, so they never overlap. -->
-    <div v-if="simBadge || feedDown.show || sunMissing.show" class="sky-chips">
+    <div v-if="simBadge || feedDown.show || connecting.show || sunMissing.show" class="sky-chips">
       <span v-if="sunMissing.show" class="sky-chip sky-chip-down" data-testid="sun-unavailable" :title="sunMissing.title">{{ sunMissing.text }}</span>
       <span v-if="feedDown.show" class="sky-chip sky-chip-down" data-testid="adsb-feed-down" :title="feedDown.title">ADS-B feed down</span>
+      <span v-if="connecting.show" class="sky-chip sky-chip-muted" data-testid="adsb-connecting" :title="connecting.title">ADS-B connecting…</span>
       <span
         v-if="simBadge" class="sky-chip sky-chip-sim" data-testid="adsb-simulated"
         title="The aircraft are simulated (adsb_interpreter feed); not real traffic"
@@ -1143,6 +1145,7 @@ onBeforeUnmount(() => {
 .sky-chips { position: absolute; z-index: 6; top: 2px; left: 2px; right: 2px; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 4px; pointer-events: none; }
 .sky-chip { pointer-events: auto; padding: 1px 8px; border: 1px solid var(--control-border); border-radius: 10px; background: rgba(11, 18, 28, 0.87); font-size: 11px; font-weight: 700; letter-spacing: 0.03em; line-height: 16px; white-space: nowrap; }
 .sky-chip-down { color: var(--danger); border-color: var(--danger); }
+.sky-chip-muted { color: var(--muted-foreground); }
 .sky-chip-sim { margin-left: auto; color: #f0b030; border-color: #f0b030; }
 .tip-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; background: #6a7a88; }
 .tip-dot.illuminated { background: #ffd24a; }

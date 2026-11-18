@@ -45,6 +45,8 @@ const airReason = computed(() => {
   if (r && r.icao === icao.value && mount.now - r.at < REFUSAL_SHOW_MS && !airState.value.isTracked) return r.text
   return airState.value.line ?? airVerdict.value.reason
 })
+// T5.6e: an allowed track's first check note (e.g. a near-zenith pass) is a warning: amber, not muted
+const airReasonIsNote = computed(() => airVerdict.value.enabled && airVerdict.value.reason !== null && airReason.value === airVerdict.value.reason)
 
 async function onTrackAircraft() {
   const i = icao.value
@@ -235,7 +237,7 @@ async function onTrack() {
         data-testid="track-aircraft" @click="onTrackAircraft"
       >{{ airState.isTracked ? 'TRACKING' : 'TRACK AIRCRAFT' }}</button>
     </span>
-    <div v-if="airReason" class="track-reason" :title="airReason" data-testid="aircraft-reason">{{ airReason }}</div>
+    <div v-if="airReason" class="track-reason" :class="{ 'track-note': airReasonIsNote }" :title="airReason" data-testid="aircraft-reason">{{ airReason }}</div>
   </div>
   <div
     v-else-if="info" class="card" :class="{ refocus: refocusable }" data-testid="track-card"
@@ -355,6 +357,7 @@ async function onTrack() {
 .track-btn.on { background: linear-gradient(var(--primary-from), var(--primary-to)); color: #fff; cursor: pointer; }
 .track-btn.active { background: linear-gradient(var(--primary-from), var(--primary-to)); color: #fff; opacity: 0.85; cursor: default; }
 .track-reason { margin-top: -0.2em; font-size: 0.85em; line-height: 1.2; color: var(--muted-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.track-reason.track-note { color: #e0a63c; }
 .strip-slot { flex: none; height: var(--strip-h); margin-top: var(--strip-gap); min-width: 0; }
 .strip {
   width: 100%; height: 100%; padding: 0 0.9em; border: 1px solid var(--panel-border); background: none; color: var(--foreground);

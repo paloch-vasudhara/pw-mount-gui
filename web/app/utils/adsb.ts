@@ -11,11 +11,22 @@ export type AdsbState =
  * `green` is the Q62 enable rule: the aircraft features are usable only when it is true;
  * otherwise `detail` says why.
  */
+/** T5.4c: the Settings mode. */
+export type AdsbMode = 'off' | 'live' | 'sim'
+export const ADSB_MODE_OPTIONS: { value: AdsbMode, label: string }[] = [
+  { value: 'off', label: 'OFF' },
+  { value: 'live', label: 'LIVE' },
+  { value: 'sim', label: 'SIM' },
+]
+export const SIM_FEED_LINE = 'Simulated aircraft from the adsb_interpreter feed (127.0.0.1:8500)'
+
 export interface AdsbInfo {
   state: AdsbState
   green: boolean
   /** The gateway was launched with --simulated-adsb: data comes from adsb_interpreter's feed. */
   simulated: boolean
+  /** T5.4c: within the 30 s grace after a (re)start, still retrying and never green yet. */
+  connecting?: boolean
   detail: string
   delay_p50_s?: number | null
   delay_p95_s?: number | null
@@ -43,6 +54,11 @@ export interface AircraftRow {
   height_source: string | null
   /** 'velocity' | 'kalman' | null (no basis to predict yet) */
   predictor: string | null
+  /** T5.6d: az / el / lat / lon are the PREDICTED "now" position (the fix is `pos_age_s` old); the rates
+   *  are the angular rate over the next second. Absent on an older gateway; null without a prediction. */
+  predicted?: boolean
+  daz_dps?: number | null
+  del_dps?: number | null
 }
 
 export interface AircraftMessageData {

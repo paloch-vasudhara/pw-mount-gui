@@ -298,7 +298,7 @@ def test_follows_the_aircraft(pwi, tmp_path, case):
 
 
 def test_feed_stop_stops_the_mount(pwi, tmp_path):
-    """The feed stops mid-track (the last row repeats): STOP within 10 s + 1.5 s of the last fix,
+    """The feed stops mid-track (the last row repeats): STOP within 15 s + 1.5 s of the last fix,
     reason "ADS-B data lost", the mount still afterwards."""
     rig = Rig(pwi, tmp_path)
 
@@ -309,7 +309,7 @@ def test_feed_stop_stops_the_mount(pwi, tmp_path):
         await start_track(rig, c, fl)
         await asyncio.sleep(6.0)
         last_fix = rig.feed.freeze()
-        await c.until(lambda: c.ended is not None, 20, "the track to end")
+        await c.until(lambda: c.ended is not None, 25, "the track to end")
         t_seen = time.monotonic()
         ended = dict(c.ended)
         await asyncio.sleep(2.0)
@@ -319,7 +319,7 @@ def test_feed_stop_stops_the_mount(pwi, tmp_path):
         c, fl, last_fix, ended, t_seen = run(go())
         RESULTS["air_feed_stop"] = {"end_after_last_fix_s": round(ended["at"] - last_fix, 2)}
         assert ended["reason"] == "ADS-B data lost"
-        assert 10.0 < ended["at"] - last_fix <= 11.5, ended["at"] - last_fix
+        assert 15.0 < ended["at"] - last_fix <= 16.5, ended["at"] - last_fix
         assert c.state == "STOPPED"
         stopped = rig.smp.stopped_at(t_seen - 1.5, tracking_counts=True)
         assert stopped is not None and stopped - t_seen <= 1.5, (stopped, t_seen)
